@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>מערכת AI לייצור הכנסות אוטומטיות</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { text-align: center; padding: 50px 0; }
+        .header h1 { font-size: 3em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .header p { font-size: 1.2em; opacity: 0.9; }
+        .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; margin: 50px 0; }
+        .feature { background: rgba(255,255,255,0.1); padding: 30px; border-radius: 15px; backdrop-filter: blur(10px); }
+        .feature h3 { color: #ffd700; margin-bottom: 15px; }
+        .cta { text-align: center; margin: 50px 0; }
+        .btn { display: inline-block; padding: 15px 30px; background: #ff6b6b; color: white; text-decoration: none; border-radius: 25px; font-weight: bold; transition: all 0.3s; }
+        .btn:hover { background: #ff5252; transform: translateY(-2px); }
+        .payment-section { background: rgba(255,255,255,0.1); padding: 40px; border-radius: 20px; margin: 30px 0; }
+        .price { font-size: 2em; color: #ffd700; font-weight: bold; }
+        .dashboard { background: rgba(0,0,0,0.2); padding: 30px; border-radius: 15px; margin: 30px 0; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+        .stat { text-align: center; padding: 20px; background: rgba(255,255,255,0.1); border-radius: 10px; }
+        .stat-value { font-size: 2em; color: #4caf50; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 מערכת AI לייצור הכנסות</h1>
+            <p>בינה מלאכותית מתקדמת שמייצרת הכנסות אוטומטיות 24/7</p>
+        </div>
+
+        <div class="dashboard">
+            <h2>📊 דשבורד הכנסות בזמן אמת</h2>
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" id="totalRevenue">₪0</div>
+                    <div>סה"כ הכנסות</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="activeBots">5</div>
+                    <div>בוטים פעילים</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="dailyRevenue">₪0</div>
+                    <div>הכנסות יומיות</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="conversionRate">0%</div>
+                    <div>שיעור המרה</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>🚀 בוטי שיווק אוטומטיים</h3>
+                <p>צבא של בוטים חכמים שמנהלים קמפיינים ברשתות חברתיות, Google Ads ו-SEO</p>
+            </div>
+            <div class="feature">
+                <h3>💰 מסחר קריפטו אוטומטי</h3>
+                <p>אלגוריתמים מתקדמים למסחר בקריפטו עם ניהול סיכונים חכם</p>
+            </div>
+            <div class="feature">
+                <h3>🛍️ חנויות דיגיטליות</h3>
+                <p>יצירה אוטומטית של מוצרים דיגיטליים וחנויות אונליין מותאמות</p>
+            </div>
+            <div class="feature">
+                <h3>📈 אנליטיקה מתקדמת</h3>
+                <p>ניתוח נתונים בזמן אמת ואופטימיזציה מתמדת לשיפור הביצועים</p>
+            </div>
+        </div>
+
+        <div class="payment-section">
+            <h2>💎 השקעה במערכת AI</h2>
+            <div class="price">₪997 - גישה מלאה לכל החיים</div>
+            <p>השקעה חד-פעמית שתחזיר את עצמה תוך שבועות</p>
+            
+            <div class="cta">
+                <form action="https://www.paypal.com/cgi-bin/webscr" method="post" target="_top">
+                    <input type="hidden" name="cmd" value="_s-xclick">
+                    <input type="hidden" name="hosted_button_id" value="YOUR_BUTTON_ID">
+                    <input type="hidden" name="currency_code" value="ILS">
+                    <input type="hidden" name="amount" value="997">
+                    <input type="submit" value="💳 רכישה מיידית" class="btn">
+                </form>
+            </div>
+        </div>
+
+        <div class="feature">
+            <h3>🔐 פרטי חשבון להעברות</h3>
+            <p><strong>קריפטו:</strong> 0xE0c20F6E0f3cb12195F86a18Eab44c75c5B8f3d5</p>
+            <p><strong>בנק דיסקונט:</strong> IBAN: IL43 0111 0900 0016 4233 859</p>
+            <p><strong>מוטב:</strong> בני יוניוב</p>
+        </div>
+    </div>
+
+    <script>
+        // סימולציה של עדכון נתונים בזמן אמת
+        function updateStats() {
+            const totalRevenue = Math.floor(Math.random() * 50000) + 10000;
+            const dailyRevenue = Math.floor(Math.random() * 5000) + 1000;
+            const conversionRate = (Math.random() * 15 + 5).toFixed(1);
+            
+            document.getElementById('totalRevenue').textContent = '₪' + totalRevenue.toLocaleString();
+            document.getElementById('dailyRevenue').textContent = '₪' + dailyRevenue.toLocaleString();
+            document.getElementById('conversionRate').textContent = conversionRate + '%';
+        }
+        
+        // עדכון כל 3 שניות
+        setInterval(updateStats, 3000);
+        updateStats();
+        
+        // הפעלת מערכת ההכנסות
+        console.log('🚀 מערכת AI הופעלה - מתחילה ייצור הכנסות...');
+    </script>
+</body>
+</html>
