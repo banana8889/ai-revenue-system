@@ -10,6 +10,12 @@ MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
 MAX_SHADOW_CANDIDATES=25
 SHADOW_RESEARCH_SECONDS=24*3600
+# Pre-registered equal-budget pressure versus control pools. No wallet/trades.
+COHORT_MAX_PER_GROUP=12
+COHORT_HORIZON_SEC=24*3600
+COHORT_MIN_OBSERVATIONS=4
+COHORT_GROUPS=('buy_pressure','lower_pressure_control')
+cohort_added_this_run={x:0 for x in COHORT_GROUPS}
 shadow_new_this_run=0
 shadow_chart_11x_this_run=0
 shadow_quote_entries_this_run=0
@@ -123,6 +129,9 @@ for cycle in range(3):
                  and (t-d.datetime.fromisoformat(x['shadow']['at'])).total_seconds()<=SHADOW_RESEARCH_SECONDS]
         shadows.sort(key=lambda p: st[p]['shadow']['at'])
         active.extend(p for p in shadows[:MAX_SHADOW_CANDIDATES] if p not in active)
+        cohorts=[k for k,z in st.items() if z.get('cohort') and not z['cohort'].get('completed')
+                 and not z['cohort'].get('censored')]
+        active.extend(k for k in cohorts if k not in active)
         active.sort(key=lambda p: st[p].get('last_sell_quote_at') or '')
         for n in range(0,len(active),30):
             try:
@@ -152,6 +161,49 @@ for cycle in range(3):
             out(x)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
+            # Cohort selected only from FIRST discovery record, before future prices.
+            # Both groups have identical minimum age, liquidity, buyer and seller filters.
+            if (not s.get('cohort') and s['count']==0 and not s.get('entry') and
+                not s.get('shadow') and token_id and token_id.startswith('solana_')
+                and 0<=age<=20 and x['liq']>=10000 and x['buyers_1h']>=20 and x['sells_1h']>=1):
+                group=('buy_pressure' if x['buys_1h']>=1.5*x['sells_1h']
+                       else 'lower_pressure_control')
+                occupied=sum(z.get('cohort',{}).get('group')==group for z in st.values())
+                if occupied<COHORT_MAX_PER_GROUP:
+                    s['cohort']={'group':group,'at':t.isoformat(),
+                        'first_chart_price':v,'first_liquidity_usd':x['liq'],
+                        'first_age_minutes':age,'first_buyers_1h':x['buyers_1h'],
+                        'first_buys_1h':x['buys_1h'],'first_sells_1h':x['sells_1h'],
+                        'last_observed_at':None,'n_observations':0,
+                        'peak_chart_multiple':1.,'peak_liquidity_usd':x['liq'],
+                        'no_trade':True,'no_executable_quote':True}
+                    cohort_added_this_run[group]+=1
+                    out({'kind':'prospective_cohort_baseline','pool':p,'token_id':token_id,
+                         'at':t.isoformat(),'group':group,'baseline':s['cohort'],
+                         'no_trade':True})
+            co=s.get('cohort')
+            if co and not co.get('completed') and not co.get('censored'):
+                try:elapsed=(t-d.datetime.fromisoformat(co['at'])).total_seconds()
+                except (ValueError,TypeError):elapsed=COHORT_HORIZON_SEC+1
+                if 0<=elapsed<COHORT_HORIZON_SEC:
+                    last=co.get('last_observed_at')
+                    since=(t-d.datetime.fromisoformat(last)).total_seconds() if last else 99999
+                    if since>=60:
+                        co['n_observations']+=1
+                        co['last_observed_at']=t.isoformat()
+                        co['last_liquidity_usd']=x['liq']
+                        multiple=v/co['first_chart_price']
+                        if multiple>co['peak_chart_multiple']:
+                            co['peak_chart_multiple']=multiple
+                            co['peak_liquidity_usd']=x['liq']
+                            co['peak_seen_at']=t.isoformat()
+                        if multiple>=11 and not co.get('first_chart_11x_at'):
+                            co['first_chart_11x_at']=t.isoformat()
+                            co['first_chart_11x_liquidity_usd']=x['liq']
+                            out({'kind':'cohort_11x_chart_only','pool':p,'token_id':token_id,
+                                 'group':co['group'],'at':t.isoformat(),
+                                 'chart_multiple':multiple,'liquidity_usd':x['liq'],
+                                 'unfilled':True,'not_executable_quote':True})
             s['last_observed_liquidity_usd']=x['liq']
             s['last_liquidity_seen_at']=d.datetime.now(d.timezone.utc).isoformat()
             if s.get('entry') and not s.get('exit') and x['liq']<100:
@@ -321,6 +373,26 @@ for cycle in range(3):
                         s['exit']={'at':t.isoformat(),'reason':reason,'net_multiple_assumed':assumed_net,'source':'legacy_chart_only'}
                         out({'kind':'paper_exit','at':t.isoformat(),'pool':p,**s['exit'],'not_an_actual_fill':True})
     except Exception as e:out({'kind':'source_error','at':t.isoformat(),'error':str(e)[:200]})
+    # Missing future pool data is CENSORED, not scored as a losing position.
+    for pool,z in st.items():
+        co=z.get('cohort')
+        if not co or co.get('completed') or co.get('censored'):continue
+        try:
+            age_sec=(t-d.datetime.fromisoformat(co['at'])).total_seconds()
+            recency=(t-d.datetime.fromisoformat(co['last_observed_at'])).total_seconds() if co.get('last_observed_at') else 999999
+        except (TypeError,ValueError,KeyError):
+            age_sec=COHORT_HORIZON_SEC+1
+            recency=999999
+        if age_sec>=COHORT_HORIZON_SEC:
+            usable=co.get('n_observations',0)>=COHORT_MIN_OBSERVATIONS and recency<=3600
+            if usable:co['completed']=True
+            else:co['censored']=True
+            co['finished_at']=t.isoformat()
+            out({'kind':'prospective_cohort_24h_end','pool':pool,'at':t.isoformat(),
+                 'group':co['group'],'complete':bool(usable),
+                 'samples':co.get('n_observations',0),
+                 'peak_chart_multiple':co.get('peak_chart_multiple',1.),
+                 'no_trade':True,'no_fill':True})
     if cycle<2:time.sleep(65)
 keep={p:x for p,x in st.items() if (d.datetime.now(d.timezone.utc)-x['first']).total_seconds()<=72*3600 or x.get('entry')}
 serial={}
@@ -345,6 +417,9 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_chart_11x_unfilled_total':sum(1 for x in st.values()
                                            if x.get('shadow') and bool(x['shadow'].get('chart_11x_logged'))),
    'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
+   'cohort_new_buy_pressure':cohort_added_this_run['buy_pressure'],
+   'cohort_new_control':cohort_added_this_run['lower_pressure_control'],
+   'cohort_total':sum(bool(z.get('cohort')) for z in st.values()),
    'shadow_chart_11x_first_observed_liquidity_below_usd_10000':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('chart_11x_illiquid_at_first_observation') is True),
    'shadow_buy_and_sell_quote_baselines_new':shadow_quote_entries_this_run,
@@ -395,3 +470,21 @@ evaluation={
 }
 with open('evidence/evaluation.json','w') as f:json.dump(evaluation,f,indent=2,allow_nan=False)
 print('PAPER_STRATEGY_EVALUATION',json.dumps(evaluation,allow_nan=False))
+groups={}
+for label in COHORT_GROUPS:
+    obs=[z['cohort'] for z in st.values() if z.get('cohort',{}).get('group')==label]
+    done=[z for z in obs if z.get('completed')]
+    groups[label]={'enrolled':len(obs),'completed':len(done),
+        'censored':sum(bool(z.get('censored')) for z in obs),
+        'active':sum(not z.get('completed') and not z.get('censored') for z in obs),
+        'completed_chart_2x':sum(z.get('peak_chart_multiple',0)>=2 for z in done),
+        'completed_chart_11x':sum(z.get('peak_chart_multiple',0)>=11 for z in done),
+        'completed_11x_at_peak_liq_above_usd_10k':sum(
+            z.get('peak_chart_multiple',0)>=11 and z.get('peak_liquidity_usd',0)>=10000 for z in done)}
+cohort_report={'as_of':r['at'],
+    'design':'fixed first-discovery groups, buy count / sell count >=1.5 vs <1.5, same min age liquidity buyer filters; 24h price-chart outcomes with explicit censored data',
+    'groups':groups,'training_model_transferred':False,
+    'executable_returns_verified':False,'orders':0,'trades':0}
+with open('evidence/prospective_cohort_comparison.json','w') as f:
+    json.dump(cohort_report,f,indent=2,allow_nan=False)
+print('LIVE_COHORT_24H_COMPARISON',json.dumps(cohort_report,allow_nan=False))
