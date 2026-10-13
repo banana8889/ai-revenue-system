@@ -12,6 +12,11 @@ MAX_SHADOW_CANDIDATES=25
 SHADOW_RESEARCH_SECONDS=24*3600
 shadow_new_this_run=0
 shadow_chart_11x_this_run=0
+shadow_quote_entries_this_run=0
+shadow_quote_marks_this_run=0
+shadow_quote_marks_available_this_run=0
+MAX_SHADOW_SELL_QUOTES_PER_RUN=5
+shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
 try:
@@ -184,6 +189,33 @@ for cycle in range(3):
                         out({'kind':'shadow_chart_11x_unfilled','at':t.isoformat(),'pool':p,'token_id':s.get('token_id'),
                              'chart_multiple':gross,'no_entry_quote':True,'no_trade':True,'not_proven_realizable':True})
                         shadow_chart_11x_this_run+=1
+                    # Only shadows with a buy+sell quote captured at initial signal can
+                    # be prospectively measured with quote-only exits. NEVER backfill.
+                    if shadow.get('entry_quote') and p not in shadow_quoted_this_run and shadow_quote_marks_this_run<MAX_SHADOW_SELL_QUOTES_PER_RUN:
+                        shadow_quoted_this_run.add(p)
+                        shadow_quote_marks_this_run+=1
+                        q=jupiter_quote(s.get('token_id','').removeprefix('solana_'),USDC,
+                                        int(shadow['entry_quote']['token_raw']))
+                        marked=d.datetime.now(d.timezone.utc).isoformat()
+                        shadow['last_exit_quote_check_at']=marked
+                        if q.get('ok'):
+                            shadow_quote_marks_available_this_run+=1
+                            multiple=q['out_amount']/5000000
+                            shadow['max_exit_quote_multiple']=max(shadow.get('max_exit_quote_multiple',0),multiple)
+                            shadow['last_exit_quote_multiple']=multiple
+                            shadow['last_exit_quote_at']=marked
+                            out({'kind':'shadow_exit_quote_only','at':marked,'pool':p,'token_id':s.get('token_id'),
+                                 'usdc_proceeds':q['out_amount']/1000000,'quote_multiple':multiple,
+                                 'no_trade':True,'no_fill':True,'no_capital_allocated':True})
+                            if multiple>=11 and not shadow.get('quote_11x_logged'):
+                                shadow['quote_11x_logged']=True
+                                out({'kind':'shadow_11x_quote_only_unfilled','at':marked,'pool':p,
+                                     'token_id':s.get('token_id'),'quote_multiple':multiple,
+                                     'no_trade':True,'no_fill':True,'gas_rent_mev_not_included':True})
+                        else:
+                            shadow['exit_quote_missing_count']=shadow.get('exit_quote_missing_count',0)+1
+                            out({'kind':'shadow_exit_quote_unavailable','at':marked,'pool':p,'token_id':s.get('token_id'),
+                                 'quote_error':q,'no_fill':True,'no_capital_allocated':True})
             already_signaled=any(k!=p and z.get('entry') and z.get('token_id')==token_id for k,z in st.items()) if token_id else False
             if s['entry'] is None and eligible and not already_signaled:
                 risk=paper_entry_risk_reason(d.datetime.now(d.timezone.utc))
@@ -197,13 +229,32 @@ for cycle in range(3):
                     open_shadows=sum(bool(z.get('shadow')) and not z['shadow'].get('expired')
                                      and not z.get('entry') for z in st.values())
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
-                        s['shadow']={'at':d.datetime.now(d.timezone.utc).isoformat(),
-                                     'entry_pool_price':v,'peak_chart_multiple':1.,
-                                     'reason':risk,'no_capital_allocated':True}
+                        shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
+                                'entry_pool_price':v,'peak_chart_multiple':1.,
+                                'reason':risk,'no_capital_allocated':True}
+                        # Even when allocating no paper capital, research tradability in
+                        # real time. Quote evidence never becomes a simulated fill.
+                        if quote_checks<MAX_ENTRY_QUOTE_CHECKS:
+                            proposal=entry_quote_preflight(token_id.removeprefix('solana_'))
+                            shadow['initial_route_check']={'at':d.datetime.now(d.timezone.utc).isoformat(),
+                                                           'reason':proposal.get('reason'),'ok':bool(proposal.get('ok'))}
+                            if proposal.get('ok'):
+                                shadow['entry_quote']=proposal
+                                shadow_quote_entries_this_run+=1
+                                out({'kind':'shadow_entry_quote_only','at':shadow['initial_route_check']['at'],
+                                     'pool':p,'token_id':token_id,
+                                     'immediate_roundtrip_multiple':proposal['immediate_roundtrip_multiple'],
+                                     'no_trade':True,'no_fill':True,'no_capital_allocated':True})
+                            else:
+                                out({'kind':'shadow_entry_route_unavailable','at':shadow['initial_route_check']['at'],
+                                     'pool':p,'token_id':token_id,'reason':proposal.get('reason'),
+                                     'no_trade':True,'no_capital_allocated':True})
+                        s['shadow']=shadow
                         shadow_new_this_run+=1
-                        out({'kind':'shadow_research_only','at':s['shadow']['at'],'pool':p,
+                        out({'kind':'shadow_research_only','at':shadow['at'],'pool':p,
                              'token_id':token_id,'observed_price':v,'entry_intentionally_blocked':True,
-                             'no_entry_quote':True,'no_order':True,'reason':risk})
+                             'entry_route_observed':bool(shadow.get('entry_quote')),
+                             'no_order':True,'reason':risk})
                     continue
                 mint=token_id.removeprefix('solana_')
                 preflight=entry_quote_preflight(mint)
@@ -285,6 +336,11 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_chart_11x_unfilled_total':sum(1 for x in st.values()
                                            if x.get('shadow') and bool(x['shadow'].get('chart_11x_logged'))),
    'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
+   'shadow_buy_and_sell_quote_baselines_new':shadow_quote_entries_this_run,
+   'shadow_buy_and_sell_quote_baselines_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('entry_quote')),
+   'shadow_quote_only_exit_checks_this_run':shadow_quote_marks_this_run,
+   'shadow_quote_only_exit_available_this_run':shadow_quote_marks_available_this_run,
+   'shadow_quote_only_11x_unfilled_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('quote_11x_logged')),
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
    'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
@@ -294,6 +350,6 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'quoted_positions_liquidity_not_observed':sum(1 for x in st.values()
               if x.get('entry_quote') and x.get('entry') and not x.get('exit')
               and x.get('last_observed_liquidity_usd') is None),
-   'method':'prospective-only: real paper allocation requires Jupiter buy+sell quotes and fresh exit data; fail-closed when prior exits unavailable; separate no-capital shadow watch on blocked candidates with chart-only max excursion, not fillable trades; no signing or execution'}
+   'method':'forward-only: paper positions gated on Jupiter routes and safe existing exits; blocked candidates get chart shadows and optional Jupiter buy+sell quote baselines with exact-amount future quote marks; a quote is NOT an executed fill, gas/rent/MEV omitted; no signing or execution'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
