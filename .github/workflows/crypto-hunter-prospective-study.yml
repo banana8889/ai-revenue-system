@@ -54,8 +54,30 @@ jobs:
           with open(state,encoding='utf-8') as f:checkpoint=json.load(f)
           print('LIVE_STUDY_HEARTBEAT',json.dumps({'at':receipt['at'],'samples':len(samples),'pools':len(pools),'tracked':len(checkpoint),'signals':receipt.get('prospective_signals',0),'exits':receipt.get('paper_exits',0),'trades':0,'errors':len(errors)}))
           PY
-      - name: Save durable state between future runs
-        if: success()
+      - name: Validate checkpoint including after collector failure
+        if: always()
+        id: state-integrity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,pathlib,sys
+          f=pathlib.Path('evidence/state.json')
+          if not f.is_file():
+              print('CHECKPOINT_INTEGRITY=NO_STATE')
+              sys.exit(1)
+          data=json.loads(f.read_text())
+          assert isinstance(data,dict)
+          for key,item in data.items():
+              assert isinstance(key,str) and isinstance(item,dict)
+              if item.get('entry'):
+                  assert isinstance(item['entry'][0],str)
+              if item.get('shadow'):
+                  assert item['shadow'].get('no_capital_allocated') is True
+          print('CHECKPOINT_INTEGRITY=PASS',json.dumps({'tracked':len(data),'paper_trades_executed':0}))
+          PY
+          echo "usable=true" >> "$GITHUB_OUTPUT"
+      - name: Save durable state between future runs (also after receipt failure)
+        if: always() && steps.state-integrity.outputs.usable == 'true'
         uses: actions/cache/save@v4
         with:
           path: evidence/state.json
@@ -85,3 +107,33 @@ jobs:
           fi
           gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
           echo "CHAIN_NEXT_REQUEST_ACCEPTED=true"
+      - name: Bounded recovery after failed study (zero trading)
+        if: failure() && github.event_name == 'workflow_dispatch' && inputs.chain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=12"
+          prior=$(gh api "$url" --jq '[.workflow_runs[] | select(.status=="completed")][0:4] | .[].conclusion')
+          consecutive=1
+          while IFS= read -r result; do
+            case "$result" in
+              success) break ;;
+              failure|cancelled|timed_out|action_required) consecutive=$((consecutive+1)) ;;
+              *) break ;;
+            esac
+          done <<< "$prior"
+          echo "FAILURE_CHAIN_LENGTH_INCLUDING_CURRENT=$consecutive"
+          if [ "$consecutive" -ge 3 ]; then
+            echo "HALTED_AFTER_THREE_CONSECUTIVE_FAILURES"
+            exit 0
+          fi
+          sleep 70
+          active=$(gh api "$url" --jq '[.workflow_runs[] | select(.status=="in_progress" or .status=="queued" or .status=="pending")] | .[].id' | grep -v "^${GITHUB_RUN_ID}$" || true)
+          if [ -n "$active" ]; then
+            echo "RECOVERY_SKIPPED_ALREADY_RUNNING=$active"
+            exit 0
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
+          echo "FAILED_RUN_RECOVERY_DISPATCH_ACCEPTED=true"
