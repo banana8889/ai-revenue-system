@@ -4,6 +4,12 @@ on:
     branches: [main]
     paths: [.github/workflows/crypto-hunter-prospective-study.yml, crypto-hunter/forward_observer.py]
   workflow_dispatch:
+    inputs:
+      chain:
+        description: "Opt in to unattended self-dispatch research cycles"
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '3,13,23,33,43,53 * * * *'
 permissions:
@@ -65,3 +71,19 @@ jobs:
           path: evidence/
           if-no-files-found: warn
           retention-days: 30
+      - name: Maintain research loop without relying on GitHub cron
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.chain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Short initialization proof interval; updated after a confirmed chained run.
+          sleep 25
+          active=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=20" --jq '.workflow_runs[] | "\(.id) \(.status)"' | awk -v own="${GITHUB_RUN_ID}" '$1!=own && ($2=="in_progress" || $2=="queued" || $2=="pending"){print; exit}')
+          if [ -n "$active" ]; then
+            echo "CHANGED_RUNNING_WORKFLOW_DETECTED=$active"
+            echo "Skipping duplicate chain dispatch"
+            exit 0
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
+          echo "CHAIN_NEXT_REQUEST_ACCEPTED=true"
