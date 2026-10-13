@@ -1,0 +1,20 @@
+name: Crypto Hunter Dispatch Connectivity Test
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-dispatch-check.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  dispatch-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch existing research study without keys or trades
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Dispatching already-defined prospective research workflow on main"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main
+          echo "DISPATCH_REQUEST_ACCEPTED=true"
