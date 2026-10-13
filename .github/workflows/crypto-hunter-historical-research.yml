@@ -2,7 +2,7 @@ name: Crypto Hunter Historical 11x Cohort Research
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/crypto-hunter-historical-research.yml]
+    paths: [.github/workflows/crypto-hunter-historical-research.yml, crypto-hunter/historical_extreme_research.py]
 permissions:
   contents: read
 jobs:
