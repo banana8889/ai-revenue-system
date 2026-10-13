@@ -1,0 +1,56 @@
+name: Crypto Hunter Jupiter Quote-Only Test
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-jupiter-quote-test.yml]
+permissions:
+  contents: read
+jobs:
+  quote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Test 5 USDC roundtrip quotes with zero trades
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import urllib.request,urllib.parse,urllib.error,time,json,datetime
+          USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          SOL='So11111111111111111111111111111111111111112'
+          TOKENS=[
+            ('Signal minted 88Fa','88FaFkEw3h7vvgv7PUddbgwe62KWxrBEyDhzwgyGaysJ'),
+            ('Signal minted FFfN','FFfNkzxme987x8yofe8gBSri3Tw8g8Ck3YCVAAApeZ3L'),
+            ('Control wSOL',SOL),
+          ]
+          result={'checked_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'quote_only':True,'no_taker':True,'private_keys':False,'orders':0,'trades':0,'trials':[]}
+          def quote(frm,to,amount):
+              p=urllib.parse.urlencode({'inputMint':frm,'outputMint':to,'amount':str(amount)})
+              req=urllib.request.Request('https://api.jup.ag/swap/v2/order?'+p,headers={'Accept':'application/json','User-Agent':'CryptoHunterQuoteOnly/1.0'})
+              try:
+                  with urllib.request.urlopen(req,timeout=16) as r:data=json.load(r);http=r.status
+              except urllib.error.HTTPError as e:
+                  return {'ok':False,'http':e.code,'response':e.read(700).decode('utf-8','replace')[:200]}
+              except Exception as e:return {'ok':False,'error':type(e).__name__+': '+str(e)[:140]}
+              return {'ok':bool(data.get('outAmount')),'http':http,'out_amount':data.get('outAmount'),'in_amount':data.get('inAmount'),'router':data.get('router'),'fee_bps':data.get('feeBps'),'error_code':data.get('errorCode'),'error_message':data.get('errorMessage'),'transaction_returned':bool(data.get('transaction'))}
+          for label,mint in TOKENS:
+              buy=quote(USDC,mint,5000000)
+              x={'label':label,'mint':mint,'requested_usdc':5,'buy_quote':buy}
+              time.sleep(3)
+              if buy.get('ok') and buy.get('out_amount') and int(buy['out_amount'])>0:
+                  sell=quote(mint,USDC,int(buy['out_amount']))
+                  x['sell_quote']=sell
+                  if sell.get('ok'):
+                      x['estimated_usdc_received']=int(sell['out_amount'])/1000000
+                      x['estimated_quote_only_roundtrip_return']=round(int(sell['out_amount'])/5000000,6)
+              result['trials'].append(x)
+              time.sleep(3)
+          print('JUPITER_QUOTE_ONLY',json.dumps(result))
+          with open('evidence/jupiter_quote_test.json','w') as f:json.dump(result,f,indent=2)
+          PY
+      - name: Retain strictly read-only quote evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jupiter-quote-only-feasibility
+          path: evidence
+          if-no-files-found: ignore
