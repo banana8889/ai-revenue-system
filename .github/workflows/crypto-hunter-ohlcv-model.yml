@@ -1,0 +1,45 @@
+name: Crypto Hunter Historical OHLCV 11x Model
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-ohlcv-model.yml
+      - crypto-hunter/historical_ohlcv_model.py
+permissions:
+  contents: read
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned research libraries
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 pyarrow==21.0.0 scikit-learn==1.7.2
+      - name: Construct labels from real candle timestamps and hold out future dates
+        run: |
+          python3 -m py_compile crypto-hunter/historical_ohlcv_model.py
+          python3 crypto-hunter/historical_ohlcv_model.py
+      - name: Validate label/feature separation and zero orders
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/historical_ohlcv/validated_candles_results.json'))
+          assert r['trades']==0 and not r['all_fills_verified']
+          assert r['no_hindsight_features']
+          assert r['train_rows']>0 and r['test_rows']>0
+          assert not any('return' in x or 'runner_peak' in x or 'highest' in x for x in r['allowed_snapshot_features'])
+          assert r['all_eligible_wick_counts']['11']>=r['all_eligible_close_counts_min_100usd_candle']['11']
+          print('OHLCV_TEMPORAL_HOLDOUT_AND_NO_EXECUTION_AUDIT=PASS')
+          PY
+      - name: Retain immutable evaluation receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-historical-ohlcv-11x-holdout
+          path: |
+            evidence/historical_ohlcv/validated_candles_results.json
+            evidence/historical_ohlcv/holdout_top30_chart_only.json
+          if-no-files-found: warn
+          retention-days: 30
