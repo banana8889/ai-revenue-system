@@ -1,0 +1,94 @@
+name: Crypto Hunter 24h Cohort Deterministic Test
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-cohort-test.yml
+      - crypto-hunter/forward_observer.py
+permissions:
+  contents: read
+jobs:
+  cohort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test first-detection cohorts, duplicates, censored outcomes and zero trades
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import datetime as d, tempfile, os, json, io, runpy, unittest.mock as mock
+          source=str(Path('crypto-hunter/forward_observer.py').resolve())
+          now=d.datetime.now(d.timezone.utc)
+          def packet(pool,mint,buys,sells):
+              return {'attributes':{'address':pool,'name':'MOCK/SOL',
+                'base_token_price_usd':'0.00001','reserve_in_usd':'18000',
+                'volume_usd':{'h1':'7000'},
+                'transactions':{'h1':{'buys':buys,'sells':sells,'buyers':50}},
+                'pool_created_at':(now-d.timedelta(minutes=5)).isoformat()},
+                'relationships':{'base_token':{'data':{'id':'solana_'+mint}},
+                  'quote_token':{'data':{'id':'solana_So11111111111111111111111111111111111111112'}}}}
+          mintA='A'*44;mintB='B'*44
+          packets=[packet('pool-buy-pressure-1',mintA,110,30),
+                   packet('pool-low-pressure-1',mintB,20,40),
+                   packet('pool-duplicate-mint',mintA,115,20)]
+          seen={'page1':0}
+          def urlopen(req,timeout=0):
+              url=req.full_url if hasattr(req,'full_url') else req
+              if 'new_pools?page=1' in url:
+                  seen['page1']+=1
+                  return io.BytesIO(json.dumps({'data':packets}).encode())
+              return io.BytesIO(b'{"data":[]}')
+          with tempfile.TemporaryDirectory() as folder:
+              wd=os.getcwd()
+              try:
+                  os.chdir(folder);Path('evidence').mkdir()
+                  with mock.patch('urllib.request.urlopen',side_effect=urlopen),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(source,run_name='__main__')
+                  state=json.loads(Path('evidence/state.json').read_text())
+                  result=json.loads(Path('evidence/prospective_cohort_comparison.json').read_text())
+                  assert seen['page1']==3,seen
+                  assert result['groups']['buy_pressure']['enrolled']==1,result
+                  assert result['groups']['lower_pressure_control']['enrolled']==1,result
+                  assert len([x for x in state.values() if x.get('cohort')])==2
+                  assert result['orders']==result['trades']==0
+                  assert result['groups']['buy_pressure']['completed']==0
+                  assert result['groups']['lower_pressure_control']['completed']==0
+                  assert json.loads(Path('evidence/prospective_cohort_ledger.json').read_text())==[]
+                  print('COHORT_PROSPECTIVE_PAIR_DEDUP=PASS')
+              finally:os.chdir(wd)
+          # The old eligibility-matched cohort must be complete with fresh
+          # observations; a missing-pool cohort must be CENSORED not a loser.
+          old=(now-d.timedelta(hours=25)).isoformat()
+          last=(now-d.timedelta(minutes=40)).isoformat()
+          empty=(now-d.timedelta(hours=24,minutes=50)).isoformat()
+          def original(group,last_seen):
+              return {'first':old,'count':1,'qualified':0,'entry':None,
+                 'last_distinct_at':old,'previous_signature':None,'peak_net':0.,
+                 'token_id':'solana_'+'C'*44,
+                 'cohort':{'group':group,'at':old,'first_chart_price':0.00001,
+                   'first_liquidity_usd':18000,'last_observed_at':last_seen,
+                   'n_observations':5,'peak_chart_multiple':12.,'peak_liquidity_usd':13000.,
+                   'no_trade':True,'no_executable_quote':True}}
+          initial={'completed-pool':original('buy_pressure',last),
+                   'censored-pool':original('lower_pressure_control',empty)}
+          with tempfile.TemporaryDirectory() as folder:
+              wd=os.getcwd()
+              try:
+                  os.chdir(folder);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(initial))
+                  with mock.patch('urllib.request.urlopen',side_effect=lambda *_a,**_k: io.BytesIO(b'{"data":[]}')),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(source,run_name='__main__')
+                  state=json.loads(Path('evidence/state.json').read_text())
+                  result=json.loads(Path('evidence/prospective_cohort_comparison.json').read_text())
+                  ledger=json.loads(Path('evidence/prospective_cohort_ledger.json').read_text())
+                  assert state['completed-pool']['cohort'].get('completed') is True
+                  assert state['censored-pool']['cohort'].get('censored') is True
+                  assert result['groups']['buy_pressure']['completed']==1
+                  assert result['groups']['lower_pressure_control']['censored']==1
+                  assert len(ledger)==2 and all(x['trades']==0 for x in ledger)
+                  print('COHORT_24H_CENSORED_RETENTION=PASS')
+              finally:os.chdir(wd)
+          PY
