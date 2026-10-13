@@ -6,6 +6,10 @@ quote_checks=0
 MAX_ENTRY_QUOTE_CHECKS=5
 sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
+MAX_OPEN_QUOTED_POSITIONS=4
+MAX_SELL_QUOTE_AGE_SECONDS=900
+sell_marked_this_run=set()
+blocked_candidates_this_run=set()
 try:
     with open('evidence/state.json') as f:st=json.load(f)
     for a in st.values():
@@ -45,6 +49,25 @@ def jupiter_quote(input_mint,output_mint,raw_amount):
         return {'ok':False,'http':e.code,'error':'no_quote'}
     except (ValueError,TypeError,urllib.error.URLError,TimeoutError):
         return {'ok':False,'error':'quote_unavailable'}
+def paper_entry_risk_reason(now):
+    """Prevent more simulated exposure when previously opened positions cannot be marked."""
+    open_positions=[p for p in st.values() if p.get('entry_quote') and p.get('entry') and not p.get('exit')]
+    if len(open_positions)>=MAX_OPEN_QUOTED_POSITIONS:
+        return 'unclosed_quote_position_capacity'
+    for position in open_positions:
+        if position.get('quote_missing_streak',0)>0:
+            return 'existing_position_missing_sell_quote'
+        last=position.get('last_valid_sell_quote_at') or position['entry_quote'].get('observed_at')
+        if not last:
+            return 'existing_position_unpriced'
+        try:
+            age=(now-d.datetime.fromisoformat(last)).total_seconds()
+            if age>MAX_SELL_QUOTE_AGE_SECONDS:
+                return 'existing_sell_quote_stale'
+        except (ValueError,TypeError):
+            return 'existing_sell_quote_timestamp_invalid'
+    return None
+
 def entry_quote_preflight(mint):
     """Require both exact-size 5 USDC entry and sell-back paths at observation time."""
     global quote_checks
@@ -119,6 +142,13 @@ for cycle in range(3):
             eligible=s.get('qualified',0)>=2 and gate
             already_signaled=any(k!=p and z.get('entry') and z.get('token_id')==token_id for k,z in st.items()) if token_id else False
             if s['entry'] is None and eligible and not already_signaled:
+                risk=paper_entry_risk_reason(d.datetime.now(d.timezone.utc))
+                if risk:
+                    if token_id not in blocked_candidates_this_run:
+                        blocked_candidates_this_run.add(token_id)
+                        out({'kind':'risk_blocked_candidate','at':d.datetime.now(d.timezone.utc).isoformat(),
+                             'pool':p,'token_id':token_id,'reason':risk,'new_position':False})
+                    continue
                 mint=token_id.removeprefix('solana_')
                 preflight=entry_quote_preflight(mint)
                 out({'kind':'jupiter_route_preflight','at':d.datetime.now(d.timezone.utc).isoformat(),'pool':p,'token_id':token_id,'result':preflight})
@@ -130,17 +160,26 @@ for cycle in range(3):
             elif s['entry'] is not None and not s.get('exit') and t>s['entry'][0]:
                 if s.get('entry_quote'):
                     # New positions are priced on fresh exact-size sell quotes, never a chart-only stop.
+                    if p in sell_marked_this_run:
+                        continue
                     if sell_mark_checks>=MAX_SELL_MARKS_PER_RUN:
                         out({'kind':'sell_mark_deferred','at':d.datetime.now(d.timezone.utc).isoformat(),'pool':p,'reason':'quote_rate_budget'})
                         continue
                     sell_mark_checks+=1
+                    sell_marked_this_run.add(p)
                     mint=s.get('token_id','').removeprefix('solana_')
                     q=jupiter_quote(mint,USDC,int(s['entry_quote']['token_raw']))
                     mark_at=d.datetime.now(d.timezone.utc)
                     s['last_sell_quote_at']=mark_at.isoformat()
                     if not q.get('ok'):
-                        out({'kind':'sell_quote_missing','at':mark_at.isoformat(),'pool':p,'route':q,'no_exit_fill':True})
+                        s['quote_missing_streak']=s.get('quote_missing_streak',0)+1
+                        s['last_missing_sell_quote_at']=mark_at.isoformat()
+                        out({'kind':'sell_quote_missing','at':mark_at.isoformat(),'pool':p,
+                             'token_id':s.get('token_id'),'route':q,
+                             'missing_streak':s['quote_missing_streak'],'no_exit_fill':True})
                         continue
+                    s['quote_missing_streak']=0
+                    s['last_valid_sell_quote_at']=mark_at.isoformat()
                     net=q['out_amount']/5000000
                     s['peak_net']=max(s['peak_net'],net)
                     reason=('target_quote_11x' if net>=11 else 'hard_stop_quote_25pct' if net<=0.75
@@ -182,6 +221,10 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
+   'risk_blocked_candidate_mints':len(blocked_candidates_this_run),
+   'quote_marked_distinct_positions':len(sell_marked_this_run),
+   'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
+   'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
    'method':'prospective-only live data; new entries require Jupiter $5 buy and sell quotes; new exits monitored with exact token-amount Jupiter sell quotes where available; old chart-only signals remain legacy; no taker or execution, gas/rent/MEV excluded'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
