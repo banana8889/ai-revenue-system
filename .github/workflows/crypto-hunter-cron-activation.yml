@@ -1,0 +1,22 @@
+name: Crypto Hunter Cron Activation
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-cron-activation.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  reenable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Inspect and enable prospective study schedule
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "BEFORE"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml" --jq '{name,path,state}'
+          gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/enable"
+          echo "AFTER"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml" --jq '{name,path,state}'
