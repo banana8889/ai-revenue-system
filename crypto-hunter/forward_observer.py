@@ -1,5 +1,5 @@
-import datetime as d,json,time,urllib.request,os,math
-url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1'
+import datetime as d,json,time,urllib.request,urllib.error,os,math
+url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
 try:
     with open('evidence/state.json') as f:st=json.load(f)
@@ -15,13 +15,30 @@ def num(x):
     try:
         v=float(x);return v if math.isfinite(v) else 0.
     except (TypeError,ValueError):return 0.
-def read(endpoint=url):
-    req=urllib.request.Request(endpoint,headers={'Accept':'application/json;version=20230203','User-Agent':'MoonshotObserver/1.0'})
-    with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)['data']
+def read(endpoint):
+    req=urllib.request.Request(endpoint,headers={'Accept':'application/json;version=20230203','User-Agent':'MoonshotObserver/1.1'})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req,timeout=20) as r:
+                return json.load(r)['data']
+        except urllib.error.HTTPError as e:
+            if e.code not in (429,500,502,503,504) or attempt==2:raise
+        except (urllib.error.URLError,TimeoutError):
+            if attempt==2:raise
+        time.sleep(3*(attempt+1))
 for cycle in range(3):
     t=d.datetime.now(d.timezone.utc)
     try:
-        data=read()
+        data=[]
+        for page in (1,2,3):
+            try:
+                data.extend(read(url+str(page)))
+            except Exception as ex:
+                out({'kind':'discovery_page_error','at':t.isoformat(),'page':page,'error':str(ex)[:120]})
+                if page==1:raise
+            time.sleep(2)
+        seen=set()
+        data=[p for p in data if p.get('attributes',{}).get('address') and not (p['attributes']['address'] in seen or seen.add(p['attributes']['address']))]
         active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
         for n in range(0,len(active),30):
             try:
@@ -49,7 +66,9 @@ for cycle in range(3):
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             signature=(v,x['liq'],x['volume_1h'],x['buys_1h'],x['sells_1h'],x['buyers_1h'])
             gate=(0<=age<=20 and x['liq']>=10000 and x['volume_1h']>=3000 and x['buyers_1h']>=20 and x['buys_1h']>=1.5*max(1,x['sells_1h']))
-            if signature!=s['previous_signature'] and (s['last_distinct_at'] is None or (t-s['last_distinct_at']).total_seconds()>=60):
+            gap=(t-s['last_distinct_at']).total_seconds() if s['last_distinct_at'] is not None else None
+            if gap is not None and gap>300:s['qualified']=0
+            if signature!=s['previous_signature'] and (gap is None or gap>=60):
                 s['count']+=1;s['qualified']=s.get('qualified',0)+1 if gate else 0
                 s['previous_signature']=signature;s['last_distinct_at']=t
             eligible=s.get('qualified',0)>=2 and gate
@@ -82,6 +101,6 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'paper_targets_11x':sum(x.get('exit',{}).get('reason')=='target_net_11x' for x in st.values() if x.get('exit')),
    'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
-   'method':'forward-only live samples; assumed 3 percent each side + 0.04 USD roundtrip; price is not executable quote'}
+   'method':'live forward-only multi-page observation; independent qualifying observations within 5 minutes; assumed 3 percent each side + 0.04 USD roundtrip; pool price not an executable quote'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
