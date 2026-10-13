@@ -1,0 +1,26 @@
+name: Crypto Signal Token Identity Audit
+on:
+  push:
+    branches: [crypto-hunter-network-probe-20261013]
+    paths: [.github/workflows/crypto-token-identity-audit.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Resolve underlying base token identities of three timestamped signals
+        run: |
+          python3 - <<'PY'
+          import json,urllib.request,urllib.error
+          pools=['5rWUTKyL7H5BUcKBinJh3tGi87QjX6rtCEBirUStf4tv','FaxAkJG94d6Mo6GfYzjn6QrbWQ55LdDgVUyoSH76jBQL','FfZUq4ysngJHimpSZWWLmout2v1MMBZsNRKxRZU3zgao']
+          for pool in pools:
+              try:
+                  req=urllib.request.Request('https://api.geckoterminal.com/api/v2/networks/solana/pools/'+pool,headers={'User-Agent':'CryptoHunterAudit/1.0'})
+                  with urllib.request.urlopen(req,timeout=16) as r:x=json.load(r)['data']
+                  rel=x.get('relationships') or {}
+                  a=x.get('attributes') or {}
+                  print('POOL_IDENTITY',json.dumps({'pool':pool,'pair':a.get('name'),'base_token_id':((rel.get('base_token') or {}).get('data') or {}).get('id'),'quote_token_id':((rel.get('quote_token') or {}).get('data') or {}).get('id'),'dex_id':((rel.get('dex') or {}).get('data') or {}).get('id')}))
+              except Exception as e:print('POOL_IDENTITY_ERROR',json.dumps({'pool':pool,'error':str(e)[:120]}))
+          PY
