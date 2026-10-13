@@ -1,0 +1,49 @@
+name: Crypto Hunter Verify 24h OHLCV Time Windows
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-ohlcv-cohort-audit.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - name: Read-only install
+        run: python3 -m pip install -q --disable-pip-version-check pandas==2.3.3 pyarrow==21.0.0
+      - name: Inspect actual observed candle timestamps before relabeling
+        run: |
+          python3 - <<'PY'
+          import pandas as pd,urllib.request,numpy as np
+          sha='7070d00e1e4492f8604d988549d91785cc5f43f7'
+          for kind in ('tokens','ohlcv'):
+              urllib.request.urlretrieve(f'https://raw.githubusercontent.com/ian05012/solana-memecoin-dataset/{sha}/data/{kind}.parquet',f'{kind}.parquet')
+          t=pd.read_parquet('tokens.parquet')
+          o=pd.read_parquet('ohlcv.parquet')
+          print('DATA_COHORT',{'token_rows':len(t),'token_mints':t.token_address.nunique(),
+            'candle_rows':len(o),'candle_mints':o.token_address.nunique(),
+            'candle_cols':list(o.columns)})
+          print('CANDLE_SAMPLES',o.head(4).to_json(orient='records',date_format='iso'))
+          print('CAPTURE_SAMPLES',t[['token_address','captured_at','price_at_capture']].head(4).to_json(orient='records',date_format='iso'))
+          t['captured_at']=pd.to_datetime(t.captured_at,utc=True,errors='coerce')
+          o['ts']=pd.to_datetime(o.ts,utc=True,errors='coerce',unit='s' if pd.api.types.is_numeric_dtype(o.ts) else None)
+          print('TIMESTAMP_SPAN',{'capture_min':str(t.captured_at.min()),'capture_max':str(t.captured_at.max()),
+            'candle_min':str(o.ts.min()),'candle_max':str(o.ts.max())})
+          first=t.sort_values('captured_at').drop_duplicates('token_address').copy()
+          joint=o.merge(first[['token_address','captured_at','price_at_capture']],on='token_address')
+          joint['hours_after']=(joint.ts-joint.captured_at).dt.total_seconds()/3600
+          for band in ((-1,0),(0,1),(0,6),(0,24),(24,72)):
+              sub=joint[(joint.hours_after>=band[0])&(joint.hours_after<band[1])]
+              print('CANDLE_WINDOW',band,'rows',len(sub),'mints',sub.token_address.nunique())
+          q=joint[(joint.hours_after>=0)&(joint.hours_after<24)].copy()
+          q['high']=pd.to_numeric(q.high,errors='coerce')
+          q['close']=pd.to_numeric(q.close,errors='coerce')
+          q['price_at_capture']=pd.to_numeric(q.price_at_capture,errors='coerce')
+          q['ratio']=q.high/q.price_at_capture.replace(0,np.nan)
+          for valid,label in [(q,'all'),(q[(q.high<=q.close*10)&(q.close>0)],'glitch_filtered')]:
+              peak=valid.groupby('token_address').ratio.max()
+              valid_mints=len(peak)
+              for n in (2,5,11,21):
+                  print('CANDLE_PEAK',label,'threshold',n,'mints',int((peak>=n).sum()),'denominator',valid_mints)
+          PY
