@@ -1,0 +1,64 @@
+name: Crypto Hunter Prospective Study
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-prospective-study.yml]
+  schedule:
+    - cron: '7,17,27,37,47,57 * * * *'
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: crypto-hunter-prospective-study
+  cancel-in-progress: false
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - name: Bound study and prevent infinite scheduling
+        id: window
+        shell: bash
+        run: |
+          if [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \< "2026-10-16T12:00:00Z" ]; then
+            echo "active=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=no" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Disable study automatically after cutoff
+        if: steps.window.outputs.active == 'no'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/disable"
+      - uses: actions/checkout@v4
+        if: steps.window.outputs.active == 'yes'
+        with:
+          ref: crypto-hunter-network-probe-20261013
+          persist-credentials: false
+      - name: Restore prospective state from most recent run
+        if: steps.window.outputs.active == 'yes'
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/state.json
+          key: crypto-prospective-state-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Run strictly forward-only market observations
+        if: steps.window.outputs.active == 'yes'
+        run: |
+          mkdir -p evidence
+          python3 crypto-hunter/forward_observer.py
+      - name: Save state for next execution
+        if: always() && steps.window.outputs.active == 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/state.json
+          key: crypto-prospective-state-${{ github.run_id }}
+      - name: Preserve raw evidence and outcomes
+        if: always() && steps.window.outputs.active == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-prospective-evidence-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: ignore
+          retention-days: 30
