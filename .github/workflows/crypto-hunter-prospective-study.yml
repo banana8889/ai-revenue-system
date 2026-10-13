@@ -2,7 +2,7 @@ name: Crypto Hunter Prospective Study
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/crypto-hunter-prospective-study.yml]
+    paths: [.github/workflows/crypto-hunter-prospective-study.yml, crypto-hunter/forward_observer.py]
   workflow_dispatch:
   schedule:
     - cron: '3,13,23,33,43,53 * * * *'
@@ -31,6 +31,7 @@ jobs:
       - name: Collect live forward-only observations without transactions
         run: |
           mkdir -p evidence
+          python3 -m py_compile crypto-hunter/forward_observer.py
           python3 crypto-hunter/forward_observer.py
           python3 - <<'PY'
           import json,os,sys
