@@ -1,0 +1,47 @@
+name: Crypto Hunter Recover Failed Run Checkpoint
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-checkpoint-recovery.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Recover parseable research checkpoint from previously failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p evidence
+          gh run download 38412963366 --repo "$GITHUB_REPOSITORY" --name crypto-prospective-evidence-38412963366 --dir evidence
+          python3 - <<'PY'
+          import json,pathlib,datetime
+          p=pathlib.Path('evidence/state.json')
+          raw=json.loads(p.read_text())
+          assert isinstance(raw,dict) and len(raw)>=1932
+          shadows=[x for x in raw.values() if x.get('shadow')]
+          assert len(shadows)>=1
+          assert not pathlib.Path('evidence/summary.json').exists(), 'Failed receipt must not be presented as success'
+          for x in raw.values():
+              if x.get('entry'):
+                  assert isinstance(x.get('entry')[0],str), 'Time should remain serialized'
+              if x.get('shadow'):
+                  assert x['shadow'].get('no_capital_allocated') is True
+          print('RECOVERED_PARTIAL_FAILED_RUN_CHECKPOINT',json.dumps({
+              'pools':len(raw),'shadows':len(shadows),'entered':sum(bool(x.get('entry')) for x in raw.values()),
+              'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'orders':0,'trades':0}))
+          PY
+      - name: Persist recovered checkpoint for subsequent independent runs
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/state.json
+          key: crypto-prospective-state-${{ github.run_id }}
+      - name: Bootstrap safe read-only study after checkpoint recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
+          echo "RESTORED_CHECKPOINT_AND_DISPATCH_ACCEPTED=true"
