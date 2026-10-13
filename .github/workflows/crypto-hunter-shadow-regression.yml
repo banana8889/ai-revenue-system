@@ -93,4 +93,47 @@ jobs:
                       'observed_unfilled_11x':receipt['shadow_chart_11x_unfilled_total'],
                       'orders':receipt['orders'],'trades':receipt['trades']}))
               finally:os.chdir(old_dir)
+          # Positive quote-at-signal research; later exact-token sell quote reaches 13x.
+          # The chart does NOT reach 11x, and the hypothetical token is NEVER bought.
+          import urllib.parse
+          calls['page1']=0
+          calls['later_price']=3
+          quotes_called={'buy':0,'sell':0}
+          def quotes_replay(request,timeout=0):
+              u=request.full_url if hasattr(request,'full_url') else request
+              if '/swap/v2/order?' in u:
+                  p=urllib.parse.parse_qs(urllib.parse.urlsplit(u).query)
+                  if p.get('inputMint')==['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v']:
+                      quotes_called['buy']+=1
+                      return io.BytesIO(json.dumps({'outAmount':'1000','router':'MOCK'}).encode())
+                  quotes_called['sell']+=1
+                  amount=4900000 if quotes_called['sell']==1 else 65000000
+                  return io.BytesIO(json.dumps({'outAmount':str(amount),'router':'MOCK'}).encode())
+              return fake_urlopen(request,timeout)
+          with tempfile.TemporaryDirectory() as td:
+              old_dir=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(state))
+                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  receipt=json.loads(Path('evidence/summary.json').read_text())
+                  state_after=json.loads(Path('evidence/state.json').read_text())
+                  rows=[json.loads(x) for x in Path('evidence/observations.jsonl').read_text().splitlines()]
+                  assert state_after[pool]['entry'] is None
+                  assert state_after[pool]['shadow']['entry_quote']['token_raw']==1000
+                  assert state_after[pool]['shadow']['peak_chart_multiple']<11
+                  assert state_after[pool]['shadow']['max_exit_quote_multiple']>=13
+                  assert receipt['shadow_quote_only_11x_unfilled_total']==1
+                  assert receipt['shadow_chart_11x_unfilled_total']==0
+                  assert receipt['prospective_signals']==1
+                  assert receipt['orders']==receipt['trades']==0
+                  assert quotes_called['buy']==1 and quotes_called['sell']>=2
+                  assert sum(x.get('kind')=='shadow_11x_quote_only_unfilled' for x in rows)==1
+                  assert all(x.get('no_fill') and x.get('no_trade') for x in rows if x.get('kind')=='shadow_11x_quote_only_unfilled')
+                  print('SHADOW_QUOTE_ONLY_13X_NO_FILL_REGRESSION=PASS',json.dumps({
+                      'quote_hit_count':receipt['shadow_quote_only_11x_unfilled_total'],
+                      'chart_hit_count':receipt['shadow_chart_11x_unfilled_total'],
+                      'orders':receipt['orders'],'trades':receipt['trades']}))
+              finally:os.chdir(old_dir)
           PY
