@@ -2,7 +2,7 @@ name: Crypto Hunter Source Safety Check
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/crypto-hunter-source-check.yml]
+    paths: [.github/workflows/crypto-hunter-source-check.yml, crypto-hunter/forward_observer.py]
 permissions:
   contents: read
 jobs:
@@ -24,6 +24,8 @@ jobs:
           assert "'inputs.chain'" not in src
           assert "entry_quote_preflight" in src
           assert "jupiter_route_preflight" in src
+          assert "jupiter_sell_quote_mark" in src
+          assert "legacy_chart_mark" in src
           assert "jupiter_quote(USDC,mint,5000000)" in src
           assert "private_key" not in src.lower()
           assert "/execute" not in src and "sendTransaction" not in src
