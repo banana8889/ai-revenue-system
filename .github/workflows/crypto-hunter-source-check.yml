@@ -30,5 +30,26 @@ jobs:
           assert "private_key" not in src.lower()
           assert "/execute" not in src and "sendTransaction" not in src
           assert "orders':0" in src and "trades':0" in src
+          import ast,datetime as d
+          parsed=ast.parse(src)
+          target=next(node for node in parsed.body if isinstance(node,ast.FunctionDef) and node.name=='paper_entry_risk_reason')
+          mod=ast.fix_missing_locations(ast.Module(body=[target],type_ignores=[]))
+          ns={'d':d,'st':{},'MAX_OPEN_QUOTED_POSITIONS':4,'MAX_SELL_QUOTE_AGE_SECONDS':900}
+          exec(compile(mod,'paper_risk_gate','exec'),ns)
+          now=d.datetime.now(d.timezone.utc)
+          good={'entry_quote':{'observed_at':now.isoformat()},'entry':[now,1.],'exit':None,'quote_missing_streak':0}
+          assert ns['paper_entry_risk_reason'](now) is None
+          ns['st']={'a':dict(good)}
+          assert ns['paper_entry_risk_reason'](now) is None
+          ns['st']['a']['quote_missing_streak']=2
+          assert ns['paper_entry_risk_reason'](now)=='existing_position_missing_sell_quote'
+          ns['st']['a']['quote_missing_streak']=0
+          ns['st']['a']['entry_quote']['observed_at']=(now-d.timedelta(minutes=17)).isoformat()
+          assert ns['paper_entry_risk_reason'](now)=='existing_sell_quote_stale'
+          ns['st']={str(i):dict(good) for i in range(4)}
+          assert ns['paper_entry_risk_reason'](now)=='unclosed_quote_position_capacity'
+          assert 'sell_marked_this_run.add(p)' in src
+          assert "'quoted_positions_missing_sell_route':" in src
+          print('PAPER_ENTRY_RISK_POLICY_TESTS=PASS')
           print('SOURCE_SYNTAX_AND_READ_ONLY_POLICY=PASS')
           PY
