@@ -77,8 +77,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # Short initialization proof interval; updated after a confirmed chained run.
-          sleep 25
+          # About nine minutes from the previous cycle: 3 min sampling + 6 min cooldown.
+          # Runs remain research-only. No private keys, orders, or wallet signatures.
+          sleep 360
           active=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=20" --jq '.workflow_runs[] | "\(.id) \(.status)"' | awk -v own="${GITHUB_RUN_ID}" '$1!=own && ($2=="in_progress" || $2=="queued" || $2=="pending"){print; exit}')
           if [ -n "$active" ]; then
             echo "CHANGED_RUNNING_WORKFLOW_DETECTED=$active"
