@@ -1,0 +1,75 @@
+name: Crypto Hunter Exit Route Audit
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-exit-route-audit.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Cross-check read-only Jupiter and Raydium exact-size exits
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json,time,urllib.request,urllib.parse,urllib.error,datetime as d
+          USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          POSITIONS=[
+            ('5wJ95qmM61mm8uz1xsNvtGxnXk4agyWLx5E2cVR87Tt1','2v1zKmiwV8xyCUTjN1QY9LstpbgeaqUi8y23wNghKYE6',241209290629),
+            ('EnqRfaoEwui47ue3ErmPWuskbT1uWt5sZSqa1oafdnzj','BAaMqFLGDysT9hf5KTNgDkq12L4jTRudq9D7QXL4ngZu',229873087958),
+            ('8KczAJufNtYuLh5dB67pK8vZHg7c19zp4UbuyJMKpQZ','8ES3yr1AjvFQ9VHrwFpM5TLMVNUdocpvf3bzKGBSXW1h',188482899007),
+            ('EPjn89m97xi1UwBPTiF8T9A8ocCcBVwawqHyw2iiSBs9','7aCaTAD5kmAwkxPqrcy4LLuBYpNEYNZST2PhEpjVdEfJ',150750835298),
+            ('8aPuptW5QD6eBas7MiyFS9HevnziDtBDPrtGtR8LohwJ','2yp71L3tkmQ2xF49TfAxiiLKsWXdMYDd398FsYyizLC5',237736423501)]
+          def req(url):
+              t=time.monotonic()
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'CryptoHunterReadOnlyExitAudit/1.0'}),timeout=14) as response:
+                      raw=json.load(response)
+                  return {'http':200,'data':raw,'latency_ms':int((time.monotonic()-t)*1000)}
+              except urllib.error.HTTPError as e:
+                  return {'http':e.code,'error':e.read(250).decode('utf-8','replace')[:200]}
+              except Exception as e:
+                  return {'http':None,'error':type(e).__name__+': '+str(e)[:140]}
+          summary={'at_utc':d.datetime.now(d.timezone.utc).isoformat(),'mode':'QUOTE_ONLY','private_keys':False,'signatures':0,'orders':0,'trades':0,'results':[]}
+          for pool,mint,raw_amount in POSITIONS:
+              rec={'pool':pool,'mint':mint,'raw_amount':raw_amount,'initial_paper_usdc':5}
+              gt=req('https://api.geckoterminal.com/api/v2/networks/solana/pools/'+pool)
+              if isinstance(gt.get('data'),dict):
+                  obj=gt['data'].get('data') or {}
+                  attrs=obj.get('attributes') or {}
+                  rel=obj.get('relationships') or {}
+                  rec['pool_state']={'dex':((rel.get('dex') or {}).get('data') or {}).get('id'),
+                                     'reserve_usd':attrs.get('reserve_in_usd'),
+                                     'pair':attrs.get('name'),'http':gt['http']}
+              else:rec['pool_state']={'http':gt.get('http'),'error':gt.get('error')}
+              q=urllib.parse.urlencode({'inputMint':mint,'outputMint':USDC,'amount':str(raw_amount)})
+              j=req('https://api.jup.ag/swap/v2/order?'+q)
+              out=(j.get('data') or {}).get('outAmount') if isinstance(j.get('data'),dict) else None
+              rec['jupiter']={'http':j.get('http'),'quoted_usdc':int(out)/1e6 if out and str(out).isdigit() else None,
+                              'router':(j.get('data') or {}).get('router') if isinstance(j.get('data'),dict) else None,
+                              'error':j.get('error'),'transaction_signed':False}
+              r=req('https://transaction-v1.raydium.io/compute/swap-base-in?'+q+'&slippageBps=50&txVersion=V0')
+              rd=(r.get('data') or {}) if isinstance(r.get('data'),dict) else {}
+              data=(rd.get('data') or {}) if isinstance(rd.get('data'),dict) else {}
+              r_out=data.get('outputAmount')
+              rec['raydium']={'http':r.get('http'),'success':rd.get('success'),
+                              'quoted_usdc':int(r_out)/1e6 if r_out and str(r_out).isdigit() else None,
+                              'price_impact_pct':data.get('priceImpactPct'),
+                              'error':r.get('error') or rd.get('msg')}
+              rec['quote_available']=any(rec[x].get('quoted_usdc') is not None for x in ('jupiter','raydium'))
+              summary['results'].append(rec)
+              print('EXIT_ROUTE_READONLY',json.dumps(rec,ensure_ascii=False))
+              time.sleep(2.4)
+          summary['any_quote_count']=sum(bool(x['quote_available']) for x in summary['results'])
+          with open('evidence/direct_dex_vs_jupiter.json','w') as f:json.dump(summary,f,indent=2,ensure_ascii=False)
+          print('EXIT_ROUTE_AUDIT_RECEIPT',json.dumps({'checked':len(POSITIONS),'quote_available':summary['any_quote_count'],'orders':0,'trades':0}))
+          PY
+      - name: Persist audit observations without private keys or orders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-hunter-exit-route-audit
+          path: evidence/
+          if-no-files-found: warn
