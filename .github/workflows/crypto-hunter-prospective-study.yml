@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: crypto-hunter-network-probe-20261013
+          ref: main
           persist-credentials: false
       - name: Restore previous prospective state
         uses: actions/cache/restore@v4
