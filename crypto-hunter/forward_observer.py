@@ -182,12 +182,21 @@ for cycle in range(3):
                          'peak_chart_multiple':shadow.get('peak_chart_multiple',1.0),'no_trade':True})
                 elif dt_from>0 and shadow.get('entry_pool_price',0)>0:
                     gross=v/shadow['entry_pool_price']
-                    shadow['peak_chart_multiple']=max(shadow.get('peak_chart_multiple',1.),gross)
+                    if gross>shadow.get('peak_chart_multiple',1.):
+                        shadow['peak_chart_multiple']=gross
+                        shadow['peak_chart_liquidity_usd']=x['liq']
+                        shadow['peak_chart_liquidity_observed_at']=t.isoformat()
                     shadow['last_chart_multiple']=gross
                     if gross>=11 and not shadow.get('chart_11x_logged'):
                         shadow['chart_11x_logged']=True
+                        shadow['first_chart_11x_liquidity_usd']=x['liq']
+                        shadow['first_chart_11x_observed_at']=t.isoformat()
+                        shadow['chart_11x_illiquid_at_first_observation']=x['liq']<10000
                         out({'kind':'shadow_chart_11x_unfilled','at':t.isoformat(),'pool':p,'token_id':s.get('token_id'),
-                             'chart_multiple':gross,'no_entry_quote':True,'no_trade':True,'not_proven_realizable':True})
+                             'chart_multiple':gross,'liquidity_usd_at_11x':x['liq'],
+                             'liquidity_below_10000_usd':x['liq']<10000,
+                             'no_entry_quote':not bool(shadow.get('entry_quote')),
+                             'no_trade':True,'not_proven_realizable':True})
                         shadow_chart_11x_this_run+=1
                     # Only shadows with a buy+sell quote captured at initial signal can
                     # be prospectively measured with quote-only exits. NEVER backfill.
@@ -336,6 +345,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_chart_11x_unfilled_total':sum(1 for x in st.values()
                                            if x.get('shadow') and bool(x['shadow'].get('chart_11x_logged'))),
    'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
+   'shadow_chart_11x_first_observed_liquidity_below_usd_10000':sum(1 for x in st.values()
+       if x.get('shadow') and x['shadow'].get('chart_11x_illiquid_at_first_observation') is True),
    'shadow_buy_and_sell_quote_baselines_new':shadow_quote_entries_this_run,
    'shadow_buy_and_sell_quote_baselines_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('entry_quote')),
    'shadow_quote_only_exit_checks_this_run':shadow_quote_marks_this_run,
@@ -376,6 +387,7 @@ evaluation={
  'shadow_with_quote_at_signal':len(quote_shadow),
  'shadow_with_later_11x_quote_only_unfilled':sum(1 for x in quote_shadow if x.get('quote_11x_logged')),
  'shadow_with_11x_chart_only_unfilled':r['shadow_chart_11x_unfilled_total'],
+ 'shadow_11x_with_verified_low_liquidity':r['shadow_chart_11x_first_observed_liquidity_below_usd_10000'],
  'real_transactions':0,
  'realized_net_profit_verified':False,
  'strategy_reliably_profitable':False,
