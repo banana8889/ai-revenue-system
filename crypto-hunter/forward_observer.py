@@ -147,6 +147,17 @@ for cycle in range(3):
             out(x)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
+            s['last_observed_liquidity_usd']=x['liq']
+            s['last_liquidity_seen_at']=d.datetime.now(d.timezone.utc).isoformat()
+            if s.get('entry') and not s.get('exit') and x['liq']<100:
+                s['liquidity_drain_warning']=True
+                if not s.get('liquidity_collapse_first_alert_at'):
+                    s['liquidity_collapse_first_alert_at']=d.datetime.now(d.timezone.utc).isoformat()
+                    out({'kind':'paper_position_liquidity_collapse','pool':p,'token_id':token_id,
+                         'observed_liquidity_usd':x['liq'],
+                         'reference_entry_liquidity_usd':s.get('entry_liquidity_usd'),
+                         'at':s['liquidity_collapse_first_alert_at'],
+                         'exit_not_assumed':True,'orders':0})
             signature=(v,x['liq'],x['volume_1h'],x['buys_1h'],x['sells_1h'],x['buyers_1h'])
             gap=(t-s['last_distinct_at']).total_seconds() if s['last_distinct_at'] is not None else None
             prev=s.get('previous_signature')
@@ -201,6 +212,7 @@ for cycle in range(3):
                     entry_at=d.datetime.now(d.timezone.utc)
                     s['entry']=(entry_at,v)
                     s['entry_quote']=preflight
+                    s['entry_liquidity_usd']=x['liq']
                     out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
             elif s['entry'] is not None and not s.get('exit') and t>s['entry'][0]:
                 if s.get('entry_quote'):
@@ -276,6 +288,12 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
    'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
+   'quoted_positions_liquidity_under_usd_100':sum(1 for x in st.values()
+              if x.get('entry_quote') and x.get('entry') and not x.get('exit')
+              and x.get('last_observed_liquidity_usd') is not None and x['last_observed_liquidity_usd']<100),
+   'quoted_positions_liquidity_not_observed':sum(1 for x in st.values()
+              if x.get('entry_quote') and x.get('entry') and not x.get('exit')
+              and x.get('last_observed_liquidity_usd') is None),
    'method':'prospective-only: real paper allocation requires Jupiter buy+sell quotes and fresh exit data; fail-closed when prior exits unavailable; separate no-capital shadow watch on blocked candidates with chart-only max excursion, not fillable trades; no signing or execution'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
