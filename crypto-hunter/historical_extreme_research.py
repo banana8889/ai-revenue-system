@@ -145,7 +145,7 @@ def main():
        "Original GMGN labels may contain residual high-candle glitches.",
        "No proven liquidity or buy/sell route on historic winner candles.",
        "Wallet smart-money definitions may introduce additional time leakage.",
-       "One Jun 2026 market regime; temporal holdout alone cannot prove generalization."]}
+       "One Jun 2026 market regime; temporal holdout alone cannot prove generalization."]
     }
     if train_y.sum()>=8 and test_y.sum()>=3 and len(feature_cols)>=5:
         X_train=train[feature_cols].apply(pd.to_numeric,errors="coerce").replace([np.inf,-np.inf],np.nan)
