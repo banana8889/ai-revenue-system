@@ -1,8 +1,5 @@
 name: Crypto Hunter Prospective Study
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/crypto-hunter-prospective-study.yml, crypto-hunter/forward_observer.py]
   workflow_dispatch:
     inputs:
       chain:
