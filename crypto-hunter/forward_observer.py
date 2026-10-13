@@ -480,9 +480,9 @@ for label in COHORT_GROUPS:
     groups[label]={'enrolled':len(obs),'completed':len(done),
         'censored':sum(bool(z.get('censored')) for z in obs),
         'active':sum(not z.get('completed') and not z.get('censored') for z in obs),
-        'first_age_median_minutes':statistics.median([z['first_age_minutes'] for z in obs]) if obs else None,
-        'first_liquidity_median_usd':statistics.median([z['first_liquidity_usd'] for z in obs]) if obs else None,
-        'first_buyers_1h_median':statistics.median([z['first_buyers_1h'] for z in obs]) if obs else None,
+        'first_age_median_minutes':statistics.median([z['first_age_minutes'] for z in obs if z.get('first_age_minutes') is not None]) if any(z.get('first_age_minutes') is not None for z in obs) else None,
+        'first_liquidity_median_usd':statistics.median([z['first_liquidity_usd'] for z in obs if z.get('first_liquidity_usd') is not None]) if any(z.get('first_liquidity_usd') is not None for z in obs) else None,
+        'first_buyers_1h_median':statistics.median([z['first_buyers_1h'] for z in obs if z.get('first_buyers_1h') is not None]) if any(z.get('first_buyers_1h') is not None for z in obs) else None,
         'completed_chart_2x':sum(z.get('peak_chart_multiple',0)>=2 for z in done),
         'completed_chart_11x':sum(z.get('peak_chart_multiple',0)>=11 for z in done),
         'completed_11x_at_peak_liq_above_usd_10k':sum(
