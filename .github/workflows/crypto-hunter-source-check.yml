@@ -1,0 +1,32 @@
+name: Crypto Hunter Source Safety Check
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-source-check.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Static read-only safety and syntax checks
+        run: |
+          python3 -m py_compile crypto-hunter/forward_observer.py
+          python3 - <<'PY'
+          from pathlib import Path
+          src=Path('crypto-hunter/forward_observer.py').read_text()
+          assert "https://api.jup.ag/swap/v2/order?" in src
+          assert "'inputs.chain'" not in src
+          assert "entry_quote_preflight" in src
+          assert "jupiter_route_preflight" in src
+          assert "jupiter_quote(USDC,mint,5000000)" in src
+          assert "private_key" not in src.lower()
+          assert "/execute" not in src and "sendTransaction" not in src
+          assert "orders':0" in src and "trades':0" in src
+          print('SOURCE_SYNTAX_AND_READ_ONLY_POLICY=PASS')
+          PY
