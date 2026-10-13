@@ -1,0 +1,74 @@
+name: Crypto Hunter Shadow Research Regression
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-shadow-regression.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulated API fixtures verify blocked trade never becomes a fake fill
+        run: |
+          python3 - <<'PY'
+          import os,sys,json,io,runpy,tempfile,datetime as d,unittest.mock as mock
+          from pathlib import Path
+          scanner=str(Path('crypto-hunter/forward_observer.py').resolve())
+          now=d.datetime.now(d.timezone.utc)
+          mint='solana_9kzmb3SLsm9CuCY4FMfdpcMVcCHrzcEqxtNbG5ySYtsr'
+          pool='TestPoolSPL111111111111111111111111111111111'
+          quotes={'data':[]}
+          calls={'page1':0}
+          def fake_urlopen(request,timeout=0):
+              u=request.full_url if hasattr(request,'full_url') else request
+              if 'new_pools?page=1' in u:
+                  calls['page1']+=1
+                  price=2 if calls['page1']==1 else 30
+                  record={'attributes':{'name':'MOCK / SOL','address':pool,'base_token_price_usd':str(price),
+                      'reserve_in_usd':'25000','volume_usd':{'h1':'20000'},
+                      'transactions':{'h1':{'buys':150,'sells':25,'buyers':100}},
+                      'pool_created_at':(now-d.timedelta(minutes=3)).isoformat()},
+                      'relationships':{'base_token':{'data':{'id':mint}},
+                                       'quote_token':{'data':{'id':'solana_So11111111111111111111111111111111111111112'}}}}
+                  return io.BytesIO(json.dumps({'data':[record]}).encode())
+              if '/swap/v2/order?' in u:return io.BytesIO(json.dumps({'outAmount':None}).encode())
+              return io.BytesIO(json.dumps(quotes).encode())
+          old=(now-d.timedelta(seconds=95)).isoformat()
+          prev=[1.,24000.,10000.,80,25,60]
+          state={pool:{'first':(now-d.timedelta(minutes=4)).isoformat(),
+                        'last_distinct_at':old,'entry':None,'exit':None,'qualified':1,'count':1,
+                        'peak_net':0.,'previous_signature':prev,'token_id':mint},
+                 'UnquotedStuckPosition':{'first':old,'last_distinct_at':old,
+                     'entry':[(now-d.timedelta(minutes=2)).isoformat(),1.0],
+                     'entry_quote':{'observed_at':now.isoformat(),'token_raw':1000},
+                     'token_id':'solana_11111111111111111111111111111111',
+                     'quote_missing_streak':2,'peak_net':0.,'exit':None}}
+          with tempfile.TemporaryDirectory() as td:
+              old_dir=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(state))
+                  with mock.patch('urllib.request.urlopen',side_effect=fake_urlopen),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  rows=[json.loads(x) for x in Path('evidence/observations.jsonl').read_text().splitlines()]
+                  saved=json.loads(Path('evidence/state.json').read_text())
+                  report=json.loads(Path('evidence/summary.json').read_text())
+                  assert calls['page1']==3
+                  assert saved[pool]['entry'] is None,'Blocked signal must NEVER become simulated trade'
+                  assert saved[pool]['shadow']['no_capital_allocated'] is True
+                  assert saved[pool]['shadow']['peak_chart_multiple']>=11
+                  assert len([x for x in rows if x['kind']=='shadow_research_only'])==1
+                  assert len([x for x in rows if x['kind']=='shadow_chart_11x_unfilled'])==1
+                  assert report['prospective_signals']==1,'Only pre-seeded independent position should count'
+                  assert report['new_shadow_candidates_research_only']==1
+                  assert report['shadow_chart_11x_unfilled_total']==1
+                  assert report['orders']==report['trades']==0
+                  print('SHADOW_RESEARCH_NO_FILL_REGRESSION=PASS',json.dumps({
+                      'new_shadow':report['new_shadow_candidates_research_only'],
+                      'observed_unfilled_11x':report['shadow_chart_11x_unfilled_total'],
+                      'orders':report['orders'],'trades':report['trades']}))
+              finally:os.chdir(old_dir)
+          PY
