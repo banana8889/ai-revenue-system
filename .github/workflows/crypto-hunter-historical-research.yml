@@ -1,0 +1,49 @@
+name: Crypto Hunter Historical 11x Cohort Research
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-historical-research.yml]
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install analysis dependencies (isolated test runner)
+        run: |
+          python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 pyarrow==21.0.0 scikit-learn==1.7.2
+      - name: Execute historical 44k labelled observation study with time split
+        run: |
+          python3 -m py_compile crypto-hunter/historical_extreme_research.py
+          python3 crypto-hunter/historical_extreme_research.py
+      - name: Verify no future fields were used as live predictors
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          f=Path('evidence/historical/historical_results.json')
+          r=json.loads(f.read_text())
+          assert r['executed_trades']==0
+          assert r['first_snapshot_only']
+          assert r['source_distinct_mints']>=100
+          assert r['train_count'] and r['test_count']
+          assert r['train_peak_counts']['11']>=0
+          forbidden=['max_return','runner_peak','time_to_peak','reaches_2x','staged_exit']
+          assert all(not any(x in feat for x in forbidden) for feat in r['usable_features'])
+          assert r['forecast_for_live_tokens_not_validated']
+          print('HISTORICAL_NO_LEAKAGE_AUDIT=PASS')
+          PY
+      - name: Preserve reproducible empirical evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-historical-44k-time-holdout
+          path: |
+            evidence/historical/historical_results.json
+            evidence/historical/holdout_top30_not_tradeable.json
+          if-no-files-found: warn
+          retention-days: 30
