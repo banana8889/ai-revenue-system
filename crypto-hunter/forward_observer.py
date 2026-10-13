@@ -69,8 +69,10 @@ for cycle in range(3):
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
             signature=(v,x['liq'],x['volume_1h'],x['buys_1h'],x['sells_1h'],x['buyers_1h'])
-            gate=(bool(token_id) and token_id.startswith('solana_') and token_id!='solana_So11111111111111111111111111111111111111112' and 0<=age<=20 and x['liq']>=10000 and x['volume_1h']>=3000 and x['buyers_1h']>=20 and x['buys_1h']>=1.5*max(1,x['sells_1h']))
             gap=(t-s['last_distinct_at']).total_seconds() if s['last_distinct_at'] is not None else None
+            prev=s.get('previous_signature')
+            improving=(prev is None or (gap is not None and 60<=gap<=300 and v>prev[0] and x['liq']>=0.9*prev[1]))
+            gate=(bool(token_id) and token_id.startswith('solana_') and token_id!='solana_So11111111111111111111111111111111111111112' and 0<=age<=20 and x['liq']>=10000 and x['volume_1h']>=3000 and x['buyers_1h']>=20 and x['buys_1h']>=1.5*max(1,x['sells_1h']) and improving)
             if gap is not None and gap>300:s['qualified']=0
             if signature!=s['previous_signature'] and (gap is None or gap>=60):
                 s['count']+=1;s['qualified']=s.get('qualified',0)+1 if gate else 0
@@ -106,6 +108,6 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'paper_targets_11x':sum(x.get('exit',{}).get('reason')=='target_net_11x' for x in st.values() if x.get('exit')),
    'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
-   'method':'live forward-only multi-page observation; identify token by mint, never display name; one signal per observed mint; independent qualifying observations within 5 minutes; assumed 3 percent each side + 0.04 USD roundtrip; pool price not an executable quote'}
+   'method':'prospective-only live data; new exploratory entry gate requires positive price momentum and max 10 percent liquidity decline over fresh independent snapshots; mint identity deduplicated; assumed costs not executable quotes'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
