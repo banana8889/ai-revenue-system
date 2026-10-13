@@ -17,4 +17,4 @@ jobs:
         run: |
           echo "Dispatching already-defined prospective research workflow on main"
           gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
-          echo "CHAIN_BOOTSTRAP_REQUEST_ACCEPTED=true"
+          echo "CHAIN_RECOVERY_AFTER_JOB_TIMEOUT_FIX_ACCEPTED=true"
