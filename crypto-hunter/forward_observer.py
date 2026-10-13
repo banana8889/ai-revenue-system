@@ -353,3 +353,33 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'method':'forward-only: paper positions gated on Jupiter routes and safe existing exits; blocked candidates get chart shadows and optional Jupiter buy+sell quote baselines with exact-amount future quote marks; a quote is NOT an executed fill, gas/rent/MEV omitted; no signing or execution'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
+# Independent, non-promotional research scorecard. Never conflate exit quotes
+# with fills, synthetic test wins, or historically backfilled entries.
+quoted=[x for x in st.values() if x.get('entry') and x.get('entry_quote')]
+legacy=[x for x in st.values() if x.get('entry') and not x.get('entry_quote')]
+quoted_exits=[x for x in quoted if x.get('exit') and x['exit'].get('source')=='jupiter_quote_only']
+shadows=[x['shadow'] for x in st.values() if x.get('shadow') and not x['shadow'].get('expired')]
+quote_shadow=[x for x in shadows if x.get('entry_quote')]
+evaluation={
+ 'evaluated_at':r['at'],
+ 'tracked_unique_pool_addresses':len(st),
+ 'tracked_unique_mints':len({x['token_id'] for x in st.values() if x.get('token_id')}),
+ 'paper_entries_legacy_chart_only':len(legacy),
+ 'paper_entries_with_route_quotes':len(quoted),
+ 'paper_exits_with_later_jupiter_sell_quote':len(quoted_exits),
+ 'paper_quote_exit_multiples':[x['exit'].get('net_multiple_assumed') for x in quoted_exits],
+ 'quote_based_paper_exit_winners_at_11x':sum(1 for x in quoted_exits if x['exit'].get('net_multiple_assumed',0)>=11),
+ 'quoted_open_positions':r['quoted_open_positions'],
+ 'quoted_open_positions_without_sell_route':r['quoted_positions_missing_sell_route'],
+ 'shadow_research_only_active':len(shadows),
+ 'shadow_chart_peaks_top5':sorted((float(x.get('peak_chart_multiple',1)) for x in shadows),reverse=True)[:5],
+ 'shadow_with_quote_at_signal':len(quote_shadow),
+ 'shadow_with_later_11x_quote_only_unfilled':sum(1 for x in quote_shadow if x.get('quote_11x_logged')),
+ 'shadow_with_11x_chart_only_unfilled':r['shadow_chart_11x_unfilled_total'],
+ 'real_transactions':0,
+ 'realized_net_profit_verified':False,
+ 'strategy_reliably_profitable':False,
+ 'caveats':'Paper quotes may fail to land or execute; charts are not fills; fees, slippage, MEV, rent and rug risks excluded.',
+}
+with open('evidence/evaluation.json','w') as f:json.dump(evaluation,f,indent=2,allow_nan=False)
+print('PAPER_STRATEGY_EVALUATION',json.dumps(evaluation,allow_nan=False))
