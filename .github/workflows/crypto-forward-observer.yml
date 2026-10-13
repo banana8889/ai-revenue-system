@@ -47,9 +47,10 @@ jobs:
                          'buys_1h':int(tx.get('buys') or 0),'sells_1h':int(tx.get('sells') or 0),
                          'buyers_1h':int(tx.get('buyers') or 0),'dex':((obj.get('relationships') or {}).get('dex') or {}).get('data')}
                       out(x)
-                      s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.})
-                      if (t-s['first']).total_seconds()>=60:s['count']+=1
-                      else:s['count']=max(s['count'],1)
+                      s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None})
+                      signature=(v,x['liq'],x['volume_1h'],x['buys_1h'],x['sells_1h'],x['buyers_1h'])
+                      if signature!=s['previous_signature'] and (s['last_distinct_at'] is None or (t-s['last_distinct_at']).total_seconds()>=60):
+                          s['count']+=1;s['previous_signature']=signature;s['last_distinct_at']=t
                       eligible=(s['count']>=2 and 0<=age<=20 and x['liq']>=10000 and x['volume_1h']>=3000 and x['buyers_1h']>=20 and x['buys_1h']>=1.5*max(1,x['sells_1h']))
                       if s['entry'] is None and eligible:
                           s['entry']=(t,v);out({'kind':'signal','at':t.isoformat(),'pool':p,'price':v,'note':'prospective research only; no trade fill'})
