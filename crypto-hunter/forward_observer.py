@@ -1,0 +1,53 @@
+import datetime as d,json,time,urllib.request,os,math
+url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1'
+st={}
+def out(x):
+    with open('evidence/observations.jsonl','a') as f:f.write(json.dumps(x,allow_nan=False)+'\n')
+def num(x):
+    try:
+        v=float(x);return v if math.isfinite(v) else 0.
+    except (TypeError,ValueError):return 0.
+def read():
+    req=urllib.request.Request(url,headers={'Accept':'application/json;version=20230203','User-Agent':'MoonshotObserver/1.0'})
+    with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)['data']
+for cycle in range(3):
+    t=d.datetime.now(d.timezone.utc)
+    try:
+        data=read()
+        out({'kind':'sample','at':t.isoformat(),'cycle':cycle,'pool_count':len(data)})
+        for obj in data:
+            a=obj.get('attributes') or {}
+            p=a.get('address')
+            v=num(a.get('base_token_price_usd'))
+            if not p or v<=0:continue
+            tx=((a.get('transactions') or {}).get('h1') or {})
+            created=a.get('pool_created_at') or ''
+            try:age=(t-d.datetime.fromisoformat(created.replace('Z','+00:00'))).total_seconds()/60
+            except (ValueError,TypeError):age=999999
+            x={'kind':'pool','at':t.isoformat(),'pool':p,'pair':a.get('name'),'price':v,
+               'age_minutes':round(age,2),'liq':num(a.get('reserve_in_usd')),
+               'volume_1h':num((a.get('volume_usd') or {}).get('h1')),
+               'buys_1h':int(tx.get('buys') or 0),'sells_1h':int(tx.get('sells') or 0),
+               'buyers_1h':int(tx.get('buyers') or 0),'dex':((obj.get('relationships') or {}).get('dex') or {}).get('data')}
+            out(x)
+            s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None})
+            signature=(v,x['liq'],x['volume_1h'],x['buys_1h'],x['sells_1h'],x['buyers_1h'])
+            if signature!=s['previous_signature'] and (s['last_distinct_at'] is None or (t-s['last_distinct_at']).total_seconds()>=60):
+                s['count']+=1;s['previous_signature']=signature;s['last_distinct_at']=t
+            eligible=(s['count']>=2 and 0<=age<=20 and x['liq']>=10000 and x['volume_1h']>=3000 and x['buyers_1h']>=20 and x['buys_1h']>=1.5*max(1,x['sells_1h']))
+            if s['entry'] is None and eligible:
+                s['entry']=(t,v);out({'kind':'signal','at':t.isoformat(),'pool':p,'price':v,'note':'prospective research only; no trade fill'})
+            elif s['entry'] is not None and t>s['entry'][0]:
+                gross=v/s['entry'][1]
+                assumed_net=0.97*0.97*gross-0.008
+                s['peak_net']=max(s['peak_net'],assumed_net)
+                out({'kind':'mark','at':t.isoformat(),'pool':p,'gross_x':gross,'assumed_net_x':assumed_net,'not_executable_quote':True})
+    except Exception as e:out({'kind':'source_error','at':t.isoformat(),'error':str(e)[:200]})
+    if cycle<2:time.sleep(65)
+r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
+   'prospective_signals':sum(x['entry'] is not None for x in st.values()),
+   'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
+   'orders':0,'trades':0,'exit_execution_verified':False,
+   'method':'forward-only live samples; assumed 3 percent each side + 0.04 USD roundtrip; price is not executable quote'}
+print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
+with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
