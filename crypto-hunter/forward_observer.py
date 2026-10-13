@@ -168,8 +168,11 @@ for cycle in range(3):
                 and 0<=age<=20 and x['liq']>=10000 and x['buyers_1h']>=20 and x['sells_1h']>=1):
                 group=('buy_pressure' if x['buys_1h']>=1.5*x['sells_1h']
                        else 'lower_pressure_control')
-                occupied=sum(z.get('cohort',{}).get('group')==group for z in st.values())
-                if occupied<COHORT_MAX_PER_GROUP:
+                occupied=sum(z.get('cohort',{}).get('group')==group
+                             and not z['cohort'].get('completed') and not z['cohort'].get('censored')
+                             for z in st.values() if z.get('cohort'))
+                already_enrolled=any(z.get('cohort') and z.get('token_id')==token_id for z in st.values())
+                if occupied<COHORT_MAX_PER_GROUP and not already_enrolled:
                     s['cohort']={'group':group,'at':t.isoformat(),
                         'first_chart_price':v,'first_liquidity_usd':x['liq'],
                         'first_age_minutes':age,'first_buyers_1h':x['buyers_1h'],
@@ -485,6 +488,32 @@ cohort_report={'as_of':r['at'],
     'design':'fixed first-discovery groups, buy count / sell count >=1.5 vs <1.5, same min age liquidity buyer filters; 24h price-chart outcomes with explicit censored data',
     'groups':groups,'training_model_transferred':False,
     'executable_returns_verified':False,'orders':0,'trades':0}
+# Retain bounded completed/censored outcomes separately from short-lived pool
+# checkpoints; subsequent run restores this ledger through the same Actions cache.
+ledger_path='evidence/prospective_cohort_ledger.json'
+try:
+    with open(ledger_path,encoding='utf-8') as f:ledger=json.load(f)
+    assert isinstance(ledger,list)
+except (FileNotFoundError,ValueError,TypeError,AssertionError):
+    ledger=[]
+known={record.get('pool') for record in ledger}
+for pool,z in st.items():
+    co=z.get('cohort')
+    if not co or not (co.get('completed') or co.get('censored')) or pool in known:continue
+    ledger.append({'pool':pool,'token_id':z.get('token_id'),
+        'group':co['group'],'enrolled_at':co['at'],
+        'finished_at':co.get('finished_at'),
+        'samples':co.get('n_observations',0),
+        'completed':bool(co.get('completed')),'censored':bool(co.get('censored')),
+        'peak_chart_multiple':co.get('peak_chart_multiple',1.),
+        'peak_liquidity_usd':co.get('peak_liquidity_usd'),
+        'not_an_executable_quote':True,'trades':0})
+    known.add(pool)
+# A 24h chart cohort is not an actual fill. Retain only the last 1000
+# records in small local cache; archived per-run artifacts retain snapshots.
+ledger=ledger[-1000:]
+with open(ledger_path,'w',encoding='utf-8') as f:json.dump(ledger,f,indent=1)
+cohort_report['historical_completed_or_censored_retained']=len(ledger)
 with open('evidence/prospective_cohort_comparison.json','w') as f:
     json.dump(cohort_report,f,indent=2,allow_nan=False)
 print('LIVE_COHORT_24H_COMPARISON',json.dumps(cohort_report,allow_nan=False))
