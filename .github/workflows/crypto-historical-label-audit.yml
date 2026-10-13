@@ -1,0 +1,40 @@
+name: Crypto Historical Label Integrity Audit
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-historical-label-audit.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Install read-only Parquet inspection dependency
+        run: python3 -m pip install -q --disable-pip-version-check pandas==2.3.3 pyarrow==21.0.0
+      - name: Inspect label units and missing or inconsistent outcomes
+        run: |
+          python3 - <<'PY'
+          import pandas as pd,urllib.request
+          sha='7070d00e1e4492f8604d988549d91785cc5f43f7'
+          url=f'https://raw.githubusercontent.com/ian05012/solana-memecoin-dataset/{sha}/data/tokens.parquet'
+          urllib.request.urlretrieve(url,'tokens.parquet')
+          f=pd.read_parquet('tokens.parquet')
+          print('DATA_ROWS',len(f),'UNIQUE_MINTS',f.token_address.nunique())
+          print('LABEL_COLUMNS',[x for x in f.columns if any(t in x for t in ('max_return','reaches_2x','runner_peak','staged_exit','close_return','price_at_capture'))])
+          for k in ['max_return_1h','max_return_6h','max_return_24h','max_return_3d','runner_peak_x','reaches_2x','staged_exit_return','price_at_capture','time_since_launch_sec']:
+              if k not in f:continue
+              n=pd.to_numeric(f[k],errors='coerce')
+              print('RAW_FIELD',k,{'non_null':int(n.notna().sum()),'min':str(n.min()),'median':str(n.median()),
+                  'p95':str(n.quantile(.95)),'p99':str(n.quantile(.99)),'max':str(n.max()),
+                  'gt2':int((n>=2).sum()),'gt5':int((n>=5).sum()),'gt11':int((n>=11).sum())})
+          a=f.copy();a['captured_at']=pd.to_datetime(a.captured_at,utc=True,errors='coerce')
+          for label,frame in [('earliest',a.sort_values('captured_at').drop_duplicates('token_address',keep='first')),
+                              ('latest',a.sort_values('captured_at').drop_duplicates('token_address',keep='last'))]:
+              r=pd.to_numeric(frame['max_return_24h'],errors='coerce')
+              two=pd.to_numeric(frame.get('reaches_2x'),errors='coerce')
+              print('DEDUP',label,'mints',len(frame),'return_nonnull',int(r.notna().sum()),'>=2',int((r>=2).sum()),'>=11',int((r>=11).sum()),'reaches_2x_true',int((two==1).sum()))
+          cols=[c for c in ['token_address','captured_at','max_return_24h','reaches_2x','runner_peak_x','time_since_launch_sec'] if c in a]
+          print('TOP_RAW_RETURNS',a.nlargest(8,'max_return_24h')[cols].to_json(orient='records',date_format='iso'))
+          print('RANDOM_FIRST',a[cols].head(3).to_json(orient='records',date_format='iso'))
+          PY
