@@ -1,6 +1,9 @@
-import datetime as d,json,time,urllib.request,urllib.error,os,math
+import datetime as d,json,time,urllib.request,urllib.error,urllib.parse,os,math
 url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
+USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+quote_checks=0
+MAX_ENTRY_QUOTE_CHECKS=5
 try:
     with open('evidence/state.json') as f:st=json.load(f)
     for a in st.values():
@@ -26,6 +29,39 @@ def read(endpoint):
         except (urllib.error.URLError,TimeoutError):
             if attempt==2:raise
         time.sleep(3*(attempt+1))
+
+def jupiter_quote(input_mint,output_mint,raw_amount):
+    """No taker, no transaction, no API key, strictly a read-only quotation."""
+    time.sleep(2.3)  # keyless gateway 0.5 requests/second
+    params=urllib.parse.urlencode({'inputMint':input_mint,'outputMint':output_mint,'amount':str(raw_amount)})
+    req=urllib.request.Request('https://api.jup.ag/swap/v2/order?'+params,headers={'User-Agent':'CryptoHunterRouteStudy/1.0','Accept':'application/json'})
+    try:
+        with urllib.request.urlopen(req,timeout=15) as resp:body=json.load(resp)
+        amount=int(body.get('outAmount') or 0)
+        return {'ok':amount>0,'out_amount':amount,'router':body.get('router'),'fee_bps':body.get('feeBps'),'error_code':body.get('errorCode')}
+    except urllib.error.HTTPError as e:
+        return {'ok':False,'http':e.code,'error':'no_quote'}
+    except (ValueError,TypeError,urllib.error.URLError,TimeoutError):
+        return {'ok':False,'error':'quote_unavailable'}
+def entry_quote_preflight(mint):
+    """Require both exact-size 5 USDC entry and sell-back paths at observation time."""
+    global quote_checks
+    if quote_checks>=MAX_ENTRY_QUOTE_CHECKS:
+        return {'ok':False,'reason':'quota_deferred'}
+    quote_checks+=1
+    entry=jupiter_quote(USDC,mint,5000000)
+    if not entry.get('ok'):return {'ok':False,'reason':'buy_route_missing','buy':entry}
+    exit_quote=jupiter_quote(mint,USDC,entry['out_amount'])
+    if not exit_quote.get('ok'):return {'ok':False,'reason':'sell_route_missing','buy':entry,'sell':exit_quote}
+    net=exit_quote['out_amount']/5000000
+    # This is a same-moment price check, not an executed fill; gas/rent/MEV excluded.
+    return {'ok':net>=0.85,'reason':'route_verified' if net>=0.85 else 'quote_roundtrip_too_costly',
+            'initial_usdc':5,'token_raw':entry['out_amount'],'immediate_roundtrip_usdc':exit_quote['out_amount']/1000000,
+            'immediate_roundtrip_multiple':round(net,8),
+            'buy_router':entry.get('router'),'sell_router':exit_quote.get('router'),
+            'buy_fee_bps':entry.get('fee_bps'),'sell_fee_bps':exit_quote.get('fee_bps'),
+            'observed_at':d.datetime.now(d.timezone.utc).isoformat(),'quote_only':True}
+
 for cycle in range(3):
     t=d.datetime.now(d.timezone.utc)
     try:
@@ -80,7 +116,14 @@ for cycle in range(3):
             eligible=s.get('qualified',0)>=2 and gate
             already_signaled=any(k!=p and z.get('entry') and z.get('token_id')==token_id for k,z in st.items()) if token_id else False
             if s['entry'] is None and eligible and not already_signaled:
-                s['entry']=(t,v);out({'kind':'signal','at':t.isoformat(),'pool':p,'token_id':token_id,'price':v,'note':'prospective research only; no trade fill'})
+                mint=token_id.removeprefix('solana_')
+                preflight=entry_quote_preflight(mint)
+                out({'kind':'jupiter_route_preflight','at':d.datetime.now(d.timezone.utc).isoformat(),'pool':p,'token_id':token_id,'result':preflight})
+                if preflight.get('ok'):
+                    entry_at=d.datetime.now(d.timezone.utc)
+                    s['entry']=(entry_at,v)
+                    s['entry_quote']=preflight
+                    out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
             elif s['entry'] is not None and not s.get('exit') and t>s['entry'][0]:
                 gross=v/s['entry'][1]
                 assumed_net=0.97*0.97*gross-0.008
@@ -108,6 +151,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'paper_targets_11x':sum(x.get('exit',{}).get('reason')=='target_net_11x' for x in st.values() if x.get('exit')),
    'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
-   'method':'prospective-only live data; new exploratory entry gate requires positive price momentum and max 10 percent liquidity decline over fresh independent snapshots; mint identity deduplicated; assumed costs not executable quotes'}
+   'quote_preflight_attempts':quote_checks,
+   'method':'prospective-only live data; new signals require quote-only Jupiter V2 5 USDC buy+sell routes and <=15pct initial roundtrip loss, no taker or execution; historic signals are legacy and not reclassified'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
