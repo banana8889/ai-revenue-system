@@ -56,7 +56,7 @@ jobs:
           PY
       - name: Validate checkpoint including after collector failure
         if: always()
-        id: state-integrity
+        id: state_integrity
         shell: bash
         run: |
           python3 - <<'PY'
@@ -77,7 +77,7 @@ jobs:
           PY
           echo "usable=true" >> "$GITHUB_OUTPUT"
       - name: Save durable state between future runs (also after receipt failure)
-        if: always() && steps.state-integrity.outputs.usable == 'true'
+        if: always() && steps.state_integrity.outputs.usable == 'true'
         uses: actions/cache/save@v4
         with:
           path: evidence/state.json
