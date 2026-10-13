@@ -1,4 +1,4 @@
-import datetime as d,json,time,urllib.request,urllib.error,urllib.parse,os,math
+import datetime as d,json,time,urllib.request,urllib.error,urllib.parse,os,math,statistics
 url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -480,12 +480,15 @@ for label in COHORT_GROUPS:
     groups[label]={'enrolled':len(obs),'completed':len(done),
         'censored':sum(bool(z.get('censored')) for z in obs),
         'active':sum(not z.get('completed') and not z.get('censored') for z in obs),
+        'first_age_median_minutes':statistics.median([z['first_age_minutes'] for z in obs]) if obs else None,
+        'first_liquidity_median_usd':statistics.median([z['first_liquidity_usd'] for z in obs]) if obs else None,
+        'first_buyers_1h_median':statistics.median([z['first_buyers_1h'] for z in obs]) if obs else None,
         'completed_chart_2x':sum(z.get('peak_chart_multiple',0)>=2 for z in done),
         'completed_chart_11x':sum(z.get('peak_chart_multiple',0)>=11 for z in done),
         'completed_11x_at_peak_liq_above_usd_10k':sum(
             z.get('peak_chart_multiple',0)>=11 and z.get('peak_liquidity_usd',0)>=10000 for z in done)}
 cohort_report={'as_of':r['at'],
-    'design':'fixed first-discovery groups, buy count / sell count >=1.5 vs <1.5, same min age liquidity buyer filters; 24h price-chart outcomes with explicit censored data',
+    'design':'fixed prospective first-discovery 24h groups, buy count / sell count >=1.5 vs <1.5 with shared eligibility minima (NOT individually matched); 24h chart outcomes, censored data tracked separately',
     'groups':groups,'training_model_transferred':False,
     'executable_returns_verified':False,'orders':0,'trades':0}
 # Retain bounded completed/censored outcomes separately from short-lived pool
