@@ -3,8 +3,9 @@ on:
   push:
     branches: [main]
     paths: [.github/workflows/crypto-hunter-prospective-study.yml]
+  workflow_dispatch:
   schedule:
-    - cron: '7,17,27,37,47,57 * * * *'
+    - cron: '3,13,23,33,43,53 * * * *'
 permissions:
   contents: read
   actions: write
@@ -16,49 +17,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 7
     steps:
-      - name: Bound study and prevent infinite scheduling
-        id: window
-        shell: bash
-        run: |
-          if [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \< "2026-10-16T12:00:00Z" ]; then
-            echo "active=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "active=no" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Disable study automatically after cutoff
-        if: steps.window.outputs.active == 'no'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/disable"
       - uses: actions/checkout@v4
-        if: steps.window.outputs.active == 'yes'
         with:
           ref: crypto-hunter-network-probe-20261013
           persist-credentials: false
-      - name: Restore prospective state from most recent run
-        if: steps.window.outputs.active == 'yes'
+      - name: Restore previous prospective state
         uses: actions/cache/restore@v4
         with:
           path: evidence/state.json
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
-      - name: Run strictly forward-only market observations
-        if: steps.window.outputs.active == 'yes'
+      - name: Collect live forward-only observations without transactions
         run: |
           mkdir -p evidence
           python3 crypto-hunter/forward_observer.py
-      - name: Save state for next execution
-        if: always() && steps.window.outputs.active == 'yes'
+          python3 - <<'PY'
+          import json,os,sys
+          state='evidence/state.json'
+          summary='evidence/summary.json'
+          logs='evidence/observations.jsonl'
+          if not all(os.path.isfile(p) and os.path.getsize(p)>0 for p in (state,summary,logs)):
+              print('FAIL: missing state, summary or observations');sys.exit(1)
+          with open(logs,encoding='utf-8') as f:rows=[json.loads(s) for s in f]
+          samples=[r for r in rows if r.get('kind')=='sample' and r.get('pool_count',0)>0]
+          pools=[r for r in rows if r.get('kind')=='pool']
+          errors=[r for r in rows if r.get('kind')=='source_error']
+          with open(summary,encoding='utf-8') as f:receipt=json.load(f)
+          if not samples or not pools or len(errors)>len(samples):
+              print('FAIL: no usable live samples',{'samples':len(samples),'pools':len(pools),'errors':len(errors)});sys.exit(1)
+          assert receipt.get('orders')==receipt.get('trades')==0
+          with open(state,encoding='utf-8') as f:checkpoint=json.load(f)
+          print('LIVE_STUDY_HEARTBEAT',json.dumps({'at':receipt['at'],'samples':len(samples),'pools':len(pools),'tracked':len(checkpoint),'signals':receipt.get('prospective_signals',0),'exits':receipt.get('paper_exits',0),'trades':0,'errors':len(errors)}))
+          PY
+      - name: Save durable state between future runs
+        if: success()
         uses: actions/cache/save@v4
         with:
           path: evidence/state.json
           key: crypto-prospective-state-${{ github.run_id }}
-      - name: Preserve raw evidence and outcomes
-        if: always() && steps.window.outputs.active == 'yes'
+      - name: Preserve independent evidence and receipt
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: crypto-prospective-evidence-${{ github.run_id }}
           path: evidence/
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 30
