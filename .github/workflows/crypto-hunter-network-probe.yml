@@ -1,0 +1,60 @@
+name: Crypto Hunter live connectivity probe
+on:
+  push:
+    branches: [crypto-hunter-network-probe-20261013]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  network-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Probe public live Solana market APIs without secrets or orders
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,urllib.request,urllib.error,datetime,time
+          ts=datetime.datetime.now(datetime.timezone.utc).isoformat()
+          output={'checked_at_utc':ts,'live_sources':{},'candidate_pools':[],'wallet_query':{},'trading':{'signed':False,'orders':0}}
+          def fetch(label,url,method='GET',data=None):
+              t=time.time()
+              try:
+                  req=urllib.request.Request(url,data=data,headers={'User-Agent':'CryptoHunterNetworkProbe/1.0','Accept':'application/json','Content-Type':'application/json'},method=method)
+                  with urllib.request.urlopen(req,timeout=15) as resp:
+                      raw=resp.read(2000000); body=json.loads(raw)
+                      output['live_sources'][label]={'ok':True,'http':resp.status,'latency_ms':round((time.time()-t)*1000),'bytes':len(raw)}
+                      return body
+              except Exception as exc:
+                  status=getattr(exc,'code',None)
+                  output['live_sources'][label]={'ok':False,'http':status,'latency_ms':round((time.time()-t)*1000),'error':type(exc).__name__+': '+str(exc)[:160]}
+          gt=fetch('geckoterminal_new_solana','https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1')
+          if isinstance(gt,dict):
+              for obj in gt.get('data',[])[:20]:
+                  a=obj.get('attributes') or {}
+                  output['candidate_pools'].append({'pair':a.get('name'),'pool_address':a.get('address'),'pool_created_at':a.get('pool_created_at'),'reserve_usd':a.get('reserve_in_usd'),'volume_1h_usd':(a.get('volume_usd') or {}).get('h1'),'tx_1h':(a.get('transactions') or {}).get('h1'),'source':'geckoterminal'})
+          dx=fetch('dexscreener_profiles','https://api.dexscreener.com/token-profiles/latest/v1')
+          if isinstance(dx,list):
+              output['dex_profiles_solana_count']=sum(1 for x in dx if x.get('chainId')=='solana')
+              output['dex_profile_sol_addresses']=[x.get('tokenAddress') for x in dx if x.get('chainId')=='solana'][:10]
+          rpc='https://api.mainnet-beta.solana.com'
+          pk='8fxudEnAgdo2k4mvnX6Pfvf98GpTBBR7NfT82SoQj8pX'
+          result=fetch('solana_rpc_getBalance',rpc,'POST',json.dumps({'jsonrpc':'2.0','id':1,'method':'getBalance','params':[pk]}).encode())
+          if isinstance(result,dict):
+              output['wallet_query']={'balance_lamports':(result.get('result') or {}).get('value'),'rpc_error':result.get('error')}
+          result=fetch('jupiter_public_token_info','https://lite-api.jup.ag/tokens/v1/token/So11111111111111111111111111111111111111112')
+          if isinstance(result,dict):
+              output['jupiter_sample_symbol']=result.get('symbol')
+          with open('crypto-network-probe.json','w') as f:json.dump(output,f,ensure_ascii=False,indent=2)
+          print('NETWORK_PROBE',json.dumps({k:v for k,v in output.items() if k!='candidate_pools'}))
+          print('CANDIDATE_POOL_COUNT',len(output['candidate_pools']))
+          if output['candidate_pools']:
+              print('CANDIDATE_FIRST',json.dumps(output['candidate_pools'][0]))
+          PY
+      - name: Upload factual network receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-network-probe
+          path: crypto-network-probe.json
+          if-no-files-found: ignore
