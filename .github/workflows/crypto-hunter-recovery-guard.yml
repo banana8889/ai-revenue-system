@@ -1,0 +1,55 @@
+name: Crypto Hunter Recovery Guard
+on:
+  workflow_run:
+    workflows: ["Crypto Hunter Prospective Study"]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-recovery-guard.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  validate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: |
+          echo "RECOVERY_GUARD_SYNTAX=OK"
+          echo "Recovery will occur only for failed workflow_dispatch research events."
+          echo "No wallet keys, purchase orders, or auto-trades."
+  recover:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Restart one failed chain only if recovery remains safe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=12"
+          statuses=$(gh api "$url" --jq '[.workflow_runs[] | select(.status=="completed")][0:3] | .[].conclusion')
+          consecutive=0
+          while IFS= read -r outcome; do
+            case "$outcome" in
+              success) break ;;
+              failure|cancelled|timed_out|action_required) consecutive=$((consecutive+1)) ;;
+              *) break ;;
+            esac
+          done <<< "$statuses"
+          echo "CONSECUTIVE_FAILURES=$consecutive"
+          if [ "$consecutive" -ge 3 ]; then
+            echo "RECOVERY_HALTED: three consecutive failures, human review required"
+            exit 0
+          fi
+          sleep 45
+          active=$(gh api "$url" --jq '[.workflow_runs[] | select(.status=="in_progress" or .status=="queued" or .status=="pending")] | length')
+          if [ "$active" -gt 0 ]; then
+            echo "RECOVERY_SKIPPED: active research chain already exists ($active)"
+            exit 0
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
+          echo "RECOVERY_RESTART_REQUEST_ACCEPTED=true"
