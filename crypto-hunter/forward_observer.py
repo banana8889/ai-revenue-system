@@ -8,6 +8,10 @@ sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
 MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
+MAX_SHADOW_CANDIDATES=25
+SHADOW_RESEARCH_SECONDS=24*3600
+shadow_new_this_run=0
+shadow_chart_11x_this_run=0
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
 try:
@@ -101,6 +105,10 @@ for cycle in range(3):
         seen=set()
         data=[p for p in data if p.get('attributes',{}).get('address') and not (p['attributes']['address'] in seen or seen.add(p['attributes']['address']))]
         active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
+        shadows=[p for p,x in st.items() if x.get('shadow') and not x.get('entry') and not x['shadow'].get('expired')
+                 and (t-d.datetime.fromisoformat(x['shadow']['at'])).total_seconds()<=SHADOW_RESEARCH_SECONDS]
+        shadows.sort(key=lambda p: st[p]['shadow']['at'])
+        active.extend(p for p in shadows[:MAX_SHADOW_CANDIDATES] if p not in active)
         active.sort(key=lambda p: st[p].get('last_sell_quote_at') or '')
         for n in range(0,len(active),30):
             try:
@@ -140,6 +148,22 @@ for cycle in range(3):
                 s['count']+=1;s['qualified']=s.get('qualified',0)+1 if gate else 0
                 s['previous_signature']=signature;s['last_distinct_at']=t
             eligible=s.get('qualified',0)>=2 and gate
+            shadow=s.get('shadow')
+            if shadow and not s.get('entry') and not shadow.get('expired'):
+                dt_from=(t-d.datetime.fromisoformat(shadow['at'])).total_seconds()
+                if dt_from>SHADOW_RESEARCH_SECONDS:
+                    shadow['expired']=True
+                    out({'kind':'shadow_watch_expired','pool':p,'token_id':s.get('token_id'),'at':t.isoformat(),
+                         'peak_chart_multiple':shadow.get('peak_chart_multiple',1.0),'no_trade':True})
+                elif dt_from>0 and shadow.get('entry_pool_price',0)>0:
+                    gross=v/shadow['entry_pool_price']
+                    shadow['peak_chart_multiple']=max(shadow.get('peak_chart_multiple',1.),gross)
+                    shadow['last_chart_multiple']=gross
+                    if gross>=11 and not shadow.get('chart_11x_logged'):
+                        shadow['chart_11x_logged']=True
+                        out({'kind':'shadow_chart_11x_unfilled','at':t.isoformat(),'pool':p,'token_id':s.get('token_id'),
+                             'chart_multiple':gross,'no_entry_quote':True,'no_trade':True,'not_proven_realizable':True})
+                        shadow_chart_11x_this_run+=1
             already_signaled=any(k!=p and z.get('entry') and z.get('token_id')==token_id for k,z in st.items()) if token_id else False
             if s['entry'] is None and eligible and not already_signaled:
                 risk=paper_entry_risk_reason(d.datetime.now(d.timezone.utc))
@@ -148,6 +172,18 @@ for cycle in range(3):
                         blocked_candidates_this_run.add(token_id)
                         out({'kind':'risk_blocked_candidate','at':d.datetime.now(d.timezone.utc).isoformat(),
                              'pool':p,'token_id':token_id,'reason':risk,'new_position':False})
+                    known_shadow=any(k!=p and z.get('shadow') and not z['shadow'].get('expired')
+                                     and z.get('token_id')==token_id for k,z in st.items())
+                    open_shadows=sum(bool(z.get('shadow')) and not z['shadow'].get('expired')
+                                     and not z.get('entry') for z in st.values())
+                    if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
+                        s['shadow']={'at':d.datetime.now(d.timezone.utc).isoformat(),
+                                     'entry_pool_price':v,'peak_chart_multiple':1.,
+                                     'reason':risk,'no_capital_allocated':True}
+                        shadow_new_this_run+=1
+                        out({'kind':'shadow_research_only','at':s['shadow']['at'],'pool':p,
+                             'token_id':token_id,'observed_price':v,'entry_intentionally_blocked':True,
+                             'no_entry_quote':True,'no_order':True,'reason':risk})
                     continue
                 mint=token_id.removeprefix('solana_')
                 preflight=entry_quote_preflight(mint)
@@ -222,9 +258,15 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
    'risk_blocked_candidate_mints':len(blocked_candidates_this_run),
+   'new_shadow_candidates_research_only':shadow_new_this_run,
+   'shadow_active_research_only':sum(bool(x.get('shadow')) and not x['shadow'].get('expired')
+                                     and not x.get('entry') for x in st.values()),
+   'shadow_chart_11x_unfilled_total':sum(bool(x.get('shadow')) and x['shadow'].get('chart_11x_logged')
+                                          for x in st.values()),
+   'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
    'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
-   'method':'prospective-only live data; new entries require Jupiter $5 buy and sell quotes; new exits monitored with exact token-amount Jupiter sell quotes where available; old chart-only signals remain legacy; no taker or execution, gas/rent/MEV excluded'}
+   'method':'prospective-only: real paper allocation requires Jupiter buy+sell quotes and fresh exit data; fail-closed when prior exits unavailable; separate no-capital shadow watch on blocked candidates with chart-only max excursion, not fillable trades; no signing or execution'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
