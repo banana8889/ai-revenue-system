@@ -270,8 +270,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'new_shadow_candidates_research_only':shadow_new_this_run,
    'shadow_active_research_only':sum(bool(x.get('shadow')) and not x['shadow'].get('expired')
                                      and not x.get('entry') for x in st.values()),
-   'shadow_chart_11x_unfilled_total':sum(bool(x.get('shadow')) and x['shadow'].get('chart_11x_logged')
-                                          for x in st.values()),
+   'shadow_chart_11x_unfilled_total':sum(1 for x in st.values()
+                                           if x.get('shadow') and bool(x['shadow'].get('chart_11x_logged'))),
    'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
