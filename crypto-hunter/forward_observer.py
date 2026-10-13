@@ -4,6 +4,8 @@ st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 quote_checks=0
 MAX_ENTRY_QUOTE_CHECKS=5
+sell_mark_checks=0
+MAX_SELL_MARKS_PER_RUN=8
 try:
     with open('evidence/state.json') as f:st=json.load(f)
     for a in st.values():
@@ -76,6 +78,7 @@ for cycle in range(3):
         seen=set()
         data=[p for p in data if p.get('attributes',{}).get('address') and not (p['attributes']['address'] in seen or seen.add(p['attributes']['address']))]
         active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
+        active.sort(key=lambda p: st[p].get('last_sell_quote_at') or '')
         for n in range(0,len(active),30):
             try:
                 more=read('https://api.geckoterminal.com/api/v2/networks/solana/pools/multi/'+','.join(active[n:n+30]))
@@ -125,16 +128,42 @@ for cycle in range(3):
                     s['entry_quote']=preflight
                     out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
             elif s['entry'] is not None and not s.get('exit') and t>s['entry'][0]:
-                gross=v/s['entry'][1]
-                assumed_net=0.97*0.97*gross-0.008
-                s['peak_net']=max(s['peak_net'],assumed_net)
-                reason=('target_net_11x' if assumed_net>=11 else 'hard_stop_25pct' if assumed_net<=0.75
-                        else 'peak_trail_25pct' if s['peak_net']>=3 and assumed_net<=0.75*s['peak_net']
-                        else 'hold_limit_24h' if (t-s['entry'][0]).total_seconds()>=86400 else None)
-                out({'kind':'mark','at':t.isoformat(),'pool':p,'gross_x':gross,'assumed_net_x':assumed_net,'not_executable_quote':True})
-                if reason:
-                    s['exit']={'at':t.isoformat(),'reason':reason,'net_multiple_assumed':assumed_net}
-                    out({'kind':'paper_exit','at':t.isoformat(),'pool':p,**s['exit'],'not_an_actual_fill':True})
+                if s.get('entry_quote'):
+                    # New positions are priced on fresh exact-size sell quotes, never a chart-only stop.
+                    if sell_mark_checks>=MAX_SELL_MARKS_PER_RUN:
+                        out({'kind':'sell_mark_deferred','at':d.datetime.now(d.timezone.utc).isoformat(),'pool':p,'reason':'quote_rate_budget'})
+                        continue
+                    sell_mark_checks+=1
+                    mint=s.get('token_id','').removeprefix('solana_')
+                    q=jupiter_quote(mint,USDC,int(s['entry_quote']['token_raw']))
+                    mark_at=d.datetime.now(d.timezone.utc)
+                    s['last_sell_quote_at']=mark_at.isoformat()
+                    if not q.get('ok'):
+                        out({'kind':'sell_quote_missing','at':mark_at.isoformat(),'pool':p,'route':q,'no_exit_fill':True})
+                        continue
+                    net=q['out_amount']/5000000
+                    s['peak_net']=max(s['peak_net'],net)
+                    reason=('target_quote_11x' if net>=11 else 'hard_stop_quote_25pct' if net<=0.75
+                            else 'peak_trail_quote_25pct' if s['peak_net']>=3 and net<=0.75*s['peak_net']
+                            else 'hold_limit_quote_24h' if (mark_at-s['entry'][0]).total_seconds()>=86400 else None)
+                    out({'kind':'jupiter_sell_quote_mark','at':mark_at.isoformat(),'pool':p,'token_id':s.get('token_id'),
+                         'quote_usdc':q['out_amount']/1000000,'quote_net_multiple':net,'router':q.get('router'),
+                         'not_executed':True,'gas_rent_mev_not_included':True})
+                    if reason:
+                        s['exit']={'at':mark_at.isoformat(),'reason':reason,'net_multiple_assumed':net,'source':'jupiter_quote_only'}
+                        out({'kind':'paper_exit','at':mark_at.isoformat(),'pool':p,**s['exit'],'not_an_actual_fill':True})
+                else:
+                    # Preserve legacy research signals exactly as originally measured.
+                    gross=v/s['entry'][1]
+                    assumed_net=0.97*0.97*gross-0.008
+                    s['peak_net']=max(s['peak_net'],assumed_net)
+                    reason=('target_net_11x' if assumed_net>=11 else 'hard_stop_25pct' if assumed_net<=0.75
+                            else 'peak_trail_25pct' if s['peak_net']>=3 and assumed_net<=0.75*s['peak_net']
+                            else 'hold_limit_24h' if (t-s['entry'][0]).total_seconds()>=86400 else None)
+                    out({'kind':'legacy_chart_mark','at':t.isoformat(),'pool':p,'gross_x':gross,'assumed_net_x':assumed_net,'not_executable_quote':True})
+                    if reason:
+                        s['exit']={'at':t.isoformat(),'reason':reason,'net_multiple_assumed':assumed_net,'source':'legacy_chart_only'}
+                        out({'kind':'paper_exit','at':t.isoformat(),'pool':p,**s['exit'],'not_an_actual_fill':True})
     except Exception as e:out({'kind':'source_error','at':t.isoformat(),'error':str(e)[:200]})
     if cycle<2:time.sleep(65)
 keep={p:x for p,x in st.items() if (d.datetime.now(d.timezone.utc)-x['first']).total_seconds()<=72*3600 or x.get('entry')}
@@ -148,10 +177,11 @@ with open('evidence/state.json','w') as f:json.dump(serial,f,allow_nan=False)
 r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'prospective_signals':sum(x['entry'] is not None for x in st.values()),
    'paper_exits':sum(x.get('exit') is not None for x in st.values()),
-   'paper_targets_11x':sum(x.get('exit',{}).get('reason')=='target_net_11x' for x in st.values() if x.get('exit')),
+   'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
+   'new_sell_quote_mark_attempts':sell_mark_checks,
    'observed_11x_after_signal':sum(x['peak_net']>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
-   'method':'prospective-only live data; new signals require quote-only Jupiter V2 5 USDC buy+sell routes and <=15pct initial roundtrip loss, no taker or execution; historic signals are legacy and not reclassified'}
+   'method':'prospective-only live data; new entries require Jupiter $5 buy and sell quotes; new exits monitored with exact token-amount Jupiter sell quotes where available; old chart-only signals remain legacy; no taker or execution, gas/rent/MEV excluded'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
 with open('evidence/summary.json','w') as f:json.dump(r,f,indent=2)
