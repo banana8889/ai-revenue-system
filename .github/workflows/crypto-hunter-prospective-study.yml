@@ -27,7 +27,9 @@ jobs:
       - name: Restore previous prospective state
         uses: actions/cache/restore@v4
         with:
-          path: evidence/state.json
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
@@ -51,6 +53,11 @@ jobs:
           if not samples or not pools or len(errors)>len(samples):
               print('FAIL: no usable live samples',{'samples':len(samples),'pools':len(pools),'errors':len(errors)});sys.exit(1)
           assert receipt.get('orders')==receipt.get('trades')==0
+          with open('evidence/prospective_cohort_comparison.json',encoding='utf-8') as f:cohorts=json.load(f)
+          assert cohorts['orders']==cohorts['trades']==0
+          assert len(cohorts['groups'])==2
+          with open('evidence/prospective_cohort_ledger.json',encoding='utf-8') as f:history=json.load(f)
+          assert isinstance(history,list) and all(x['trades']==0 for x in history)
           with open(state,encoding='utf-8') as f:checkpoint=json.load(f)
           print('LIVE_STUDY_HEARTBEAT',json.dumps({'at':receipt['at'],'samples':len(samples),'pools':len(pools),'tracked':len(checkpoint),'signals':receipt.get('prospective_signals',0),'exits':receipt.get('paper_exits',0),'trades':0,'errors':len(errors)}))
           PY
@@ -80,7 +87,9 @@ jobs:
         if: always() && steps.state_integrity.outputs.usable == 'true'
         uses: actions/cache/save@v4
         with:
-          path: evidence/state.json
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
           key: crypto-prospective-state-${{ github.run_id }}
       - name: Preserve independent evidence and receipt
         if: always()
