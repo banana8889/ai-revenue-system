@@ -16,5 +16,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "Dispatching already-defined prospective research workflow on main"
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main
-          echo "DISPATCH_REQUEST_ACCEPTED=true"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/dispatches" -f ref=main -f 'inputs[chain]=true'
+          echo "CHAIN_BOOTSTRAP_REQUEST_ACCEPTED=true"
