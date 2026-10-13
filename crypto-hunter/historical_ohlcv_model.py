@@ -163,6 +163,23 @@ def main():
                 "precision":round(prec,6),
                 "lift_vs_holdout_base":round(prec/te.mean(),4) if te.mean() else None,
                 "recall":round(hits/te.sum(),6)}
+        # Small-sample uncertainty: a 2/21 top-1%-hit is not proof of an edge.
+        picked=quality["top_1pct"]["inspected"]
+        hits=quality["top_1pct"]["hits"]
+        den=len(test)
+        pos=int(te.sum())
+        if picked>0:
+            phat=hits/picked
+            z=1.96
+            denom=1+z*z/picked
+            center=(phat+z*z/(2*picked))/denom
+            span=z*math.sqrt(phat*(1-phat)/picked+z*z/(4*picked*picked))/denom
+            quality["top_1pct"]["wilson_95pct_precision_interval"]=[round(max(0,center-span),6),round(min(1,center+span),6)]
+            # Fixed cohort hypergeometric enrichment null with no replacement.
+            null=sum(math.comb(pos,k)*math.comb(den-pos,picked-k)/math.comb(den,picked)
+                     for k in range(hits,min(pos,picked)+1))
+            quality["top_1pct"]["one_sided_hypergeometric_p"] = round(null,6)
+            quality["top_1pct"]["multiple_thresholds_checked"]=4
         report["out_of_time_holdout"]=quality
         report["model"]="fixed HistGradientBoosting snapshot-only features, train median imputer fit before holdout"
         examples=[]
