@@ -22,7 +22,7 @@ for cycle in range(3):
     t=d.datetime.now(d.timezone.utc)
     try:
         data=read()
-        active=[a for a,x in st.items() if x.get('entry') and not x.get('exit')]
+        active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
         for n in range(0,len(active),30):
             try:
                 more=read('https://api.geckoterminal.com/api/v2/networks/solana/pools/multi/'+','.join(active[n:n+30]))
