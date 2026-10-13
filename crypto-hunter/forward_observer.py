@@ -93,6 +93,15 @@ def entry_quote_preflight(mint):
 
 for cycle in range(3):
     t=d.datetime.now(d.timezone.utc)
+    # Time-based expiration even for disappeared/delisted pools: a shadow is never a trade.
+    for old in st.values():
+        sh=old.get('shadow')
+        if sh and not sh.get('expired'):
+            try:
+                if (t-d.datetime.fromisoformat(sh['at'])).total_seconds()>SHADOW_RESEARCH_SECONDS:
+                    sh['expired']=True
+            except (TypeError,ValueError,KeyError):
+                sh['expired']=True
     try:
         data=[]
         for page in (1,2,3):
