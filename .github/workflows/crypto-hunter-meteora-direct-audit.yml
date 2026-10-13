@@ -1,0 +1,84 @@
+name: Crypto Hunter Meteora Direct Quote Audit
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-hunter-meteora-direct-audit.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Meteora quote-only SDK in temporary runner
+        shell: bash
+        run: |
+          mkdir quote-check
+          cd quote-check
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --no-save @meteora-ag/cp-amm-sdk@1.5.1 @solana/web3.js@1 bn.js
+      - name: On-chain pool account and direct swap quote only, no signing
+        working-directory: quote-check
+        shell: bash
+        run: |
+          mkdir -p ../evidence
+          node - <<'JS'
+          const fs=require('fs');
+          const { Connection, PublicKey }=require('@solana/web3.js');
+          const { CpAmm }=require('@meteora-ag/cp-amm-sdk');
+          const BN=require('bn.js');
+          const POOL='8KczAJufNtYuLh5dB67pK8vZHg7c19zp4UbuyJMKpQZ';
+          const MINT='8ES3yr1AjvFQ9VHrwFpM5TLMVNUdocpvf3bzKGBSXW1h';
+          const amount=new BN('188482899007');
+          const data={at_utc:new Date().toISOString(),pool:POOL,mint:MINT,amount_raw:amount.toString(),
+                     mode:'QUOTE_ONLY_ONCHAIN_READS',private_keys:false,signatures:0,orders:0,trades:0};
+          async function main(){
+            const con=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+            const account=await con.getAccountInfo(new PublicKey(POOL),'confirmed');
+            data.account_exists=!!account;
+            data.owner=account?.owner.toBase58()||null;
+            data.bytes=account?.data?.length||0;
+            if(!account)throw Error('POOL_ACCOUNT_DOES_NOT_EXIST');
+            const cp=new CpAmm(con);
+            const poolState=await cp.fetchPoolState(new PublicKey(POOL));
+            data.token_a=poolState.tokenAMint?.toBase58?.();
+            data.token_b=poolState.tokenBMint?.toBase58?.();
+            data.pool_status=poolState.poolStatus?.toString?.();
+            if(MINT!==data.token_a && MINT!==data.token_b){
+              data.mint_in_pool=false;return;
+            }
+            data.mint_in_pool=true;
+            const mints=await Promise.all([data.token_a,data.token_b].map(x=>con.getParsedAccountInfo(new PublicKey(x),'confirmed')));
+            const decimals=mints.map(x=>x.value?.data?.parsed?.info?.decimals);
+            data.token_decimals=decimals;
+            const now=Math.floor(Date.now()/1000),slot=await con.getSlot('confirmed');
+            try{
+              const quote=await cp.getQuote({
+                inAmount:amount,
+                inputTokenMint:new PublicKey(MINT),
+                slippage:50,slippageBps:50,
+                poolState,currentTime:now,currentSlot:slot,
+                tokenADecimal:decimals[0],tokenBDecimal:decimals[1]
+              });
+              data.quote_available=true;
+              data.output_raw=quote.swapOutAmount?.toString?.()||null;
+              data.minimum_output_raw=quote.minSwapOutAmount?.toString?.()||null;
+              data.impact_pct=quote.priceImpact?.toString?.()||null;
+              data.fee_raw=quote.totalFee?.toString?.()||null;
+            }catch(e){data.quote_available=false;data.quote_error=e?.message||String(e)}
+          }
+          main().catch(e=>{data.error=e?.message||String(e)}).finally(()=>{
+            fs.writeFileSync('../evidence/meteora_direct_quote.json',JSON.stringify(data,null,2));
+            console.log('METEORA_DIRECT_QUOTE_READONLY',JSON.stringify(data));
+          });
+          JS
+      - name: Upload evidence without any transaction or private key
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-meteora-direct-quote
+          path: evidence/
+          if-no-files-found: warn
