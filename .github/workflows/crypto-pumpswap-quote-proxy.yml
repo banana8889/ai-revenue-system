@@ -26,6 +26,12 @@ jobs:
           assert 'next 5m bar' in r['entry_model']
           assert r['source_stats']['raw_rows']>100000
           assert r['quote_proxy_0_05_sol_any_positive_reserve']['available_count']>=0
+          for k in ('fixed_first_trigger_3x_target_vs_0_75x_stop','fixed_first_trigger_11x_target_vs_0_75x_stop'):
+              x=r[k]
+              assert x['total']==r['source_stats']['pool_rows_eligible']
+              assert sum(x['outcomes'].values())==x['total']
+              assert x['not_executed_trades']
+          assert r['fixed_first_trigger_11x_target_vs_0_75x_stop']['triggered_target_marks']<=r['quote_proxy_0_05_sol_sale_reserve_at_least_10']['at_least_11x']
           print('PUMPSWAP_HISTORICAL_RESERVE_PROXY_READ_ONLY=PASS')
           PY
       - uses: actions/upload-artifact@v4
