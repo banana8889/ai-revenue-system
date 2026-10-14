@@ -1,0 +1,40 @@
+name: Crypto Historical New Sources Schema Probe
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-new-source-audit.yml]
+permissions:
+  contents: read
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - name: Audit truly independent July 2026 launches and multi-million trade corpus metadata
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,gzip,collections,hashlib,os
+          u='https://raw.githubusercontent.com/mivor7/pumpfun-pumpswap-market-data/main/launches/launches_dataset.jsonl.gz'
+          p='/tmp/launches_dataset.jsonl.gz'
+          with urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'CryptoHunterReproducibleEvidence/1.0'}),timeout=90) as r,open(p,'wb') as f:
+            n=0
+            while chunk:=r.read(1048576):
+              f.write(chunk);n+=len(chunk)
+              if n>35000000:raise ValueError('Size bound breached')
+          print('JULY_SOURCE_SIZE_SHA256',os.path.getsize(p),hashlib.sha256(open(p,'rb').read()).hexdigest())
+          with gzip.open(p,'rt') as f:
+            for i,line in zip(range(3),f):
+              o=json.loads(line)
+              print('JULY_SOURCE_EXAMPLE',i,json.dumps(o,ensure_ascii=False)[:4000])
+          u='https://huggingface.co/api/datasets/Slinky21/Pumpfun_Memecoin_Corpus/tree/main?recursive=true&expand=true'
+          req=urllib.request.Request(u,headers={'User-Agent':'CryptoHunterReproducibleEvidence/1.0'})
+          try:
+            with urllib.request.urlopen(req,timeout=20) as r: files=json.load(r)
+            print('HF_TREE',json.dumps([{'path':x.get('path'),'size':x.get('size'),'oid':x.get('oid')} for x in files],ensure_ascii=False)[:15000])
+          except Exception as e:print('HF_TREE_FAILURE',type(e).__name__,str(e)[:200])
+          req=urllib.request.Request('https://huggingface.co/datasets/Slinky21/Pumpfun_Memecoin_Corpus/resolve/main/KNOWN_ISSUES.md',headers={'User-Agent':'CryptoHunter/1.0'})
+          try:
+            with urllib.request.urlopen(req,timeout=18) as r: s=r.read(24000).decode()
+            print('HF_KNOWN_ISSUES',s[:10500].replace('\n',' | '))
+          except Exception as e:print('HF_ISSUES_FAILURE',type(e).__name__,str(e)[:200])
+          PY
