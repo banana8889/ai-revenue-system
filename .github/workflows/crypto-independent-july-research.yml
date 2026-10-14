@@ -1,0 +1,41 @@
+name: Crypto Independent July 117k Historical Research
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-independent-july-research.yml, crypto-hunter/independent_july_launch_research.py]
+permissions:
+  contents: read
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned data libraries
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3
+      - name: Compute independently labelled JUL 2026 early chart cohorts
+        run: |
+          python3 -m py_compile crypto-hunter/independent_july_launch_research.py
+          python3 crypto-hunter/independent_july_launch_research.py
+      - name: Audit 30s to 600s period not misrepresented as 24h executable profits
+        run: |
+          python3 - <<'PY'
+          import json
+          p='evidence/historical_july/july_early_market_results.json'
+          r=json.load(open(p))
+          assert r['source_counts']['rows']>=100000
+          assert r['source_counts']['labelled_mints']>=100
+          assert 'not full day' in r['observation_window']
+          assert not r['net_return_verified'] and r['orders']==r['trades']==0
+          assert r['missing_paths_not_treated_as_losses'] and r['false_24h_claims_blocked']
+          print('JULY_INDEPENDENT_HISTORICAL_AUDIT=PASS')
+          PY
+      - name: Preserve independent historical analysis report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: july-independent-117k-launches-cohort
+          path: evidence/historical_july/july_early_market_results.json
+          if-no-files-found: warn
