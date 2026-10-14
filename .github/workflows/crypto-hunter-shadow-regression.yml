@@ -138,4 +138,37 @@ jobs:
                       'chart_hit_count':receipt['shadow_chart_11x_unfilled_total'],
                       'orders':receipt['orders'],'trades':receipt['trades']}))
               finally:os.chdir(old_dir)
+          # Starvation regression: 25 distinct quoteable shadows must get
+          # one scheduling slot each within FIVE consecutive jobs, with no
+          # repeated older shadow monopolizing a new job's five slots.
+          import ast
+          tree=ast.parse(Path(scanner).read_text())
+          fn=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='fair_shadow_quote_targets')
+          module=ast.Module(body=[fn],type_ignores=[])
+          ast.fix_missing_locations(module)
+          scope={}
+          exec(compile(module,scanner,'exec'),scope)
+          chooser=scope['fair_shadow_quote_targets']
+          snapshot={}
+          for j in range(25):
+              name='ShadowPool%02d'%j
+              snapshot[name]={'entry':None,'shadow':{'at':old,'entry_quote':{'token_raw':1000},
+                              'no_capital_allocated':True}}
+          chosen_all=[]
+          for job in range(5):
+              chosen=chooser(snapshot,set(),5)
+              assert len(chosen)==5
+              assert len(set(chosen).intersection(chosen_all))==0,'Repeated a prior job while others remain unserved'
+              chosen_all.extend(chosen)
+              for pool_id in chosen:
+                  snapshot[pool_id]['shadow']['last_quote_scheduled_at']=(now+d.timedelta(minutes=10*job)).isoformat()
+              assert chooser(snapshot,set(chosen),5)==[], 'No extra slot after full allocation'
+          assert len(set(chosen_all))==25,'All 25 shadows must get scheduling opportunity'
+          # An expired shadow, an unquoted token, and an existing paper entry
+          # should never consume a scarce shadow quote slot.
+          snapshot['Expired']={'entry':None,'shadow':{'expired':True,'entry_quote':{'token_raw':1}}}
+          snapshot['Unquoted']={'entry':None,'shadow':{'at':old}}
+          snapshot['PaperEntry']={'entry':[old,1],'shadow':{'at':old,'entry_quote':{'token_raw':1}}}
+          assert len(chooser(snapshot,set(),5))==5
+          print('SHADOW_ROUND_ROBIN_25_IN_FIVE_RUNS=PASS',json.dumps({'unique_mints_served':25,'runs':5,'orders':0,'trades':0}))
           PY
