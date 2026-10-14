@@ -31,6 +31,8 @@ shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
 shadow_quote_scheduled_this_run=set()
+first_seen_ages_minutes_this_run=[]
+first_seen_unique_mints_this_run=set()
 def fair_shadow_quote_targets(state, selected, budget):
     """Choose previously unserved shadows before repeating earlier quote checks.
 
@@ -187,6 +189,10 @@ for cycle in range(CYCLES_PER_RUN):
                'buys_1h':int(tx.get('buys') or 0),'sells_1h':int(tx.get('sells') or 0),
                'buyers_1h':int(tx.get('buyers') or 0),'dex':((obj.get('relationships') or {}).get('dex') or {}).get('data')}
             out(x)
+            if p not in st and token_id and token_id.startswith('solana_') and token_id not in first_seen_unique_mints_this_run:
+                first_seen_unique_mints_this_run.add(token_id)
+                if age>=0 and math.isfinite(age) and age<100000:
+                    first_seen_ages_minutes_this_run.append(age)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
             # Cohort selected only from FIRST discovery record, before future prices.
@@ -437,6 +443,12 @@ for p,x in keep.items():
 with open('evidence/state.json','w') as f:json.dump(serial,f,allow_nan=False)
 r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'requested_samples_this_run':CYCLES_PER_RUN,
+   'new_mints_first_detected_this_run':len(first_seen_unique_mints_this_run),
+   'new_mints_with_known_launch_age':len(first_seen_ages_minutes_this_run),
+   'new_mints_first_seen_within_1m':sum(v<=1 for v in first_seen_ages_minutes_this_run),
+   'new_mints_first_seen_within_3m':sum(v<=3 for v in first_seen_ages_minutes_this_run),
+   'new_mints_first_seen_within_5m':sum(v<=5 for v in first_seen_ages_minutes_this_run),
+   'new_mints_first_seen_after_5m':sum(v>5 for v in first_seen_ages_minutes_this_run),
    'prospective_signals':sum(x['entry'] is not None for x in st.values()),
    'paper_exits':sum(x.get('exit') is not None for x in st.values()),
    'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
