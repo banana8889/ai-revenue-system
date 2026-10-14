@@ -48,6 +48,29 @@ def proxy_sell_x(entry,exit,amount):
     tokens_in=tokens_out*(1-FEE_ASSUMED)
     sol_out=ro*tokens_in/(hypothetical_token_reserve_at_sale+tokens_in)
     return sol_out/amount
+def first_trigger(entry,future,target,amount=.05):
+    """First observable 5-minute mark crossing fixed take-profit or stop.
+
+    A lack of a minimum liquidity reserve is UNKNOWN/non-quoteable, never a
+    successful stop exit or loss fill. An unsampled intrabar gap is ignored.
+    """
+    for bar in future:
+        if bar["res"]<MIN_RESERVE_SOL:
+            return {"status":"unquoteable_reserve_below_minimum","mark_x":None,
+                    "last_at":bar["t"],"actual_fill":False}
+        mark=proxy_sell_x(entry,bar,amount)
+        if mark is None:
+            return {"status":"missing_estimate","mark_x":None,
+                    "last_at":bar["t"],"actual_fill":False}
+        if mark<=.75:
+            return {"status":"stop_first_seen","mark_x":round(mark,8),
+                    "last_at":bar["t"],"actual_fill":False}
+        if mark>=target:
+            return {"status":"target_first_seen","mark_x":round(mark,8),
+                    "last_at":bar["t"],"actual_fill":False}
+    return {"status":"still_open_censored","mark_x":None,
+            "last_at":future[-1]["t"] if future else None,"actual_fill":False}
+
 def main():
     data=collections.defaultdict(list);source_stats=collections.Counter()
     for day in SHA:
@@ -109,28 +132,10 @@ def main():
             liquid=[v for v in avail if v[1]>=MIN_RESERVE_SOL]
             all_peak[str(qty)]=max((v[0] for v in avail),default=None)
             liq_peak[str(qty)]=max((v[0] for v in liquid),default=None)
-        # Forward first-trigger study: stop / TP are fixed BEFORE outcomes.
-        # On 5-minute close sampled bars, first observable eligible trigger
-        # wins; never cherry-pick a later maximum. These are NOT actual fills.
-        def trigger(target):
-            for bar in fut:
-                if bar["res"]<MIN_RESERVE_SOL:
-                    return {"status":"unquoteable_reserve_below_minimum","mark_x":None,
-                            "last_at":bar["t"],"actual_fill":False}
-                mark=proxy_sell_x(entry,bar,.05)
-                if mark is None:
-                    return {"status":"missing_estimate","mark_x":None,
-                            "last_at":bar["t"],"actual_fill":False}
-                if mark<=.75:
-                    return {"status":"stop_first_seen","mark_x":round(mark,8),
-                            "last_at":bar["t"],"actual_fill":False}
-                if mark>=target:
-                    return {"status":"target_first_seen","mark_x":round(mark,8),
-                            "last_at":bar["t"],"actual_fill":False}
-            return {"status":"still_open_censored","mark_x":None,
-                    "last_at":fut[-1]["t"],"actual_fill":False}
-        exit3=trigger(3)
-        exit11=trigger(11)
+        # Target and stop are fixed before looking at future bars. A first
+        # observable bar mark is NOT proof of a fill.
+        exit3=first_trigger(entry,fut,3)
+        exit11=first_trigger(entry,fut,11)
         results.append({"pool":pool,"mint":entry["mint"],"anchor_at":anchor["t"],"entry_at":entry["t"],
                         "following_bars":len(fut),"following_elapsed_sec":fut[-1]["t"]-entry["t"],
                         "entry_sol_reserve":entry["res"],"peak_chart_close_x":chart_peak,
