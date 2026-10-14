@@ -350,6 +350,12 @@ for cycle in range(CYCLES_PER_RUN):
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
                         shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
                                 'entry_pool_price':v,'entry_liquidity_usd':x['liq'],
+                                'initial_age_minutes':age,
+                                'initial_volume_1h_usd':x['volume_1h'],
+                                'initial_buyers_1h':x['buyers_1h'],
+                                'initial_buys_1h':x['buys_1h'],
+                                'initial_sells_1h':x['sells_1h'],
+                                'initial_dex':x['dex'],
                                 'peak_chart_multiple':1.,'quote_available_count':0,
                                 'reason':risk,'no_capital_allocated':True}
                         # Even when allocating no paper capital, research tradability in
@@ -619,6 +625,12 @@ for pool,z in st.items():
         'expired_at':sh.get('expired_at'),
         'entry_chart_price':sh.get('entry_pool_price'),
         'entry_liquidity_usd':sh.get('entry_liquidity_usd'),
+        'initial_age_minutes':sh.get('initial_age_minutes'),
+        'initial_volume_1h_usd':sh.get('initial_volume_1h_usd'),
+        'initial_buyers_1h':sh.get('initial_buyers_1h'),
+        'initial_buys_1h':sh.get('initial_buys_1h'),
+        'initial_sells_1h':sh.get('initial_sells_1h'),
+        'initial_dex':sh.get('initial_dex'),
         'peak_chart_multiple_unfilled':sh.get('peak_chart_multiple',1),
         'peak_chart_liquidity_usd':sh.get('peak_chart_liquidity_usd'),
         'initial_buy_sell_quote_available':bool(sh.get('entry_quote')),
@@ -631,6 +643,35 @@ for pool,z in st.items():
         'return_unrealized':True,'orders':0,'trades':0})
     archived.add(pool)
 shadow_ledger=shadow_ledger[-5000:]
+# Build descriptive, rigorously prospectively sourced comparisons. A missing
+# future sell quotation is CENSORED, not a failed profitable trade or 0x.
+complete_quotes=[z for z in shadow_ledger
+                 if z.get('initial_buy_sell_quote_available')
+                 and z.get('later_sell_quotes_available',0)>0
+                 and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+winner=[z for z in complete_quotes if z['max_later_sell_quote_multiple_unfilled']>=2]
+control=[z for z in complete_quotes if z['max_later_sell_quote_multiple_unfilled']<2]
+precursors={}
+for feature in ('entry_liquidity_usd','initial_age_minutes','initial_volume_1h_usd',
+                'initial_buyers_1h','initial_buys_1h','initial_sells_1h'):
+    a=[float(z[feature]) for z in winner if z.get(feature) is not None]
+    b=[float(z[feature]) for z in control if z.get(feature) is not None]
+    if len(a)>=5 and len(b)>=20:
+        precursors[feature]={'quote_2x_winner_median':statistics.median(a),
+                            'control_with_valid_later_quote_median':statistics.median(b),
+                            'winner_n':len(a),'control_n':len(b)}
+shadow_learning={'as_of':r['at'],'archived_mints':len(shadow_ledger),
+                 'eligible_quote_observed_after_entry':len(complete_quotes),
+                 'unfilled_later_quote_2x_count':len(winner),
+                 'unfilled_later_quote_below_2x_count':len(control),
+                 'unknown_later_quote_excluded':sum(x.get('initial_buy_sell_quote_available') and
+                        not x.get('later_sell_quotes_available',0) for x in shadow_ledger),
+                 'precursor_medians':precursors,
+                 'enough_evidence_for_precursor_inference':bool(precursors),
+                 'no_filled_trades':True,'trades':0}
+with open('evidence/shadow_learning_evaluation.json','w') as f:
+    json.dump(shadow_learning,f,indent=2,allow_nan=False)
+print('SHADOW_PREDICTOR_VALIDATION',json.dumps(shadow_learning,allow_nan=False))
 with open(ledger_path,'w',encoding='utf-8') as f:
     json.dump(shadow_ledger,f,indent=1,allow_nan=False)
 print('SHADOW_ARCHIVE_CHECKPOINT',json.dumps({
