@@ -126,6 +126,10 @@ jobs:
                   assert state_after[pool]['shadow']['entry_quote']['token_raw']==1000
                   assert state_after[pool]['shadow']['peak_chart_multiple']<11
                   assert state_after[pool]['shadow']['max_exit_quote_multiple']>=13
+                  assert receipt['shadow_fresh_quote_slots_same_run']==1
+                  assert receipt['shadow_quote_only_exit_checks_this_run']==1
+                  assert state_after[pool]['shadow']['quote_available_count']==1
+                  assert state_after[pool]['shadow']['last_exit_quote_check_at']
                   assert receipt['shadow_quote_only_11x_unfilled_total']==1
                   quote_score=json.loads(Path('evidence/quote_only_shadow_outcomes.json').read_text())
                   assert quote_score['quote_ever_reached_11x_unfilled']==1
@@ -192,4 +196,40 @@ jobs:
                   enlarged[pool_id]['shadow']['last_quote_scheduled_at']=(now+d.timedelta(minutes=12*cycle)).isoformat()
           assert len(set(visits))==40
           print('SHADOW_ROUND_ROBIN_40_IN_FIVE_RUNS=PASS',json.dumps({'quote_slots':40,'runs':5,'orders':0,'trades':0}))
+          # Real source checkpoint compatibility: first run archives a legacy
+          # expired quoteable shadow and an unquoted shadow; next run restores
+          # and preserves the two exact same results, not duplicate wins.
+          expired_at=(now-d.timedelta(hours=26)).isoformat()
+          base={'first':expired_at,'entry':None,'count':1,'peak_net':0.,
+                'previous_signature':None,'last_distinct_at':None,'qualified':0}
+          endstate={
+              'ExpiredQuoted':{**base,'token_id':'solana_'+'R'*44,'shadow':{
+                  'at':expired_at,'entry_pool_price':.001,'peak_chart_multiple':19,
+                  'entry_quote':{'immediate_roundtrip_multiple':.95,'token_raw':1000},
+                  'quote_available_count':3,'max_exit_quote_multiple':3.3,
+                  'exit_quote_missing_count':4,'no_capital_allocated':True}},
+              'ExpiredNoQuote':{**base,'token_id':'solana_'+'S'*44,'shadow':{
+                  'at':expired_at,'entry_pool_price':.001,'peak_chart_multiple':1.2,
+                  'no_capital_allocated':True}}
+          }
+          with tempfile.TemporaryDirectory() as td:
+              wd=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(endstate))
+                  for replay in range(2):
+                      with mock.patch('urllib.request.urlopen',side_effect=lambda *a,**k:io.BytesIO(b'{"data":[]}')),mock.patch('time.sleep',return_value=None):
+                          runpy.run_path(scanner,run_name='__main__')
+                      ledger=json.loads(Path('evidence/shadow_outcomes_ledger.json').read_text())
+                      assert len(ledger)==2
+                      assert len({x['pool'] for x in ledger})==2
+                      good=next(x for x in ledger if x['pool']=='ExpiredQuoted')
+                      assert good['max_later_sell_quote_multiple_unfilled']==3.3
+                      assert good['later_sell_quotes_available']==3 and good['later_sell_quotes_failed']==4
+                      assert good['initial_buy_sell_quote_available']
+                      assert all(x['return_unrealized'] and x['orders']==x['trades']==0 for x in ledger)
+                      assert all(not x['ever_observed_later_quote_11x'] for x in ledger)
+                      assert all(x['missing_route_does_not_prove_exit'] for x in ledger)
+                  print('EXPIRED_SHADOW_ARCHIVE_PERSISTENCE_NO_FAKE_EXIT=PASS')
+              finally:os.chdir(wd)
           PY
