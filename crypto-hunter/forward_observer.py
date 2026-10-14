@@ -8,7 +8,7 @@ sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
 MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
-MAX_SHADOW_CANDIDATES=40
+MAX_SHADOW_CANDIDATES=80
 SHADOW_RESEARCH_SECONDS=24*3600
 # Pre-registered equal-budget pressure versus control pools. No wallet/trades.
 COHORT_MAX_PER_GROUP=12
@@ -27,6 +27,10 @@ shadow_quote_entries_this_run=0
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
 MAX_SHADOW_SELL_QUOTES_PER_RUN=8
+# Guarantee some quote capacity for NEW quoteable candidates in the SAME
+# study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
+FRESH_SHADOW_QUOTE_RESERVE=4
+fresh_shadow_slots_this_run=set()
 shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
@@ -136,12 +140,25 @@ for cycle in range(CYCLES_PER_RUN):
             except (TypeError,ValueError,KeyError):
                 sh['expired']=True
     # Persisted fair rotation avoids repeatedly quoting the oldest five.
-    for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
-        shadow_quote_scheduled_this_run.add(pool)
-        st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
-        out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
-             'quota_slot':len(shadow_quote_scheduled_this_run),
-             'quote_fetched':False,'no_trade':True})
+    if cycle==0:
+        # Reserve four of eight exact-size sell checks for fresh signals.
+        # Scheduling a quote is not evidence that one was received.
+        old_budget=max(0,MAX_SHADOW_SELL_QUOTES_PER_RUN-FRESH_SHADOW_QUOTE_RESERVE)
+        for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,old_budget):
+            shadow_quote_scheduled_this_run.add(pool)
+            st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
+            out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
+                 'quota_slot':len(shadow_quote_scheduled_this_run),
+                 'quote_fetched':False,'no_trade':True,'lane':'existing'})
+    if cycle==CYCLES_PER_RUN-1:
+        # Use any fresh-candidate slots not needed this job. These old pools
+        # can still be quoted in THIS final cycle if their market is present.
+        for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
+            shadow_quote_scheduled_this_run.add(pool)
+            st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
+            out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
+                 'quota_slot':len(shadow_quote_scheduled_this_run),
+                 'quote_fetched':False,'no_trade':True,'lane':'unused_fresh_capacity'})
     try:
         data=[]
         for page in (1,2,3):
@@ -340,6 +357,19 @@ for cycle in range(CYCLES_PER_RUN):
                             if proposal.get('ok'):
                                 shadow['entry_quote']=proposal
                                 shadow_quote_entries_this_run+=1
+                                # Only assign a scarce real-time mark slot when
+                                # there is a FOLLOWING cycle left to observe.
+                                # Keep the initial quote time separate from the
+                                # subsequent exact-token-amount sell mark.
+                                if (cycle<CYCLES_PER_RUN-1
+                                    and len(fresh_shadow_slots_this_run)<FRESH_SHADOW_QUOTE_RESERVE
+                                    and len(shadow_quote_scheduled_this_run)<MAX_SHADOW_SELL_QUOTES_PER_RUN):
+                                    shadow_quote_scheduled_this_run.add(p)
+                                    fresh_shadow_slots_this_run.add(p)
+                                    shadow['last_quote_scheduled_at']=d.datetime.now(d.timezone.utc).isoformat()
+                                    out({'kind':'shadow_sell_quote_scheduled','at':shadow['last_quote_scheduled_at'],
+                                         'pool':p,'quota_slot':len(shadow_quote_scheduled_this_run),
+                                         'quote_fetched':False,'no_trade':True,'lane':'fresh_within_same_run'})
                                 out({'kind':'shadow_entry_quote_only','at':shadow['initial_route_check']['at'],
                                      'pool':p,'token_id':token_id,
                                      'immediate_roundtrip_multiple':proposal['immediate_roundtrip_multiple'],
@@ -476,6 +506,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('entry_quote') and not x['shadow'].get('last_exit_quote_check_at')),
    'shadow_live_capacity':MAX_SHADOW_CANDIDATES,
+   'shadow_fresh_quote_slots_same_run':len(fresh_shadow_slots_this_run),
+   'shadow_reserved_fresh_quote_capacity':FRESH_SHADOW_QUOTE_RESERVE,
    'shadow_mark_budget_per_run':MAX_SHADOW_SELL_QUOTES_PER_RUN,
    'shadow_remaining_capacity':max(0,MAX_SHADOW_CANDIDATES-sum(
        1 for x in st.values() if x.get('shadow') and not x['shadow'].get('expired') and not x.get('entry'))),
