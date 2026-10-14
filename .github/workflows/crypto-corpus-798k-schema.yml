@@ -1,0 +1,39 @@
+name: Crypto Expanded 798k Corpus Integrity & Schema
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-corpus-798k-schema.yml]
+permissions:
+  contents: read
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install pinned columnar reader
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 pyarrow==21.0.0
+      - name: Download and check independent 798k launches + postgraduation outcomes
+        run: |
+          python3 - <<'PY'
+          import os,hashlib,urllib.request,pandas as pd
+          base='https://huggingface.co/datasets/Slinky21/Pumpfun_Memecoin_Corpus/resolve/main/'
+          for name,limit in [('postgard_outcomes.parquet',4000000),('tokens.parquet',260000000)]:
+              dest='/tmp/'+name
+              req=urllib.request.Request(base+name,headers={'User-Agent':'CryptoHistoricalCohortResearch/1.0'})
+              with urllib.request.urlopen(req,timeout=80) as r,open(dest,'wb') as f:
+                  total=0
+                  while chunk:=r.read(1<<20):
+                      total+=len(chunk)
+                      if total>limit:raise ValueError('Untrusted external file over size cap')
+                      f.write(chunk)
+              df=pd.read_parquet(dest)
+              print('CORPUS_TABLE',name,'file_bytes',os.path.getsize(dest),
+                    'sha256',hashlib.sha256(open(dest,'rb').read()).hexdigest(),
+                    'rows',len(df),'columns',list(df.columns))
+              print('CORPUS_TYPES',name,{x:str(df[x].dtype) for x in df.columns})
+              print('CORPUS_SAMPLES',name,df.head(2).to_json(orient='records',date_format='iso')[:10000])
+              if name.startswith('postgard'):
+                  for col in [x for x in df.columns if 'label' in x.lower() or 'pump' in x.lower()]:
+                      print('OUTCOME_LABEL_DISTRIBUTION',col,df[col].value_counts(dropna=False).head(15).to_dict())
+              print('CORPUS_TABLE_VERIFIED',name)
+          PY
