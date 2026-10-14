@@ -129,6 +129,10 @@ jobs:
                   assert receipt['shadow_fresh_quote_slots_same_run']==1
                   assert receipt['shadow_quote_only_exit_checks_this_run']==1
                   assert state_after[pool]['shadow']['quote_available_count']==1
+                  assert state_after[pool]['shadow']['initial_volume_1h_usd']==20000
+                  assert state_after[pool]['shadow']['initial_buyers_1h']==100
+                  assert state_after[pool]['shadow']['initial_buys_1h']==150
+                  assert state_after[pool]['shadow']['initial_sells_1h']==25
                   assert state_after[pool]['shadow']['last_exit_quote_check_at']
                   assert receipt['shadow_quote_only_11x_unfilled_total']==1
                   quote_score=json.loads(Path('evidence/quote_only_shadow_outcomes.json').read_text())
@@ -230,6 +234,14 @@ jobs:
                       assert all(x['return_unrealized'] and x['orders']==x['trades']==0 for x in ledger)
                       assert all(not x['ever_observed_later_quote_11x'] for x in ledger)
                       assert all(x['missing_route_does_not_prove_exit'] for x in ledger)
+                      study=json.loads(Path('evidence/shadow_learning_evaluation.json').read_text())
+                      assert study['archived_mints']==2
+                      assert study['eligible_quote_observed_after_entry']==1
+                      assert study['unfilled_later_quote_2x_count']==1
+                      assert study['unknown_later_quote_excluded']==0
+                      assert study['precursor_medians']=={}
+                      assert not study['enough_evidence_for_precursor_inference']
+                      assert study['trades']==0 and study['no_filled_trades']
                   print('EXPIRED_SHADOW_ARCHIVE_PERSISTENCE_NO_FAKE_EXIT=PASS')
               finally:os.chdir(wd)
           PY
