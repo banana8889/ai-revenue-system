@@ -151,6 +151,38 @@ jobs:
                       'chart_hit_count':receipt['shadow_chart_11x_unfilled_total'],
                       'orders':receipt['orders'],'trades':receipt['trades']}))
               finally:os.chdir(old_dir)
+          # A full OLD 40-candidate sample should NOT permanently block fresh
+          # prospectively timestamped research after capacity expands to 80.
+          older=(now-d.timedelta(minutes=10)).isoformat()
+          filled=dict(state)
+          for i in range(40):
+              filled['PreviouslyObserved%02d'%i]={
+                  'first':older,'entry':None,'qualified':0,'count':1,
+                  'peak_net':0.,'last_distinct_at':None,
+                  'previous_signature':None,'token_id':'solana_PREV%02d'%i,
+                  'shadow':{'at':older,'entry_pool_price':1.,'peak_chart_multiple':1.,
+                            'no_capital_allocated':True}}
+          calls['page1']=0
+          quotes_called={'buy':0,'sell':0}
+          with tempfile.TemporaryDirectory() as td:
+              old_dir=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(filled))
+                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  receipt=json.loads(Path('evidence/summary.json').read_text())
+                  saved=json.loads(Path('evidence/state.json').read_text())
+                  assert receipt['shadow_live_capacity']==80
+                  assert receipt['shadow_reserved_fresh_quote_capacity']==4
+                  assert receipt['new_shadow_candidates_research_only']==1
+                  assert receipt['shadow_active_research_only']==41
+                  assert receipt['shadow_fresh_quote_slots_same_run']==1
+                  assert saved[pool]['shadow']['entry_quote']['token_raw']==1000
+                  assert saved[pool]['shadow']['last_exit_quote_check_at']
+                  assert receipt['orders']==receipt['trades']==0
+                  print('OLD_40_SHADOWS_DO_NOT_BLOCK_FRESH_80_CAPACITY=PASS')
+              finally:os.chdir(old_dir)
           # Starvation regression: 25 distinct quoteable shadows must get
           # one scheduling slot each within FIVE consecutive jobs, with no
           # repeated older shadow monopolizing a new job's five slots.
