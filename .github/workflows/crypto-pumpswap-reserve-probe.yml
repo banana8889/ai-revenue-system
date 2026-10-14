@@ -1,0 +1,41 @@
+name: Crypto PumpSwap 5-minute Liquidity Evidence Probe
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-pumpswap-reserve-probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - name: Inspect July AMM pool bars and feasibility of reserve-based simulation
+        run: |
+          python3 - <<'PY'
+          import gzip,urllib.request,json,collections,hashlib,os,math
+          base='https://raw.githubusercontent.com/mivor7/pumpfun-pumpswap-market-data/main/pumpswap/'
+          stats={}
+          for day in ('20260724','20260725','20260726','20260727'):
+              name=f'pumpswap_bars_{day}.jsonl.gz'
+              req=urllib.request.Request(base+name,headers={'User-Agent':'CryptoHunter5mReserveResearch/1'})
+              with urllib.request.urlopen(req,timeout=35) as r:blob=r.read(17000000)
+              counts=collections.Counter();pools=set();mints=set();samples=[]
+              for line in gzip.decompress(blob).splitlines():
+                  try:d=json.loads(line)
+                  except ValueError:counts['invalid_json']+=1;continue
+                  counts['bars']+=1
+                  if len(samples)<2:samples.append(d)
+                  pools.add(d.get('pool'));mints.add(d.get('mint'))
+                  for k in ('t','px','sol_res','vb','vs'):
+                      if d.get(k) is None:counts['missing_'+k]+=1
+                      else:
+                          try:
+                              f=float(d[k])
+                              if not math.isfinite(f) or f<=0:counts['nonpositive_'+k]+=1
+                          except (ValueError,TypeError):counts['nonnumeric_'+k]+=1
+              stats[day]={'gz_bytes':len(blob),'sha256':hashlib.sha256(blob).hexdigest(),
+                          'rows':counts['bars'],'pools':len(pools),'mints':len(mints),
+                          'fields':dict(counts),'examples':samples}
+          print('PUMPSWAP_POOL_BAR_SCHEMA_EVIDENCE',json.dumps(stats,ensure_ascii=False))
+          PY
