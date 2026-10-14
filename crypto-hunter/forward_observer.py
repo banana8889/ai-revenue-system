@@ -137,8 +137,10 @@ for cycle in range(CYCLES_PER_RUN):
             try:
                 if (t-d.datetime.fromisoformat(sh['at'])).total_seconds()>SHADOW_RESEARCH_SECONDS:
                     sh['expired']=True
+                    sh['expired_at']=t.isoformat()
             except (TypeError,ValueError,KeyError):
                 sh['expired']=True
+                sh['expired_at']=t.isoformat()
     # Persisted fair rotation avoids repeatedly quoting the oldest five.
     if cycle==0:
         # Reserve four of eight exact-size sell checks for fresh signals.
@@ -315,6 +317,7 @@ for cycle in range(CYCLES_PER_RUN):
                         marked=d.datetime.now(d.timezone.utc).isoformat()
                         shadow['last_exit_quote_check_at']=marked
                         if q.get('ok'):
+                            shadow['quote_available_count']=shadow.get('quote_available_count',0)+1
                             shadow_quote_marks_available_this_run+=1
                             multiple=q['out_amount']/5000000
                             shadow['max_exit_quote_multiple']=max(shadow.get('max_exit_quote_multiple',0),multiple)
@@ -346,7 +349,8 @@ for cycle in range(CYCLES_PER_RUN):
                                      and not z.get('entry') for z in st.values())
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
                         shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
-                                'entry_pool_price':v,'peak_chart_multiple':1.,
+                                'entry_pool_price':v,'entry_liquidity_usd':x['liq'],
+                                'peak_chart_multiple':1.,'quote_available_count':0,
                                 'reason':risk,'no_capital_allocated':True}
                         # Even when allocating no paper capital, research tradability in
                         # real time. Quote evidence never becomes a simulated fill.
@@ -598,6 +602,43 @@ with open('evidence/quote_only_shadow_outcomes.json','w') as f:
     json.dump(shadow_report,f,indent=2,allow_nan=False)
 print('QUOTE_ONLY_SHADOW_OUTCOMES',json.dumps({
     k:v for k,v in shadow_report.items() if k!='ranked_shadow_quote_only_examples'},allow_nan=False))
+# Preserve completed 24h shadow research outside the 72h tracked-pool
+# checkpoint, maintaining uncertainty for missing sale routes and no fills.
+ledger_path='evidence/shadow_outcomes_ledger.json'
+try:
+    with open(ledger_path,encoding='utf-8') as f:shadow_ledger=json.load(f)
+    assert isinstance(shadow_ledger,list)
+except (FileNotFoundError,ValueError,TypeError,AssertionError):
+    shadow_ledger=[]
+archived={item.get('pool') for item in shadow_ledger}
+for pool,z in st.items():
+    sh=z.get('shadow')
+    if not sh or not sh.get('expired') or pool in archived:continue
+    shadow_ledger.append({
+        'pool':pool,'token_id':z.get('token_id'),'signal_at':sh.get('at'),
+        'expired_at':sh.get('expired_at'),
+        'entry_chart_price':sh.get('entry_pool_price'),
+        'entry_liquidity_usd':sh.get('entry_liquidity_usd'),
+        'peak_chart_multiple_unfilled':sh.get('peak_chart_multiple',1),
+        'peak_chart_liquidity_usd':sh.get('peak_chart_liquidity_usd'),
+        'initial_buy_sell_quote_available':bool(sh.get('entry_quote')),
+        'initial_roundtrip_quote_multiple':sh.get('entry_quote',{}).get('immediate_roundtrip_multiple'),
+        'later_sell_quotes_available':sh.get('quote_available_count',0),
+        'later_sell_quotes_failed':sh.get('exit_quote_missing_count',0),
+        'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
+        'ever_observed_later_quote_11x':bool(sh.get('quote_11x_logged')),
+        'missing_route_does_not_prove_exit':True,
+        'return_unrealized':True,'orders':0,'trades':0})
+    archived.add(pool)
+shadow_ledger=shadow_ledger[-5000:]
+with open(ledger_path,'w',encoding='utf-8') as f:
+    json.dump(shadow_ledger,f,indent=1,allow_nan=False)
+print('SHADOW_ARCHIVE_CHECKPOINT',json.dumps({
+    'expired_shadow_records_preserved':len(shadow_ledger),
+    'expired_with_quote_at_signal':sum(x['initial_buy_sell_quote_available'] for x in shadow_ledger),
+    'expired_with_later_sell_quote':sum(x['later_sell_quotes_available']>0 for x in shadow_ledger),
+    'expired_with_later_quote_11x_unfilled':sum(x['ever_observed_later_quote_11x'] for x in shadow_ledger),
+    'trades':0},allow_nan=False))
 groups={}
 for label in COHORT_GROUPS:
     obs=[z['cohort'] for z in st.values() if z.get('cohort',{}).get('group')==label]
