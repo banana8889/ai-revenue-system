@@ -523,6 +523,49 @@ evaluation={
 }
 with open('evidence/evaluation.json','w') as f:json.dump(evaluation,f,indent=2,allow_nan=False)
 print('PAPER_STRATEGY_EVALUATION',json.dumps(evaluation,allow_nan=False))
+# Evidence-driven 24h outcome inventory: chart peaks are NOT executable
+# returns; an exact-size quote never establishes successful execution.
+live_shadows=[(pool,z['shadow']) for pool,z in st.items()
+              if z.get('shadow') and not z['shadow'].get('expired') and not z.get('entry')]
+eligible_quote_shadows=[(pool,sh) for pool,sh in live_shadows if sh.get('entry_quote')]
+quoted_marks=[float(sh['max_exit_quote_multiple']) for _,sh in eligible_quote_shadows
+              if sh.get('max_exit_quote_multiple') is not None]
+last_marks=[float(sh['last_exit_quote_multiple']) for _,sh in eligible_quote_shadows
+            if sh.get('last_exit_quote_multiple') is not None]
+route_missing=sum(sh.get('exit_quote_missing_count',0) for _,sh in eligible_quote_shadows)
+ranked=[{'pool':pool,'first_at':sh.get('at'),
+         'peak_chart_x':round(float(sh.get('peak_chart_multiple',1)),6),
+         'max_quote_only_x':round(float(sh.get('max_exit_quote_multiple',0)),6)
+                        if sh.get('max_exit_quote_multiple') is not None else None,
+         'last_quote_only_x':round(float(sh.get('last_exit_quote_multiple')),6)
+                        if sh.get('last_exit_quote_multiple') is not None else None,
+         'failed_sell_quote_checks':sh.get('exit_quote_missing_count',0),
+         'quote_seen_after_signal':bool(sh.get('last_exit_quote_at')),
+         'at_peak_pool_liquidity_usd':sh.get('peak_chart_liquidity_usd'),
+         'first_entry_buy_sell_quoted':bool(sh.get('entry_quote')),
+         'no_trade':True}
+        for pool,sh in eligible_quote_shadows]
+ranked.sort(key=lambda x:(x['max_quote_only_x'] is not None,
+                          x['max_quote_only_x'] or -1),reverse=True)
+shadow_report={'at':r['at'],
+ 'sampled_pool_mints_with_any_shadow':len(live_shadows),
+ 'fresh_buy_and_sell_quote_baselines':len(eligible_quote_shadows),
+ 'distinct_with_later_sell_quote':len(quoted_marks),
+ 'distinct_with_last_sell_quote':len(last_marks),
+ 'quote_ever_reached_2x_unfilled':sum(v>=2 for v in quoted_marks),
+ 'quote_ever_reached_5x_unfilled':sum(v>=5 for v in quoted_marks),
+ 'quote_ever_reached_11x_unfilled':sum(v>=11 for v in quoted_marks),
+ 'highest_quoted_sell_multiple_unfilled':max(quoted_marks) if quoted_marks else None,
+ 'median_last_quoted_sell_multiple_unfilled':statistics.median(last_marks) if last_marks else None,
+ 'quote_failures_accumulated':route_missing,
+ 'ranked_shadow_quote_only_examples':ranked[:10],
+ 'realized_profit_count':0,'trades':0,
+ 'not_a_full_cohort':'Current active shadows only; expired shadows are excluded and retained in canonical checkpoint until ordinary pruning',
+ 'fees_and_execution_not_proven':True}
+with open('evidence/quote_only_shadow_outcomes.json','w') as f:
+    json.dump(shadow_report,f,indent=2,allow_nan=False)
+print('QUOTE_ONLY_SHADOW_OUTCOMES',json.dumps({
+    k:v for k,v in shadow_report.items() if k!='ranked_shadow_quote_only_examples'},allow_nan=False))
 groups={}
 for label in COHORT_GROUPS:
     obs=[z['cohort'] for z in st.values() if z.get('cohort',{}).get('group')==label]
