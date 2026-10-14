@@ -1,0 +1,38 @@
+name: Crypto Hunter Compare Signals at 30s vs 60s
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-30s-60s-compare.yml, crypto-hunter/july_same_cohort_entry_lag_model.py]
+permissions:
+  contents: read
+jobs:
+  paired:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install fixed numeric stack
+        run: python3 -m pip install -q --disable-pip-version-check pandas==2.3.3 scikit-learn==1.7.2
+      - name: Compute point-in-time 30s/60s comparison and true observed post-60s chart labels
+        run: |
+          python3 -m py_compile crypto-hunter/july_same_cohort_entry_lag_model.py
+          python3 crypto-hunter/july_same_cohort_entry_lag_model.py
+      - name: Validate fixed denominator / no money-transaction claim
+        run: |
+          python3 - <<'PY'
+          import json
+          x=json.load(open('evidence/july_lag_holdout/same_cohort_30s_vs_60s_out_of_time.json'))
+          assert x['unique_cohort']>30000 and x['post60_chart_11x_test']>10
+          assert x['compared_on_exact_same_test_token_mints']
+          assert x['chart_targets_not_executable'] and x['trades']==0 and not x['wallets']
+          assert 'model_at_30s' in x and 'model_at_60s' in x
+          print('30S_VS_60S_FIXED_COHORT_AUDIT=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: july-30s-versus-60s-fixed-cohort
+          path: evidence/july_lag_holdout/same_cohort_30s_vs_60s_out_of_time.json
+          if-no-files-found: warn
