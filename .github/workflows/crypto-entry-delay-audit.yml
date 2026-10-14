@@ -1,0 +1,39 @@
+name: Crypto Hunter First 11x Crossing After Entry Delay
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-entry-delay-audit.yml, crypto-hunter/july_30s_60s_first_crossing.py]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently count first observed 11x crossing after 30s/60s
+        run: |
+          python3 -m py_compile crypto-hunter/july_30s_60s_first_crossing.py
+          python3 crypto-hunter/july_30s_60s_first_crossing.py
+      - name: Check accounting and never infer executable returns
+        run: |
+          python3 - <<'PY'
+          import json
+          x=json.load(open('evidence/july_entry_delay/entry_lag_first_crossing.json'))
+          q=x['counts']
+          assert q['rows']>100000
+          assert q['future_30s_path_observable']>60000
+          assert q['chart_ge11_from_30s_baseline']==sum(v for k,v in q.items() if k.startswith('first_11x_cross_'))
+          assert q['chart_ge11_from_60s_baseline']==sum(v for k,v in q.items() if k.startswith('first_11x_from60_'))
+          assert q['chart_ge11_from_60s_baseline']<=q['future_60s_path_observable']
+          assert x['no_outcome_means_censored'] and x['no_quote_or_fill_data'] and x['orders']==x['trades']==0
+          print('FIRST_CROSSING_EX_ANTE_DELAY_AND_NO_FILL_AUDIT=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: july-crossing-after-30-and-60-seconds
+          path: evidence/july_entry_delay/entry_lag_first_crossing.json
+          if-no-files-found: warn
