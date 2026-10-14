@@ -127,6 +127,11 @@ jobs:
                   assert state_after[pool]['shadow']['peak_chart_multiple']<11
                   assert state_after[pool]['shadow']['max_exit_quote_multiple']>=13
                   assert receipt['shadow_quote_only_11x_unfilled_total']==1
+                  quote_score=json.loads(Path('evidence/quote_only_shadow_outcomes.json').read_text())
+                  assert quote_score['quote_ever_reached_11x_unfilled']==1
+                  assert quote_score['highest_quoted_sell_multiple_unfilled']>=13
+                  assert quote_score['trades']==quote_score['realized_profit_count']==0
+                  assert quote_score['fees_and_execution_not_proven']
                   assert receipt['shadow_chart_11x_unfilled_total']==0
                   assert receipt['prospective_signals']==1
                   assert receipt['orders']==receipt['trades']==0
