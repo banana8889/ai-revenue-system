@@ -1,0 +1,39 @@
+name: Crypto Hunter July Same-Regime Robustness
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-july-regime-audit.yml, crypto-hunter/within_july_regime_audit.py]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install fixed analysis dependencies
+        run: python3 -m pip install -q --disable-pip-version-check pandas==2.3.3 pyarrow==21.0.0 scikit-learn==1.7.2
+      - name: Reevaluate only within July 2026 after collection regime shift
+        run: |
+          python3 -m py_compile crypto-hunter/within_july_regime_audit.py
+          python3 crypto-hunter/within_july_regime_audit.py
+      - name: Audit no future-leak and no executed-return claims
+        run: |
+          python3 - <<'PY'
+          import json
+          x=json.load(open('evidence/regime_check/within_july_regime_reality_check.json'))
+          assert x['chart_11x']['n_train']>1000 and x['chart_11x']['n_test']>1000
+          assert not x['realizable_returns_verified'] and x['orders']==x['trades']==0
+          assert 'PEAK AFTER 5MIN' in x['lag_warning']
+          assert all(not any(q in name for q in ('peak','graduated','rug','trade_count','return')) for name in x['ex_ante_features_only'])
+          print('WITHIN_JULY_REGIME_RESEARCH_AUDIT=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crypto-within-july-temporal-robustness
+          path: evidence/regime_check/within_july_regime_reality_check.json
+          if-no-files-found: warn
+          retention-days: 30
