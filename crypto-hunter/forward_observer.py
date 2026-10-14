@@ -25,6 +25,20 @@ MAX_SHADOW_SELL_QUOTES_PER_RUN=5
 shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
+shadow_quote_scheduled_this_run=set()
+def fair_shadow_quote_targets(state, selected, budget):
+    """Choose previously unserved shadows before repeating earlier quote checks.
+
+    State is a checkpoint: last_quote_scheduled_at persists through workflows.
+    The timestamp tracks scheduling, NOT an actually observed sell quote.
+    """
+    waiting=[(pool,item['shadow']) for pool,item in state.items()
+             if pool not in selected and not item.get('entry')
+             and item.get('shadow') and not item['shadow'].get('expired')
+             and item['shadow'].get('entry_quote')]
+    waiting.sort(key=lambda pair:(pair[1].get('last_quote_scheduled_at') or '',
+                                  pair[1].get('at') or '',pair[0]))
+    return [pool for pool,shadow in waiting[:max(0,budget-len(selected))]]
 try:
     with open('evidence/state.json') as f:st=json.load(f)
     for a in st.values():
@@ -104,6 +118,15 @@ def entry_quote_preflight(mint):
 
 for cycle in range(3):
     t=d.datetime.now(d.timezone.utc)
+    # Round-robin persisted across restarts and jobs; 5 of up to 25 active
+    # shadow baselines receive a quote slot per study, avoiding oldest-only
+    # starvation. Missed pool readings are NOT counted as quote results.
+    for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
+        shadow_quote_scheduled_this_run.add(pool)
+        st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
+        out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
+             'quota_slot':len(shadow_quote_scheduled_this_run),
+             'quote_fetched':False,'no_trade':True})
     # Time-based expiration even for disappeared/delisted pools: a shadow is never a trade.
     for old in st.values():
         sh=old.get('shadow')
@@ -255,7 +278,9 @@ for cycle in range(3):
                         shadow_chart_11x_this_run+=1
                     # Only shadows with a buy+sell quote captured at initial signal can
                     # be prospectively measured with quote-only exits. NEVER backfill.
-                    if shadow.get('entry_quote') and p not in shadow_quoted_this_run and shadow_quote_marks_this_run<MAX_SHADOW_SELL_QUOTES_PER_RUN:
+                    if (shadow.get('entry_quote') and p in shadow_quote_scheduled_this_run
+                        and p not in shadow_quoted_this_run
+                        and shadow_quote_marks_this_run<MAX_SHADOW_SELL_QUOTES_PER_RUN):
                         shadow_quoted_this_run.add(p)
                         shadow_quote_marks_this_run+=1
                         q=jupiter_quote(s.get('token_id','').removeprefix('solana_'),USDC,
@@ -429,6 +454,10 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_buy_and_sell_quote_baselines_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('entry_quote')),
    'shadow_quote_only_exit_checks_this_run':shadow_quote_marks_this_run,
    'shadow_quote_only_exit_available_this_run':shadow_quote_marks_available_this_run,
+   'shadow_quote_slots_scheduled':len(shadow_quote_scheduled_this_run),
+   'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
+   'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
+       if x.get('shadow') and x['shadow'].get('entry_quote') and not x['shadow'].get('last_exit_quote_check_at')),
    'shadow_quote_only_11x_unfilled_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('quote_11x_logged')),
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
