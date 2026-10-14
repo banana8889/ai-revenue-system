@@ -109,12 +109,36 @@ def main():
             liquid=[v for v in avail if v[1]>=MIN_RESERVE_SOL]
             all_peak[str(qty)]=max((v[0] for v in avail),default=None)
             liq_peak[str(qty)]=max((v[0] for v in liquid),default=None)
+        # Forward first-trigger study: stop / TP are fixed BEFORE outcomes.
+        # On 5-minute close sampled bars, first observable eligible trigger
+        # wins; never cherry-pick a later maximum. These are NOT actual fills.
+        def trigger(target):
+            for bar in fut:
+                if bar["res"]<MIN_RESERVE_SOL:
+                    return {"status":"unquoteable_reserve_below_minimum","mark_x":None,
+                            "last_at":bar["t"],"actual_fill":False}
+                mark=proxy_sell_x(entry,bar,.05)
+                if mark is None:
+                    return {"status":"missing_estimate","mark_x":None,
+                            "last_at":bar["t"],"actual_fill":False}
+                if mark<=.75:
+                    return {"status":"stop_first_seen","mark_x":round(mark,8),
+                            "last_at":bar["t"],"actual_fill":False}
+                if mark>=target:
+                    return {"status":"target_first_seen","mark_x":round(mark,8),
+                            "last_at":bar["t"],"actual_fill":False}
+            return {"status":"still_open_censored","mark_x":None,
+                    "last_at":fut[-1]["t"],"actual_fill":False}
+        exit3=trigger(3)
+        exit11=trigger(11)
         results.append({"pool":pool,"mint":entry["mint"],"anchor_at":anchor["t"],"entry_at":entry["t"],
                         "following_bars":len(fut),"following_elapsed_sec":fut[-1]["t"]-entry["t"],
                         "entry_sol_reserve":entry["res"],"peak_chart_close_x":chart_peak,
                         "best_quote_proxy_0_05_sol_x":all_peak[str(.05)],
                         "best_quote_proxy_liquid_0_05_sol_x":liq_peak[str(.05)],
                         "best_quote_proxy_liquid_0_5_sol_x":liq_peak[str(.5)],
+                        "precommitted_target_3x_stop_0_75x":exit3,
+                        "precommitted_target_11x_stop_0_75x":exit11,
                         "research_only":True})
     source_stats["pool_rows_eligible"]=len(results)
     def count(pred):return sum(bool(pred(x)) for x in results)
@@ -124,6 +148,15 @@ def main():
                 "at_least_5x":sum(x>=5 for x in scores),
                 "at_least_11x":sum(x>=11 for x in scores),
                 "max_observed_multiple":round(max(scores),5) if scores else None}
+    def trigger_counts(field):
+        counts=collections.Counter(r[field]["status"] for r in results)
+        return {"total":len(results),
+                "outcomes":dict(counts),
+                "triggered_target_marks":counts["target_first_seen"],
+                "triggered_stop_marks":counts["stop_first_seen"],
+                "no_reliable_exit_mark":counts["unquoteable_reserve_below_minimum"]+counts["missing_estimate"]+counts["still_open_censored"],
+                "target_mark_multiples":[r[field]["mark_x"] for r in results if r[field]["status"]=="target_first_seen"][:20],
+                "not_executed_trades":True}
     report={
       "source":"mivor7/pumpfun-pumpswap-market-data","source_dates":list(SHA.keys()),"pinned_sha256":SHA,
       "bar_granularity":"5-minute last-price/volume/reserve on pools with >=1 SOL per source README",
@@ -137,6 +170,8 @@ def main():
       "quote_proxy_0_05_sol_any_positive_reserve":metrics("best_quote_proxy_0_05_sol_x"),
       "quote_proxy_0_05_sol_sale_reserve_at_least_10":metrics("best_quote_proxy_liquid_0_05_sol_x"),
       "quote_proxy_0_5_sol_sale_reserve_at_least_10":metrics("best_quote_proxy_liquid_0_5_sol_x"),
+      "fixed_first_trigger_3x_target_vs_0_75x_stop":trigger_counts("precommitted_target_3x_stop_0_75x"),
+      "fixed_first_trigger_11x_target_vs_0_75x_stop":trigger_counts("precommitted_target_11x_stop_0_75x"),
       "count_chart_11x_but_no_liquid_proxy_11x_0_05_sol":count(lambda z:z["peak_chart_close_x"]>=11 and
             (z["best_quote_proxy_liquid_0_05_sol_x"] or 0)<11),
       "meaning":"Upper-bound best observed future BAR quote proxy, not execution or prospective take-profit strategy",
@@ -146,6 +181,8 @@ def main():
           "Assumed constant-product reserves, no token transfer tax, no token extensions, no actual DEX SDK quotes.",
           "Fees are illustrative, likely differ from venue-specific actual fees.",
           "Best FUTURE observed quote proxy is selected with hindsight, NOT a realizable decision rule.",
+          "Separate precommitted first-trigger 3x and 11x price-target-vs-0.75 stop studies use earliest observed 5m bar close, not fills or trading receipts.",
+          "Even precommitted first-trigger bar closes can gap sharply beyond a stop, and unknown microstructure prevents reliable stop execution.",
           "Solana SOL-denominated prices; profits in SOL proxy exclude SOL/USD movement.",
           "Missing follow-up bars and reserve collapses censored, may overstate success.",
           "Low reserve (<10 SOL) sale proxies excluded to reject many dust price spikes."]}
