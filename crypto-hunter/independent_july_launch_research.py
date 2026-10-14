@@ -121,10 +121,55 @@ def main():
             "Seconds-after-30s labels do not answer which tokens rose >1000% in 24h.",
             "Data collection outages, censoring and provider biases remain.",
             "Outcome path reference units assumed from dataset README and inspected samples."]}
+    # Fixed hyperparameters, never fitted on JUL late dates. Outcome gaps
+    # are CENSORED, not treated as losing launches. No optimization on holdout.
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.metrics import average_precision_score,roc_auc_score
+    usable=[key for key in FEATURES if key!="price"
+        and pd.to_numeric(train[key],errors="coerce").notna().sum()>100
+        and pd.to_numeric(train[key],errors="coerce").nunique()>3]
+    y_tr=(train.peak_sparse_chart_x>=11).to_numpy(dtype=int)
+    y_te=(test.peak_sparse_chart_x>=11).to_numpy(dtype=int)
+    if y_tr.sum()>=25 and y_te.sum()>=10 and len(usable)>=5:
+        imputer=SimpleImputer(strategy="median",keep_empty_features=True)
+        xt=imputer.fit_transform(train[usable].apply(pd.to_numeric,errors="coerce"))
+        xe=imputer.transform(test[usable].apply(pd.to_numeric,errors="coerce"))
+        clf=HistGradientBoostingClassifier(max_iter=105,max_leaf_nodes=15,
+            min_samples_leaf=70,learning_rate=.05,l2_regularization=5.,
+            class_weight="balanced",random_state=7)
+        clf.fit(xt,y_tr)
+        prob=clf.predict_proba(xe)[:,1]
+        rank=np.argsort(-prob,kind="stable")
+        results={"auc":round(float(roc_auc_score(y_te,prob)),6),
+                 "average_precision":round(float(average_precision_score(y_te,prob)),6),
+                 "baseline_rate":round(float(y_te.mean()),7)}
+        for fraction in (.01,.02,.05,.10):
+            chosen=rank[:max(1,int(math.ceil(len(test)*fraction)))]
+            hits=int(y_te[chosen].sum())
+            precision=hits/len(chosen)
+            results[f"top_{int(fraction*100)}pct"]={
+                "candidates":len(chosen),"chart_11x_hits":hits,
+                "precision":round(precision,7),
+                "lift_vs_unseen_base":round(precision/y_te.mean(),4) if y_te.mean() else None,
+                "recall":round(hits/y_te.sum(),6)}
+        report["holdout_model"]="one fixed 30-second snapshot-only HistGradientBoosting on early 70%, evaluate last 30%; NO execution"
+        report["holdout_ranking"]=results
+        report["features_used_from_30s"]=usable
+        examples=[]
+        for ix in rank[:min(60,len(rank))]:
+            r=test.iloc[int(ix)]
+            examples.append({"mint":str(r.mint),"created_at":str(r.created_ts),
+              "snapshot30_trades":int(r.n_trades) if pd.notna(r.n_trades) else None,
+              "snapshot30_dev_share":val(r.dev_share),
+              "model_score":round(float(prob[int(ix)]),6),
+              "later_sparse_chart_peak_x":round(float(r.peak_sparse_chart_x),4),
+              "not_an_executable_return":True})
+        (DATA/"july_holdout_ranked60_not_usable_as_trades.json").write_text(json.dumps(examples,indent=2))
     (DATA/"july_early_market_results.json").write_text(json.dumps(report,indent=2,allow_nan=False))
     print("INDEPENDENT_JULY_EARLY_RESEARCH",json.dumps({k:v for k,v in report.items()
        if k in ("independent_period","source_counts","coverage_fraction_of_all_launches",
          "train_mints","test_mints","train_chart_ge11","test_chart_ge11",
-         "test_base_rate_ge11","train_only_30s_precursor_medians","path_examples")},allow_nan=False))
+         "test_base_rate_ge11","train_only_30s_precursor_medians","path_examples","holdout_ranking","holdout_model")},allow_nan=False))
     print("JULY_24H_PROFITABLE_TRADES_PROVEN=False")
 if __name__=="__main__":main()
