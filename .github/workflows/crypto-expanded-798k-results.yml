@@ -1,0 +1,43 @@
+name: Crypto Expanded 798k Launches Historical Results
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-expanded-798k-results.yml, crypto-hunter/full_798k_launch_history.py]
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install data libraries
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 pyarrow==21.0.0 scikit-learn==1.7.2
+      - name: Reconstruct 24h launch and graduation cohort and check future-date generalization
+        run: |
+          python3 -m py_compile crypto-hunter/full_798k_launch_history.py
+          python3 crypto-hunter/full_798k_launch_history.py
+      - name: Prevent label leakage or fabricated executable-profit claims
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/corpus_798k/large_launch_cohort_report.json'))
+          assert r['total_launches']==798430
+          assert r['no_trades_or_wallet_access'] and r['not_all_blockchains']
+          assert r['postgraduation_outcomes_rows']==5669
+          assert r['train_sample']['rows']>1000 and r['test_sample']['rows']>100
+          assert 'graduated_at as predictor' in r['exclusions']
+          assert r['postgrad_liquid_24h_does_not_verify_peak_fill']
+          assert all('peak' not in x and 'rug' not in x for x in r['launch_ex_ante_features'])
+          print('798K_HISTORY_NO_HINDSIGHT_AND_NO_EXECUTABLE_PROFITS=PASS')
+          PY
+      - name: Store results as evidence, without raw datasets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-798k-launches-history-results
+          path: evidence/corpus_798k/large_launch_cohort_report.json
+          if-no-files-found: warn
+          retention-days: 30
