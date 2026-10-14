@@ -13,6 +13,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Independently test reserve math and first-trigger event order
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec=importlib.util.spec_from_file_location('reserve_proxy','crypto-hunter/pumpswap_reserve_quote_proxy.py')
+          m=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          entry={'res':100.,'px':1.,'t':0}
+          up={'res':100.,'px':14.,'t':300}
+          down={'res':100.,'px':0.2,'t':300}
+          drained={'res':1.,'px':10000.,'t':300}
+          assert m.proxy_sell_x(entry,up,.05)>11
+          assert m.proxy_sell_x(entry,down,.05)<.75
+          assert m.first_trigger(entry,[up,down],11)['status']=='target_first_seen'
+          assert m.first_trigger(entry,[down,up],11)['status']=='stop_first_seen'
+          assert m.first_trigger(entry,[drained,up],11)['status']=='unquoteable_reserve_below_minimum'
+          assert m.first_trigger(entry,[entry],11)['status']=='still_open_censored'
+          assert all(not m.first_trigger(entry,[z],11)['actual_fill'] for z in (up,down,drained))
+          print('RESERVE_FIRST_TRIGGER_ORDER_AND_NO_FAKE_FILL=PASS')
+          PY
       - name: Independently analyze 5-minute liquidity-conditioned SOL reserve proxies
         run: |
           python3 -m py_compile crypto-hunter/pumpswap_reserve_quote_proxy.py
