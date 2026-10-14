@@ -32,6 +32,7 @@ jobs:
           path: |
             evidence/state.json
             evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
@@ -65,6 +66,8 @@ jobs:
           assert len(cohorts['groups'])==2
           with open('evidence/prospective_cohort_ledger.json',encoding='utf-8') as f:history=json.load(f)
           assert isinstance(history,list) and all(x['trades']==0 for x in history)
+          with open('evidence/shadow_outcomes_ledger.json',encoding='utf-8') as f:shadow_history=json.load(f)
+          assert isinstance(shadow_history,list) and all(x['orders']==x['trades']==0 and x['return_unrealized'] for x in shadow_history)
           with open(state,encoding='utf-8') as f:checkpoint=json.load(f)
           print('LIVE_STUDY_HEARTBEAT',json.dumps({'at':receipt['at'],'samples':len(samples),'pools':len(pools),'tracked':len(checkpoint),'signals':receipt.get('prospective_signals',0),'exits':receipt.get('paper_exits',0),'trades':0,'errors':len(errors)}))
           PY
@@ -97,6 +100,7 @@ jobs:
           path: |
             evidence/state.json
             evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
           key: crypto-prospective-state-${{ github.run_id }}
       - name: Preserve independent evidence and receipt
         if: always()
