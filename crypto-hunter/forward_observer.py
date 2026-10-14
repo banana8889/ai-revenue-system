@@ -14,6 +14,11 @@ SHADOW_RESEARCH_SECONDS=24*3600
 COHORT_MAX_PER_GROUP=12
 COHORT_HORIZON_SEC=24*3600
 COHORT_MIN_OBSERVATIONS=4
+# CI fixtures default to three data cycles. The hosted canonical study requests
+# nine cycles to cut its six-minute blind cooldown while staying within a bounded
+# 20-minute job. The maximum prevents accidental unbounded requests.
+try:CYCLES_PER_RUN=max(3,min(12,int(os.getenv('CRYPTO_STUDY_CYCLES','3'))))
+except (TypeError,ValueError):CYCLES_PER_RUN=3
 COHORT_GROUPS=('buy_pressure','lower_pressure_control')
 cohort_added_this_run={x:0 for x in COHORT_GROUPS}
 shadow_new_this_run=0
@@ -116,7 +121,7 @@ def entry_quote_preflight(mint):
             'buy_fee_bps':entry.get('fee_bps'),'sell_fee_bps':exit_quote.get('fee_bps'),
             'observed_at':d.datetime.now(d.timezone.utc).isoformat(),'quote_only':True}
 
-for cycle in range(3):
+for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
     # Round-robin persisted across restarts and jobs; 5 of up to 25 active
     # shadow baselines receive a quote slot per study, avoiding oldest-only
@@ -421,7 +426,7 @@ for cycle in range(3):
                  'samples':co.get('n_observations',0),
                  'peak_chart_multiple':co.get('peak_chart_multiple',1.),
                  'no_trade':True,'no_fill':True})
-    if cycle<2:time.sleep(65)
+    if cycle<CYCLES_PER_RUN-1:time.sleep(65)
 keep={p:x for p,x in st.items() if (d.datetime.now(d.timezone.utc)-x['first']).total_seconds()<=72*3600 or x.get('entry')}
 serial={}
 for p,x in keep.items():
@@ -431,6 +436,7 @@ for p,x in keep.items():
     serial[p]=y
 with open('evidence/state.json','w') as f:json.dump(serial,f,allow_nan=False)
 r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
+   'requested_samples_this_run':CYCLES_PER_RUN,
    'prospective_signals':sum(x['entry'] is not None for x in st.values()),
    'paper_exits':sum(x.get('exit') is not None for x in st.values()),
    'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
