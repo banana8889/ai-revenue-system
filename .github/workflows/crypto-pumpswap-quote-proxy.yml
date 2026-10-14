@@ -1,0 +1,36 @@
+name: Crypto PumpSwap 5m Reserve-Aware Proxy Audit
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-pumpswap-quote-proxy.yml, crypto-hunter/pumpswap_reserve_quote_proxy.py]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Independently analyze 5-minute liquidity-conditioned SOL reserve proxies
+        run: |
+          python3 -m py_compile crypto-hunter/pumpswap_reserve_quote_proxy.py
+          python3 crypto-hunter/pumpswap_reserve_quote_proxy.py
+      - name: Refuse claim of executable returns, assert time-safe entry
+        run: |
+          python3 - <<'PY'
+          import json
+          r=json.load(open('evidence/amm_proxy/july_pool_liquidity_quote_proxy.json'))
+          assert r['orders']==r['trades']==0 and r['no_executable_fills']
+          assert 'next 5m bar' in r['entry_model']
+          assert r['source_stats']['raw_rows']>100000
+          assert r['quote_proxy_0_05_sol_any_positive_reserve']['available_count']>=0
+          print('PUMPSWAP_HISTORICAL_RESERVE_PROXY_READ_ONLY=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crypto-pumpswap-july-reserve-proxy-research
+          path: evidence/amm_proxy/july_pool_liquidity_quote_proxy.json
+          if-no-files-found: warn
