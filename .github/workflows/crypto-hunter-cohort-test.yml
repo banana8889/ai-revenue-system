@@ -91,4 +91,22 @@ jobs:
                   assert len(ledger)==2 and all(x['trades']==0 for x in ledger)
                   print('COHORT_24H_CENSORED_RETENTION=PASS')
               finally:os.chdir(wd)
+          # Expanded near-continuous market sampling must run nine actual
+          # discovery cycles in the collector without a wallet or transactions.
+          seen['page1']=0
+          with tempfile.TemporaryDirectory() as folder:
+              wd=os.getcwd()
+              try:
+                  os.chdir(folder);Path('evidence').mkdir()
+                  with mock.patch.dict(os.environ,{'CRYPTO_STUDY_CYCLES':'9'}):
+                      with mock.patch('urllib.request.urlopen',side_effect=urlopen),mock.patch('time.sleep',return_value=None):
+                          runpy.run_path(source,run_name='__main__')
+                  result=json.loads(Path('evidence/summary.json').read_text())
+                  rows=[json.loads(x) for x in Path('evidence/observations.jsonl').read_text().splitlines()]
+                  assert result['requested_samples_this_run']==9
+                  assert seen['page1']==9,seen
+                  assert len([z for z in rows if z.get('kind')=='sample'])==9
+                  assert result['orders']==result['trades']==0
+                  print('NINE_CYCLE_NEAR_CONTINUOUS_SAMPLING=PASS')
+              finally:os.chdir(wd)
           PY
