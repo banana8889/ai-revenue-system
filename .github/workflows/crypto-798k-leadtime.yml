@@ -1,0 +1,38 @@
+name: Crypto 798k Eleven-X Lead Time Truth
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/crypto-798k-leadtime.yml, crypto-hunter/large_corpus_leadtime_audit.py]
+permissions:
+  contents: read
+jobs:
+  truth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 13
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned columnar analysis
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 pyarrow==21.0.0
+      - name: Reconstruct 3569 historical 11x peak timing and cohort shifts
+        run: |
+          python3 -m py_compile crypto-hunter/large_corpus_leadtime_audit.py
+          python3 crypto-hunter/large_corpus_leadtime_audit.py
+      - name: Validate non-leaky result and retain
+        run: |
+          python3 - <<'PY'
+          import json
+          x=json.load(open('evidence/corpus_798k_leadtime/lead_time_truth.json'))
+          assert x['chart_11x_total']>0
+          assert sum(x['earliest_to_peak_buckets'].values())==x['chart_11x_total']
+          assert x['no_fill_proven'] and x['trades']==0
+          assert not x['wallets_connected']
+          print('PEAK_TIMING_AND_NO_FILL_CLAIMS=PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 798k-chart-11x-peak-lead-time
+          path: evidence/corpus_798k_leadtime/lead_time_truth.json
+          if-no-files-found: warn
