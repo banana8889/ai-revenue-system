@@ -14,7 +14,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned data libraries
-        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3
+        run: python3 -m pip install --disable-pip-version-check -q pandas==2.3.3 scikit-learn==1.7.2
       - name: Compute independently labelled JUL 2026 early chart cohorts
         run: |
           python3 -m py_compile crypto-hunter/independent_july_launch_research.py
@@ -30,6 +30,10 @@ jobs:
           assert 'not full day' in r['observation_window']
           assert not r['net_return_verified'] and r['orders']==r['trades']==0
           assert r['missing_paths_not_treated_as_losses'] and r['false_24h_claims_blocked']
+          assert r['test_chart_ge11']>0 and r['train_chart_ge11']>0
+          assert len(r.get('features_used_from_30s',[]))>=5
+          assert 'holdout_ranking' in r
+          assert 'top_1pct' in r['holdout_ranking']
           print('JULY_INDEPENDENT_HISTORICAL_AUDIT=PASS')
           PY
       - name: Preserve independent historical analysis report
@@ -37,5 +41,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: july-independent-117k-launches-cohort
-          path: evidence/historical_july/july_early_market_results.json
+          path: |
+            evidence/historical_july/july_early_market_results.json
+            evidence/historical_july/july_holdout_ranked60_not_usable_as_trades.json
           if-no-files-found: warn
