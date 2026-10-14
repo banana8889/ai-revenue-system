@@ -8,7 +8,7 @@ sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
 MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
-MAX_SHADOW_CANDIDATES=25
+MAX_SHADOW_CANDIDATES=40
 SHADOW_RESEARCH_SECONDS=24*3600
 # Pre-registered equal-budget pressure versus control pools. No wallet/trades.
 COHORT_MAX_PER_GROUP=12
@@ -26,7 +26,7 @@ shadow_chart_11x_this_run=0
 shadow_quote_entries_this_run=0
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
-MAX_SHADOW_SELL_QUOTES_PER_RUN=5
+MAX_SHADOW_SELL_QUOTES_PER_RUN=8
 shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
@@ -125,16 +125,8 @@ def entry_quote_preflight(mint):
 
 for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
-    # Round-robin persisted across restarts and jobs; 5 of up to 25 active
-    # shadow baselines receive a quote slot per study, avoiding oldest-only
-    # starvation. Missed pool readings are NOT counted as quote results.
-    for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
-        shadow_quote_scheduled_this_run.add(pool)
-        st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
-        out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
-             'quota_slot':len(shadow_quote_scheduled_this_run),
-             'quote_fetched':False,'no_trade':True})
-    # Time-based expiration even for disappeared/delisted pools: a shadow is never a trade.
+    # Expire first, before consuming any scarce quote-request slots.
+    # Expiration is a research lifecycle transition, NEVER a sale.
     for old in st.values():
         sh=old.get('shadow')
         if sh and not sh.get('expired'):
@@ -143,6 +135,13 @@ for cycle in range(CYCLES_PER_RUN):
                     sh['expired']=True
             except (TypeError,ValueError,KeyError):
                 sh['expired']=True
+    # Persisted fair rotation avoids repeatedly quoting the oldest five.
+    for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
+        shadow_quote_scheduled_this_run.add(pool)
+        st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
+        out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
+             'quota_slot':len(shadow_quote_scheduled_this_run),
+             'quote_fetched':False,'no_trade':True})
     try:
         data=[]
         for page in (1,2,3):
@@ -476,6 +475,10 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('entry_quote') and not x['shadow'].get('last_exit_quote_check_at')),
+   'shadow_live_capacity':MAX_SHADOW_CANDIDATES,
+   'shadow_mark_budget_per_run':MAX_SHADOW_SELL_QUOTES_PER_RUN,
+   'shadow_remaining_capacity':max(0,MAX_SHADOW_CANDIDATES-sum(
+       1 for x in st.values() if x.get('shadow') and not x['shadow'].get('expired') and not x.get('entry'))),
    'shadow_quote_only_11x_unfilled_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('quote_11x_logged')),
    'quote_marked_distinct_positions':len(sell_marked_this_run),
    'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
