@@ -229,6 +229,15 @@ jobs:
                   'shadow':sh}
           # Preserve one deliberately unquoteable legacy PAPER position,
           # otherwise this scenario should legitimately skip the shadow lane.
+          # Pre-seed a qualifying historical observation so that the fresh
+          # market's first replayed sample is a valid SECOND distinct signal.
+          # Without this setup, the same-run fast mock (<60s) cannot qualify.
+          full_state[pool]={'first':timestamp_age(240),'last_distinct_at':timestamp_age(95),
+              'entry':None,'exit':None,'count':1,'qualified':1,
+              'previous_signature':[1.,24000.,10000.,80,25,60],
+              'token_id':mint,'peak_net':0.}
+          calls['later_liquidity']=25000
+          calls['later_price']=3
           full_state['UnquotedStuckPosition']={
               'first':timestamp_age(300),'last_distinct_at':timestamp_age(300),
               'entry':[timestamp_age(180),1.0],'exit':None,
