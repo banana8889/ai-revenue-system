@@ -212,10 +212,10 @@ for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
     if cycle==0:
         long_tail_seeded_this_run=seed_long_tail_group(st)
-    censored_quote_studies_this_run=censor_failed_quote_research(t)
         out({'kind':'long_tail_identity_cohort_seeded','at':t.isoformat(),
              'legacy_watches_assigned':long_tail_seeded_this_run,
              'method':'sha256_mint_mod5','no_trades':True})
+    censor_failed_quote_research(t)
     # Rotate research observations while archiving early dropouts as CENSORED,
     # never treating them as 24h negatives, filled exits or market orders.
     for pool,old in st.items():
