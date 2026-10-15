@@ -176,6 +176,43 @@ jobs:
                   assert report['trades']==0
                   print('THOUSANDS_PERCENT_11X_21X_51X_QUOTES_NEVER_FILLS=PASS')
               finally:os.chdir(wd)
+          # A burst watcher should receive a quote in the SAME market sample,
+          # even when fair rotation chose two unrelated older watches.
+          burst_state=dict(state)
+          for i in range(2):
+              name='OldScheduledShadow%d'%i
+              burst_state[name]={'first':old,'entry':None,'count':1,'qualified':0,
+                  'last_distinct_at':None,'previous_signature':None,
+                  'token_id':'solana_OLDSCHEDULED%d'%i,
+                  'shadow':{'at':old,'entry_pool_price':1.,'peak_chart_multiple':1.,
+                            'entry_quote':{'token_raw':1000},'no_capital_allocated':True}}
+          burst_state[pool]={**state[pool],
+              'qualified':0,'shadow':{
+                  'at':old,'entry_pool_price':1.,'entry_quote':{'token_raw':1000},
+                  'peak_chart_multiple':1.,'no_capital_allocated':True,
+                  'last_quote_scheduled_at':now.isoformat()}}
+          calls['page1']=0
+          calls['later_price']=3
+          calls['later_liquidity']=25000
+          quotes_called={'buy':0,'sell':0}
+          with tempfile.TemporaryDirectory() as td:
+              wd=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(burst_state))
+                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  receipt=json.loads(Path('evidence/summary.json').read_text())
+                  saved=json.loads(Path('evidence/state.json').read_text())
+                  rows=[json.loads(v) for v in Path('evidence/observations.jsonl').read_text().splitlines()]
+                  assert receipt['shadow_reserved_chart_burst_capacity']==2
+                  assert receipt['shadow_chart_burst_quote_slots_used']==1,receipt
+                  assert receipt['shadow_quote_only_exit_checks_this_run']==1
+                  assert saved[pool]['shadow']['last_exit_quote_check_at']
+                  assert any(v.get('lane')=='chart_burst_emergency' for v in rows)
+                  assert receipt['orders']==receipt['trades']==0
+                  print('CHART_ACCELERATION_PRIORITIZED_SELL_QUOTE_SAME_SAMPLE=PASS')
+              finally:os.chdir(wd)
           # A full OLD 40-candidate sample should NOT permanently block fresh
           # prospectively timestamped research after capacity expands to 80.
           older=(now-d.timedelta(minutes=10)).isoformat()
@@ -236,6 +273,17 @@ jobs:
           assert rule({**no_route(2*3600),'long_tail_24h':True},now) is None
           assert rule({**quoted(3*3600,.01),'long_tail_24h':True},now) is None
           assert rule({**quoted(25*3600,100.),'long_tail_24h':True},now)=='natural_24h'
+          fn=next(x for x in ast.parse(Path(scanner).read_text()).body if isinstance(x,ast.FunctionDef) and x.name=='burst_quote_eligible')
+          scope={'BURST_QUOTE_RESERVE':2,'BURST_CHART_TRIGGER_X':1.8,'BURST_MIN_LIQUIDITY_USD':10000}
+          exec(compile(ast.Module(body=[fn],type_ignores=[]),scanner,'exec'),scope)
+          ok=scope['burst_quote_eligible']
+          eligible={'entry_quote':{'token_raw':1000}}
+          assert ok(eligible,1.8,10000,set(),set(),'a',0)
+          assert not ok(eligible,1.799,10000,set(),set(),'a',0)
+          assert not ok(eligible,11,9999,set(),set(),'a',0)
+          assert not ok(eligible,11,20000,{'a'},set(),'a',0)
+          assert not ok(eligible,11,20000,set(),set(),'a',2)
+          assert not ok({},101,100000,set(),set(),'a',0)
           print('SHADOW_30M_90M_RETIREMENT_KEEP_WINNERS_24H=PASS')
           code=ast.parse(Path(scanner).read_text())
           tail_funcs=[x for x in code.body if isinstance(x,ast.FunctionDef)
