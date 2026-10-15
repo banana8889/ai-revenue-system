@@ -109,7 +109,7 @@ jobs:
                       quotes_called['buy']+=1
                       return io.BytesIO(json.dumps({'outAmount':'1000','router':'MOCK'}).encode())
                   quotes_called['sell']+=1
-                  amount=4900000 if quotes_called['sell']==1 else 65000000
+                  amount=4900000 if quotes_called['sell']==1 else quotes_called.get('future_amount',65000000)
                   return io.BytesIO(json.dumps({'outAmount':str(amount),'router':'MOCK'}).encode())
               return fake_urlopen(request,timeout)
           with tempfile.TemporaryDirectory() as td:
@@ -137,6 +137,11 @@ jobs:
                   assert receipt['shadow_quote_only_11x_unfilled_total']==1
                   quote_score=json.loads(Path('evidence/quote_only_shadow_outcomes.json').read_text())
                   assert quote_score['quote_ever_reached_11x_unfilled']==1
+                  assert quote_score['quote_ever_reached_21x_unfilled']==0
+                  assert quote_score['quote_ever_reached_51x_unfilled']==0
+                  assert quote_score['quote_ever_reached_101x_unfilled']==0
+                  m=state_after[pool]['shadow']['first_explosive_quote_milestones']
+                  assert set(m)=={'11'} and m['11']['unfilled']
                   assert quote_score['highest_quoted_sell_multiple_unfilled']>=13
                   assert quote_score['trades']==quote_score['realized_profit_count']==0
                   assert quote_score['fees_and_execution_not_proven']
@@ -151,6 +156,26 @@ jobs:
                       'chart_hit_count':receipt['shadow_chart_11x_unfilled_total'],
                       'orders':receipt['orders'],'trades':receipt['trades']}))
               finally:os.chdir(old_dir)
+          # Higher tier read-only future quote: +5400% in quote, NOT execution.
+          calls['page1']=0
+          quotes_called={'buy':0,'sell':0,'future_amount':275000000}
+          with tempfile.TemporaryDirectory() as td:
+              wd=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(state))
+                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  saved=json.loads(Path('evidence/state.json').read_text())
+                  milestones=saved[pool]['shadow']['first_explosive_quote_milestones']
+                  assert set(milestones)=={'11','21','51'} and '101' not in milestones
+                  assert all(z['unfilled'] for z in milestones.values())
+                  report=json.loads(Path('evidence/quote_only_shadow_outcomes.json').read_text())
+                  assert report['quote_ever_reached_51x_unfilled']==1
+                  assert report['quote_ever_reached_101x_unfilled']==0
+                  assert report['trades']==0
+                  print('THOUSANDS_PERCENT_11X_21X_51X_QUOTES_NEVER_FILLS=PASS')
+              finally:os.chdir(wd)
           # A full OLD 40-candidate sample should NOT permanently block fresh
           # prospectively timestamped research after capacity expands to 80.
           older=(now-d.timedelta(minutes=10)).isoformat()
@@ -208,7 +233,25 @@ jobs:
           assert rule(quoted(91*60,1.25),now) is None
           assert rule(quoted(23*3600,2.0),now) is None
           assert rule(quoted(25*3600,2.0),now)=='natural_24h'
+          assert rule({**no_route(2*3600),'long_tail_24h':True},now) is None
+          assert rule({**quoted(3*3600,.01),'long_tail_24h':True},now) is None
+          assert rule({**quoted(25*3600,100.),'long_tail_24h':True},now)=='natural_24h'
           print('SHADOW_30M_90M_RETIREMENT_KEEP_WINNERS_24H=PASS')
+          code=ast.parse(Path(scanner).read_text())
+          tail_funcs=[x for x in code.body if isinstance(x,ast.FunctionDef)
+                      and x.name in ('tail_is_selected','seed_long_tail_group')]
+          namespace={'hashlib':__import__('hashlib'),'LONG_TAIL_MODULUS':5,'LONG_TAIL_MAX_ACTIVE':16}
+          exec(compile(ast.Module(body=tail_funcs,type_ignores=[]),scanner,'exec'),namespace)
+          draw,seed=namespace['tail_is_selected'],namespace['seed_long_tail_group']
+          sample={}
+          for i in range(80):
+              sample['tail_%03d'%i]={'token_id':'solana_TAIL%04d'%i,
+                  'shadow':{'at':timestamp_age(7200),'no_capital_allocated':True}}
+          selected=seed(sample)
+          assert 1<=selected<=16 and seed(sample)==0
+          assert sum(z['shadow']['long_tail_24h'] for z in sample.values())==selected
+          assert all(draw(z['token_id']) for z in sample.values() if z['shadow']['long_tail_24h'])
+          print('DETERMINISTIC_24H_LONG_TAIL_SELECTION=PASS',selected)
 
           # 80/80 research slots full (not capital). Expire 20 unroutable,
           # 55 flat markets, preserve 5 promising quotes and admit a FRESH
@@ -217,6 +260,7 @@ jobs:
           full_state={}
           for i in range(80):
               sh={'at':aged_first,'entry_pool_price':2.0,
+                  'long_tail_24h':False,'long_tail_assignment_method':'predefined_fixture',
                   'peak_chart_multiple':1.1,'no_capital_allocated':True}
               if i>=20:
                   sh['entry_quote']={'token_raw':1000,'immediate_roundtrip_multiple':.96}
