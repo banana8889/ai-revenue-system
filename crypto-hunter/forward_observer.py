@@ -1,4 +1,4 @@
-import datetime as d,json,time,urllib.request,urllib.error,urllib.parse,os,math,statistics
+import datetime as d,json,time,urllib.request,urllib.error,urllib.parse,os,math,statistics,hashlib
 url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -13,12 +13,37 @@ SHADOW_RESEARCH_SECONDS=24*3600
 SHADOW_NO_ENTRY_ROUTE_SECONDS=30*60
 SHADOW_FLAT_QUOTE_SECONDS=90*60
 SHADOW_KEEP_PEAK_QUOTE_X=1.25
+# Twenty percent identity-only, 24h tail cohort to observe delayed breakouts.
+LONG_TAIL_MAX_ACTIVE=16   # research only; 80 total slots
+LONG_TAIL_MODULUS=5
+EXPLOSIVE_MULTIPLIERS=(11,21,51,101)  # +1000%/+2000%/+5000%/+10000%
+def tail_is_selected(mint):
+    if not mint:return False
+    digest=hashlib.sha256(str(mint).encode('utf-8')).digest()
+    return int.from_bytes(digest[:8],'big')%LONG_TAIL_MODULUS==0
+def seed_long_tail_group(state):
+    # LEGACY BACKFILL is recorded separately from prospective assignment.
+    active=sum(bool(z.get('shadow') and not z['shadow'].get('expired')
+                    and z['shadow'].get('long_tail_24h')) for z in state.values())
+    candidates=sorted((z.get('token_id') or pool,pool) for pool,z in state.items()
+                      if z.get('shadow') and not z['shadow'].get('expired')
+                      and 'long_tail_24h' not in z['shadow'])
+    count=0
+    for mint,pool in candidates:
+        sh=state[pool]['shadow']
+        chosen=active<LONG_TAIL_MAX_ACTIVE and tail_is_selected(mint)
+        sh['long_tail_24h']=bool(chosen)
+        sh['long_tail_assignment_method']='sha256_mint_mod5_legacy_backfill'
+        if chosen:active+=1;count+=1
+    return count
+long_tail_seeded_this_run=0
 shadow_retirements_this_run={}
 def shadow_retirement_reason(sh, now):
     """No future knowledge: early retirement is research censoring, NOT a fill."""
     try:age=(now-d.datetime.fromisoformat(sh['at'])).total_seconds()
     except (ValueError,TypeError,KeyError):return 'invalid_timestamp_censored'
     if age>SHADOW_RESEARCH_SECONDS:return 'natural_24h'
+    if sh.get('long_tail_24h'):return None  # preserve delayed explosion evidence
     if age>=SHADOW_NO_ENTRY_ROUTE_SECONDS and not sh.get('entry_quote'):
         return 'no_two_sided_entry_quote_30m'
     if (age>=SHADOW_FLAT_QUOTE_SECONDS and sh.get('entry_quote')
@@ -145,6 +170,11 @@ def entry_quote_preflight(mint):
 
 for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
+    if cycle==0:
+        long_tail_seeded_this_run=seed_long_tail_group(st)
+        out({'kind':'long_tail_identity_cohort_seeded','at':t.isoformat(),
+             'legacy_watches_assigned':long_tail_seeded_this_run,
+             'method':'sha256_mint_mod5','no_trades':True})
     # Rotate research observations while archiving early dropouts as CENSORED,
     # never treating them as 24h negatives, filled exits or market orders.
     for pool,old in st.items():
@@ -337,6 +367,17 @@ for cycle in range(CYCLES_PER_RUN):
                             shadow['quote_available_count']=shadow.get('quote_available_count',0)+1
                             shadow_quote_marks_available_this_run+=1
                             multiple=q['out_amount']/5000000
+                            thresholds=shadow.setdefault('first_explosive_quote_milestones',{})
+                            for level in EXPLOSIVE_MULTIPLIERS:
+                                label=str(level)
+                                if multiple>=level and label not in thresholds:
+                                    thresholds[label]={'at':marked,'quote_multiple':multiple,
+                                        'quote_usdc':q['out_amount']/1000000,
+                                        'unfilled':True,'gas_rent_mev_not_included':True}
+                                    out({'kind':'research_explosive_quote_milestone',
+                                         'at':marked,'pool':p,'token_id':s.get('token_id'),
+                                         'tier_x':level,'observed_quote_multiple':multiple,
+                                         'no_actual_fill':True,'no_trade':True})
                             shadow['max_exit_quote_multiple']=max(shadow.get('max_exit_quote_multiple',0),multiple)
                             shadow['last_exit_quote_multiple']=multiple
                             shadow['last_exit_quote_at']=marked
@@ -365,7 +406,13 @@ for cycle in range(CYCLES_PER_RUN):
                     open_shadows=sum(bool(z.get('shadow')) and not z['shadow'].get('expired')
                                      and not z.get('entry') for z in st.values())
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
+                        active_tail=sum(1 for z in st.values() if z.get('shadow')
+                                        and not z['shadow'].get('expired')
+                                        and z['shadow'].get('long_tail_24h'))
+                        tail_choice=active_tail<LONG_TAIL_MAX_ACTIVE and tail_is_selected(token_id)
                         shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
+                                'long_tail_24h':bool(tail_choice),
+                                'long_tail_assignment_method':'sha256_mint_mod5_at_signal',
                                 'entry_pool_price':v,'entry_liquidity_usd':x['liq'],
                                 'initial_age_minutes':age,
                                 'initial_volume_1h_usd':x['volume_1h'],
@@ -533,6 +580,10 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('entry_quote') and not x['shadow'].get('last_exit_quote_check_at')),
    'shadow_live_capacity':MAX_SHADOW_CANDIDATES,
+   'long_tail_active_24h':sum(1 for z in st.values() if z.get('shadow')
+        and not z['shadow'].get('expired') and z['shadow'].get('long_tail_24h')),
+   'long_tail_seeded_from_existing':long_tail_seeded_this_run,
+   'long_tail_max_active':LONG_TAIL_MAX_ACTIVE,
    'shadow_retirements_this_run':shadow_retirements_this_run,
    'shadow_early_retirements_censored':sum(v for k,v in shadow_retirements_this_run.items() if k!='natural_24h'),
    'shadow_fresh_quote_slots_same_run':len(fresh_shadow_slots_this_run),
@@ -616,6 +667,10 @@ shadow_report={'at':r['at'],
  'quote_ever_reached_2x_unfilled':sum(v>=2 for v in quoted_marks),
  'quote_ever_reached_5x_unfilled':sum(v>=5 for v in quoted_marks),
  'quote_ever_reached_11x_unfilled':sum(v>=11 for v in quoted_marks),
+ 'quote_ever_reached_21x_unfilled':sum(v>=21 for v in quoted_marks),
+ 'quote_ever_reached_51x_unfilled':sum(v>=51 for v in quoted_marks),
+ 'quote_ever_reached_101x_unfilled':sum(v>=101 for v in quoted_marks),
+ 'long_tail_24h_current_active':sum(bool(sh.get('long_tail_24h')) for _,sh in live_shadows),
  'highest_quoted_sell_multiple_unfilled':max(quoted_marks) if quoted_marks else None,
  'median_last_quoted_sell_multiple_unfilled':statistics.median(last_marks) if last_marks else None,
  'quote_failures_accumulated':route_missing,
@@ -654,6 +709,9 @@ for pool,z in st.items():
         'initial_buys_1h':sh.get('initial_buys_1h'),
         'initial_sells_1h':sh.get('initial_sells_1h'),
         'initial_dex':sh.get('initial_dex'),
+        'long_tail_24h':bool(sh.get('long_tail_24h')),
+        'long_tail_assignment_method':sh.get('long_tail_assignment_method'),
+        'first_explosive_quote_milestones':sh.get('first_explosive_quote_milestones',{}),
         'peak_chart_multiple_unfilled':sh.get('peak_chart_multiple',1),
         'peak_chart_liquidity_usd':sh.get('peak_chart_liquidity_usd'),
         'initial_buy_sell_quote_available':bool(sh.get('entry_quote')),
@@ -702,6 +760,8 @@ print('SHADOW_ARCHIVE_CHECKPOINT',json.dumps({
     'expired_with_quote_at_signal':sum(x['initial_buy_sell_quote_available'] for x in shadow_ledger),
     'expired_with_later_sell_quote':sum(x['later_sell_quotes_available']>0 for x in shadow_ledger),
     'expired_with_later_quote_11x_unfilled':sum(x['ever_observed_later_quote_11x'] for x in shadow_ledger),
+    'archived_tail_24h_count':sum(x.get('long_tail_24h',False) for x in shadow_ledger),
+    'archived_tail_full_24h_count':sum(x.get('long_tail_24h',False) and x.get('completed_24h',False) for x in shadow_ledger),
     'trades':0},allow_nan=False))
 groups={}
 for label in COHORT_GROUPS:
