@@ -256,6 +256,11 @@ for cycle in range(CYCLES_PER_RUN):
             except Exception as ex:out({'kind':'tracked_pool_error','at':t.isoformat(),'error':str(ex)[:120]})
             time.sleep(4)
         out({'kind':'sample','at':t.isoformat(),'cycle':cycle,'pool_count':len(data)})
+        # Rebuild O(1) identity indexes once per live observation cycle.
+        entry_token_ids={z.get('token_id') for z in st.values() if z.get('entry') and z.get('token_id')}
+        active_shadow_mints={z.get('token_id') for z in st.values() if z.get('shadow') and not z['shadow'].get('expired') and not z.get('entry') and z.get('token_id')}
+        active_shadow_count=sum(1 for z in st.values() if z.get('shadow') and not z['shadow'].get('expired') and not z.get('entry'))
+        active_tail_count=sum(1 for z in st.values() if z.get('shadow') and not z['shadow'].get('expired') and z['shadow'].get('long_tail_24h'))
         for obj in data:
             a=obj.get('attributes') or {}
             p=a.get('address')
@@ -423,7 +428,7 @@ for cycle in range(CYCLES_PER_RUN):
                             shadow['exit_quote_missing_count']=shadow.get('exit_quote_missing_count',0)+1
                             out({'kind':'shadow_exit_quote_unavailable','at':marked,'pool':p,'token_id':s.get('token_id'),
                                  'quote_error':q,'no_fill':True,'no_capital_allocated':True})
-            already_signaled=any(k!=p and z.get('entry') and z.get('token_id')==token_id for k,z in st.items()) if token_id else False
+            already_signaled=bool(token_id and token_id in entry_token_ids)
             if s['entry'] is None and eligible and not already_signaled:
                 risk=paper_entry_risk_reason(d.datetime.now(d.timezone.utc))
                 if risk:
@@ -431,14 +436,10 @@ for cycle in range(CYCLES_PER_RUN):
                         blocked_candidates_this_run.add(token_id)
                         out({'kind':'risk_blocked_candidate','at':d.datetime.now(d.timezone.utc).isoformat(),
                              'pool':p,'token_id':token_id,'reason':risk,'new_position':False})
-                    known_shadow=any(k!=p and z.get('shadow') and not z['shadow'].get('expired')
-                                     and z.get('token_id')==token_id for k,z in st.items())
-                    open_shadows=sum(bool(z.get('shadow')) and not z['shadow'].get('expired')
-                                     and not z.get('entry') for z in st.values())
+                    known_shadow=bool(token_id and token_id in active_shadow_mints)
+                    open_shadows=active_shadow_count
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
-                        active_tail=sum(1 for z in st.values() if z.get('shadow')
-                                        and not z['shadow'].get('expired')
-                                        and z['shadow'].get('long_tail_24h'))
+                        active_tail=active_tail_count
                         tail_choice=active_tail<LONG_TAIL_MAX_ACTIVE and tail_is_selected(token_id)
                         shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
                                 'long_tail_24h':bool(tail_choice),
@@ -483,6 +484,9 @@ for cycle in range(CYCLES_PER_RUN):
                                      'pool':p,'token_id':token_id,'reason':proposal.get('reason'),
                                      'no_trade':True,'no_capital_allocated':True})
                         s['shadow']=shadow
+                        if token_id:active_shadow_mints.add(token_id)
+                        active_shadow_count+=1
+                        if tail_choice:active_tail_count+=1
                         shadow_new_this_run+=1
                         out({'kind':'shadow_research_only','at':shadow['at'],'pool':p,
                              'token_id':token_id,'observed_price':v,'entry_intentionally_blocked':True,
@@ -495,6 +499,7 @@ for cycle in range(CYCLES_PER_RUN):
                 if preflight.get('ok'):
                     entry_at=d.datetime.now(d.timezone.utc)
                     s['entry']=(entry_at,v)
+                    entry_token_ids.add(token_id)
                     s['entry_quote']=preflight
                     s['entry_liquidity_usd']=x['liq']
                     out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
