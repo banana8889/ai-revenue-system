@@ -71,7 +71,20 @@ MAX_SHADOW_SELL_QUOTES_PER_RUN=8
 # Guarantee some quote capacity for NEW quoteable candidates in the SAME
 # study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
 FRESH_SHADOW_QUOTE_RESERVE=4
+# Reserve two quote slots for abrupt chart acceleration, BEFORE an 11x candle.
+# A spot price burst is merely a request for a real later sell quotation.
+BURST_QUOTE_RESERVE=2
+BURST_CHART_TRIGGER_X=1.8
+BURST_MIN_LIQUIDITY_USD=10000
 fresh_shadow_slots_this_run=set()
+burst_quote_slots_this_run=set()
+def burst_quote_eligible(sh, gross, liquidity, scheduled, quoted, pool, burst_slots):
+    return bool(sh.get('entry_quote') and not sh.get('expired')
+                and pool not in scheduled and pool not in quoted
+                and burst_slots<BURST_QUOTE_RESERVE
+                and gross>=BURST_CHART_TRIGGER_X
+                and liquidity>=BURST_MIN_LIQUIDITY_USD)
+
 shadow_quoted_this_run=set()
 sell_marked_this_run=set()
 blocked_candidates_this_run=set()
@@ -196,7 +209,7 @@ for cycle in range(CYCLES_PER_RUN):
     if cycle==0:
         # Reserve four of eight exact-size sell checks for fresh signals.
         # Scheduling a quote is not evidence that one was received.
-        old_budget=max(0,MAX_SHADOW_SELL_QUOTES_PER_RUN-FRESH_SHADOW_QUOTE_RESERVE)
+        old_budget=max(0,MAX_SHADOW_SELL_QUOTES_PER_RUN-FRESH_SHADOW_QUOTE_RESERVE-BURST_QUOTE_RESERVE)
         for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,old_budget):
             shadow_quote_scheduled_this_run.add(pool)
             st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
@@ -206,7 +219,10 @@ for cycle in range(CYCLES_PER_RUN):
     if cycle==CYCLES_PER_RUN-1:
         # Use any fresh-candidate slots not needed this job. These old pools
         # can still be quoted in THIS final cycle if their market is present.
-        for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,MAX_SHADOW_SELL_QUOTES_PER_RUN):
+        # Keep emergency quote budget through the last sample; the remaining
+        # two unused slots may be reported as unused, NEVER as acquired quotes.
+        release_budget=MAX_SHADOW_SELL_QUOTES_PER_RUN-BURST_QUOTE_RESERVE+len(burst_quote_slots_this_run)
+        for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,release_budget):
             shadow_quote_scheduled_this_run.add(pool)
             st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
             out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
@@ -341,6 +357,20 @@ for cycle in range(CYCLES_PER_RUN):
                         shadow['peak_chart_liquidity_usd']=x['liq']
                         shadow['peak_chart_liquidity_observed_at']=t.isoformat()
                     shadow['last_chart_multiple']=gross
+                    # Fast chart motion may happen between slow fair-rotation
+                    # turns. Check exact-size sell quote NOW, not post-hoc
+                    # chart peaks. Never use future price to choose candidates.
+                    if burst_quote_eligible(shadow,gross,x['liq'],
+                             shadow_quote_scheduled_this_run,shadow_quoted_this_run,
+                             p,len(burst_quote_slots_this_run)) and (
+                             len(shadow_quote_scheduled_this_run)<MAX_SHADOW_SELL_QUOTES_PER_RUN):
+                        shadow_quote_scheduled_this_run.add(p)
+                        burst_quote_slots_this_run.add(p)
+                        shadow['last_quote_scheduled_at']=d.datetime.now(d.timezone.utc).isoformat()
+                        out({'kind':'shadow_sell_quote_scheduled','at':shadow['last_quote_scheduled_at'],
+                             'pool':p,'quota_slot':len(shadow_quote_scheduled_this_run),
+                             'quote_fetched':False,'no_trade':True,'lane':'chart_burst_emergency',
+                             'chart_multiple_unfilled':gross,'liquidity_usd':x['liq']})
                     if gross>=11 and not shadow.get('chart_11x_logged'):
                         shadow['chart_11x_logged']=True
                         shadow['first_chart_11x_liquidity_usd']=x['liq']
@@ -588,6 +618,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_early_retirements_censored':sum(v for k,v in shadow_retirements_this_run.items() if k!='natural_24h'),
    'shadow_fresh_quote_slots_same_run':len(fresh_shadow_slots_this_run),
    'shadow_reserved_fresh_quote_capacity':FRESH_SHADOW_QUOTE_RESERVE,
+   'shadow_chart_burst_quote_slots_used':len(burst_quote_slots_this_run),
+   'shadow_reserved_chart_burst_capacity':BURST_QUOTE_RESERVE,
    'shadow_mark_budget_per_run':MAX_SHADOW_SELL_QUOTES_PER_RUN,
    'shadow_remaining_capacity':max(0,MAX_SHADOW_CANDIDATES-sum(
        1 for x in st.values() if x.get('shadow') and not x['shadow'].get('expired') and not x.get('entry'))),
