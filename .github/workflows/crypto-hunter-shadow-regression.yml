@@ -183,6 +183,74 @@ jobs:
                   assert receipt['orders']==receipt['trades']==0
                   print('OLD_40_SHADOWS_DO_NOT_BLOCK_FRESH_80_CAPACITY=PASS')
               finally:os.chdir(old_dir)
+          # Independent predeclared retirement policy check: it must keep
+          # quote winners for 24h and censor weak/unrouteable early dropouts.
+          retirement_node=next(z for z in ast.parse(Path(scanner).read_text()).body
+                               if isinstance(z,ast.FunctionDef) and z.name=='shadow_retirement_reason')
+          retirement_mod=ast.Module(body=[retirement_node],type_ignores=[])
+          ast.fix_missing_locations(retirement_mod)
+          policy={'d':d,'SHADOW_RESEARCH_SECONDS':24*3600,
+                  'SHADOW_NO_ENTRY_ROUTE_SECONDS':30*60,
+                  'SHADOW_FLAT_QUOTE_SECONDS':90*60,
+                  'SHADOW_KEEP_PEAK_QUOTE_X':1.25}
+          exec(compile(retirement_mod,scanner,'exec'),policy)
+          rule=policy['shadow_retirement_reason']
+          def timestamp_age(seconds):
+              return (now-d.timedelta(seconds=seconds)).isoformat()
+          no_route=lambda seconds: {'at':timestamp_age(seconds)}
+          quoted=lambda seconds,peak: {'at':timestamp_age(seconds),
+                      'entry_quote':{'token_raw':1000},'max_exit_quote_multiple':peak}
+          assert rule(no_route(29*60),now) is None
+          assert rule(no_route(31*60),now)=='no_two_sided_entry_quote_30m'
+          assert rule(quoted(89*60,.01),now) is None
+          assert rule(quoted(91*60,1.24),now)=='no_promising_later_quote_90m'
+          assert rule(quoted(91*60,1.25),now) is None
+          assert rule(quoted(23*3600,2.0),now) is None
+          assert rule(quoted(25*3600,2.0),now)=='natural_24h'
+          print('SHADOW_30M_90M_RETIREMENT_KEEP_WINNERS_24H=PASS')
+
+          # 80/80 research slots full (not capital). Expire 20 unroutable,
+          # 55 flat markets, preserve 5 promising quotes and admit a FRESH
+          # signal. Check archive retains censor flags and no fabricated sale.
+          aged_first=timestamp_age(2*3600)
+          full_state={}
+          for i in range(80):
+              sh={'at':aged_first,'entry_pool_price':2.0,
+                  'peak_chart_multiple':1.1,'no_capital_allocated':True}
+              if i>=20:
+                  sh['entry_quote']={'token_raw':1000,'immediate_roundtrip_multiple':.96}
+                  sh['max_exit_quote_multiple']=2.0 if i>=75 else .03
+              name='FilledResearch%02d'%i
+              full_state[name]={'first':aged_first,'last_distinct_at':None,
+                  'entry':None,'exit':None,'count':1,'qualified':0,
+                  'peak_net':0.,'previous_signature':None,
+                  'token_id':'solana_'+'X'*40+('%02d'%i),
+                  'shadow':sh}
+          calls['page1']=0
+          quotes_called={'buy':0,'sell':0}
+          with tempfile.TemporaryDirectory() as td:
+              wd=os.getcwd()
+              try:
+                  os.chdir(td);Path('evidence').mkdir()
+                  Path('evidence/state.json').write_text(json.dumps(full_state))
+                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                      runpy.run_path(scanner,run_name='__main__')
+                  result=json.loads(Path('evidence/summary.json').read_text())
+                  saved=json.loads(Path('evidence/state.json').read_text())
+                  archive=json.loads(Path('evidence/shadow_outcomes_ledger.json').read_text())
+                  assert result['shadow_early_retirements_censored']==75,result
+                  assert result['new_shadow_candidates_research_only']==1
+                  assert result['shadow_active_research_only']==6
+                  assert result['shadow_retirements_this_run']['no_two_sided_entry_quote_30m']==20
+                  assert result['shadow_retirements_this_run']['no_promising_later_quote_90m']==55
+                  assert saved[pool]['shadow']['no_capital_allocated']
+                  assert saved[pool]['shadow']['entry_quote']['token_raw']==1000
+                  assert len(archive)==75
+                  assert all(a['shortened_24h_outcome_censored'] and not a['completed_24h']
+                             and not a['evaluated_24h_trading_return'] for a in archive)
+                  assert all(a['orders']==a['trades']==0 for a in archive)
+                  print('FRESH_ADMISSION_AFTER_80_FULL_WITH_EARLY_CENSORING=PASS')
+              finally:os.chdir(wd)
           # Starvation regression: 25 distinct quoteable shadows must get
           # one scheduling slot each within FIVE consecutive jobs, with no
           # repeated older shadow monopolizing a new job's five slots.
