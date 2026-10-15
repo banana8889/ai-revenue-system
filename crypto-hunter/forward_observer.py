@@ -145,7 +145,7 @@ def jupiter_quote(input_mint,output_mint,raw_amount):
         return {'ok':False,'error':'quote_unavailable'}
 def paper_entry_risk_reason(now):
     """Prevent more simulated exposure when previously opened positions cannot be marked."""
-    open_positions=[p for p in st.values() if p.get('entry_quote') and p.get('entry') and not p.get('exit')]
+    open_positions=[p for p in st.values() if p.get('entry_quote') and p.get('entry') and not p.get('exit') and not p.get('quote_study_censored_at')]
     if len(open_positions)>=MAX_OPEN_QUOTED_POSITIONS:
         return 'unclosed_quote_position_capacity'
     for position in open_positions:
@@ -161,6 +161,33 @@ def paper_entry_risk_reason(now):
         except (ValueError,TypeError):
             return 'existing_sell_quote_timestamp_invalid'
     return None
+
+def censor_failed_quote_research(now):
+    """Retire dead quote-only studies from admission limits; NEVER assume a sale."""
+    retired=0
+    for pool,item in st.items():
+        if not item.get('entry_quote') or not item.get('entry') or item.get('exit') or item.get('quote_study_censored_at'):
+            continue
+        if item.get('quote_missing_streak',0)<3:
+            continue
+        liquidity=item.get('last_observed_liquidity_usd')
+        if liquidity is None or num(liquidity)>=100:
+            continue
+        try:
+            age=(now-item['entry'][0]).total_seconds()
+        except (TypeError,ValueError,IndexError):
+            continue
+        if age<1800:
+            continue
+        item['quote_study_censored_at']=now.isoformat()
+        item['quote_study_censored_reason']='missing_sell_route_with_liquidity_below_100_usd'
+        item['quote_study_no_exit_fill']=True
+        retired+=1
+        out({'kind':'quote_study_censored_no_fill','at':now.isoformat(),'pool':pool,
+             'token_id':item.get('token_id'),'failed_sell_checks':item.get('quote_missing_streak'),
+             'last_liquidity_usd':liquidity,'reason':item['quote_study_censored_reason'],
+             'no_exit_quote':True,'no_trade':True,'no_fill':True,'no_realized_return':True})
+    return retired
 
 def entry_quote_preflight(mint):
     """Require both exact-size 5 USDC entry and sell-back paths at observation time."""
@@ -185,6 +212,7 @@ for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
     if cycle==0:
         long_tail_seeded_this_run=seed_long_tail_group(st)
+    censored_quote_studies_this_run=censor_failed_quote_research(t)
         out({'kind':'long_tail_identity_cohort_seeded','at':t.isoformat(),
              'legacy_watches_assigned':long_tail_seeded_this_run,
              'method':'sha256_mint_mod5','no_trades':True})
@@ -239,7 +267,7 @@ for cycle in range(CYCLES_PER_RUN):
             time.sleep(2)
         seen=set()
         data=[p for p in data if p.get('attributes',{}).get('address') and not (p['attributes']['address'] in seen or seen.add(p['attributes']['address']))]
-        active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
+        active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit') and not x.get('quote_study_censored_at')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
         shadows=[p for p,x in st.items() if x.get('shadow') and not x.get('entry') and not x['shadow'].get('expired')
                  and (t-d.datetime.fromisoformat(x['shadow']['at'])).total_seconds()<=SHADOW_RESEARCH_SECONDS]
         shadows.sort(key=lambda p: st[p]['shadow']['at'])
@@ -503,7 +531,7 @@ for cycle in range(CYCLES_PER_RUN):
                     s['entry_quote']=preflight
                     s['entry_liquidity_usd']=x['liq']
                     out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
-            elif s['entry'] is not None and not s.get('exit') and t>s['entry'][0]:
+            elif s['entry'] is not None and not s.get('exit') and not s.get('quote_study_censored_at') and t>s['entry'][0]:
                 if s.get('entry_quote'):
                     # New positions are priced on fresh exact-size sell quotes, never a chart-only stop.
                     if p in sell_marked_this_run:
@@ -591,6 +619,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'paper_exits':sum(x.get('exit') is not None for x in st.values()),
    'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
    'new_sell_quote_mark_attempts':sell_mark_checks,
+   'quote_studies_censored_no_fill_total':sum(bool(x.get('quote_study_censored_at')) for x in st.values()),
    'observed_11x_after_signal':sum(x.get('peak_net',0)>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
@@ -630,13 +659,13 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
        1 for x in st.values() if x.get('shadow') and not x['shadow'].get('expired') and not x.get('entry'))),
    'shadow_quote_only_11x_unfilled_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('quote_11x_logged')),
    'quote_marked_distinct_positions':len(sell_marked_this_run),
-   'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) for x in st.values()),
-   'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
+   'quoted_open_positions':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and not bool(x.get('quote_study_censored_at')) for x in st.values()),
+   'quoted_positions_missing_sell_route':sum(bool(x.get('entry_quote')) and bool(x.get('entry')) and not bool(x.get('exit')) and not bool(x.get('quote_study_censored_at')) and x.get('quote_missing_streak',0)>0 for x in st.values()),
    'quoted_positions_liquidity_under_usd_100':sum(1 for x in st.values()
-              if x.get('entry_quote') and x.get('entry') and not x.get('exit')
+              if x.get('entry_quote') and x.get('entry') and not x.get('exit') and not x.get('quote_study_censored_at')
               and x.get('last_observed_liquidity_usd') is not None and x['last_observed_liquidity_usd']<100),
    'quoted_positions_liquidity_not_observed':sum(1 for x in st.values()
-              if x.get('entry_quote') and x.get('entry') and not x.get('exit')
+              if x.get('entry_quote') and x.get('entry') and not x.get('exit') and not x.get('quote_study_censored_at')
               and x.get('last_observed_liquidity_usd') is None),
    'method':'forward-only: paper positions gated on Jupiter routes and safe existing exits; blocked candidates get chart shadows and optional Jupiter buy+sell quote baselines with exact-amount future quote marks; a quote is NOT an executed fill, gas/rent/MEV omitted; no signing or execution'}
 print('FORWARD_OBSERVATION_RECEIPT',json.dumps(r))
