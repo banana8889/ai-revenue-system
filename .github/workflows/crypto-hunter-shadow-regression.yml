@@ -229,7 +229,13 @@ jobs:
                   'shadow':sh}
           # Preserve one deliberately unquoteable legacy PAPER position,
           # otherwise this scenario should legitimately skip the shadow lane.
-          full_state['UnquotedStuckPosition']=state['UnquotedStuckPosition']
+          full_state['UnquotedStuckPosition']={
+              'first':timestamp_age(300),'last_distinct_at':timestamp_age(300),
+              'entry':[timestamp_age(180),1.0],'exit':None,
+              'entry_quote':{'observed_at':now.isoformat(),'token_raw':1000},
+              'token_id':'solana_'+'Z'*44,'quote_missing_streak':3,
+              'count':1,'qualified':0,'peak_net':0.,
+              'previous_signature':None}
           calls['page1']=0
           quotes_called={'buy':0,'sell':0}
           with tempfile.TemporaryDirectory() as td:
