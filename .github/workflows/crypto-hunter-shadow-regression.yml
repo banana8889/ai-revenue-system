@@ -238,12 +238,17 @@ jobs:
               'previous_signature':None}
           calls['page1']=0
           quotes_called={'buy':0,'sell':0}
+          def blocked_legacy_quote_replay(request,timeout=0):
+              u=request.full_url if hasattr(request,'full_url') else request
+              if '/swap/v2/order?' in u and ('inputMint='+'Z'*44) in u:
+                  return io.BytesIO(b'{"outAmount":null}')
+              return quotes_replay(request,timeout)
           with tempfile.TemporaryDirectory() as td:
               wd=os.getcwd()
               try:
                   os.chdir(td);Path('evidence').mkdir()
                   Path('evidence/state.json').write_text(json.dumps(full_state))
-                  with mock.patch('urllib.request.urlopen',side_effect=quotes_replay),mock.patch('time.sleep',return_value=None):
+                  with mock.patch('urllib.request.urlopen',side_effect=blocked_legacy_quote_replay),mock.patch('time.sleep',return_value=None):
                       runpy.run_path(scanner,run_name='__main__')
                   result=json.loads(Path('evidence/summary.json').read_text())
                   saved=json.loads(Path('evidence/state.json').read_text())
