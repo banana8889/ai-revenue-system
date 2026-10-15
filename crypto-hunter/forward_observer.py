@@ -10,6 +10,22 @@ MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
 MAX_SHADOW_CANDIDATES=80
 SHADOW_RESEARCH_SECONDS=24*3600
+SHADOW_NO_ENTRY_ROUTE_SECONDS=30*60
+SHADOW_FLAT_QUOTE_SECONDS=90*60
+SHADOW_KEEP_PEAK_QUOTE_X=1.25
+shadow_retirements_this_run={}
+def shadow_retirement_reason(sh, now):
+    """No future knowledge: early retirement is research censoring, NOT a fill."""
+    try:age=(now-d.datetime.fromisoformat(sh['at'])).total_seconds()
+    except (ValueError,TypeError,KeyError):return 'invalid_timestamp_censored'
+    if age>SHADOW_RESEARCH_SECONDS:return 'natural_24h'
+    if age>=SHADOW_NO_ENTRY_ROUTE_SECONDS and not sh.get('entry_quote'):
+        return 'no_two_sided_entry_quote_30m'
+    if (age>=SHADOW_FLAT_QUOTE_SECONDS and sh.get('entry_quote')
+        and float(sh.get('max_exit_quote_multiple') or 0)<SHADOW_KEEP_PEAK_QUOTE_X
+        and not sh.get('quote_11x_logged')):
+        return 'no_promising_later_quote_90m'
+    return None
 # Pre-registered equal-budget pressure versus control pools. No wallet/trades.
 COHORT_MAX_PER_GROUP=12
 COHORT_HORIZON_SEC=24*3600
@@ -129,18 +145,23 @@ def entry_quote_preflight(mint):
 
 for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
-    # Expire first, before consuming any scarce quote-request slots.
-    # Expiration is a research lifecycle transition, NEVER a sale.
-    for old in st.values():
+    # Rotate research observations while archiving early dropouts as CENSORED,
+    # never treating them as 24h negatives, filled exits or market orders.
+    for pool,old in st.items():
         sh=old.get('shadow')
         if sh and not sh.get('expired'):
-            try:
-                if (t-d.datetime.fromisoformat(sh['at'])).total_seconds()>SHADOW_RESEARCH_SECONDS:
-                    sh['expired']=True
-                    sh['expired_at']=t.isoformat()
-            except (TypeError,ValueError,KeyError):
+            why=shadow_retirement_reason(sh,t)
+            if why:
                 sh['expired']=True
                 sh['expired_at']=t.isoformat()
+                sh['expired_reason']=why
+                sh['full_24h_observation']=why=='natural_24h'
+                sh['shortened_24h_outcome_censored']=why!='natural_24h'
+                shadow_retirements_this_run[why]=shadow_retirements_this_run.get(why,0)+1
+                out({'kind':'shadow_research_retired','at':t.isoformat(),
+                     'pool':pool,'token_id':old.get('token_id'),
+                     'reason':why,'completed_24h':why=='natural_24h',
+                     'no_actual_sell':True,'no_trade':True})
     # Persisted fair rotation avoids repeatedly quoting the oldest five.
     if cycle==0:
         # Reserve four of eight exact-size sell checks for fresh signals.
@@ -283,11 +304,7 @@ for cycle in range(CYCLES_PER_RUN):
             shadow=s.get('shadow')
             if shadow and not s.get('entry') and not shadow.get('expired'):
                 dt_from=(t-d.datetime.fromisoformat(shadow['at'])).total_seconds()
-                if dt_from>SHADOW_RESEARCH_SECONDS:
-                    shadow['expired']=True
-                    out({'kind':'shadow_watch_expired','pool':p,'token_id':s.get('token_id'),'at':t.isoformat(),
-                         'peak_chart_multiple':shadow.get('peak_chart_multiple',1.0),'no_trade':True})
-                elif dt_from>0 and shadow.get('entry_pool_price',0)>0:
+                if dt_from>0 and shadow.get('entry_pool_price',0)>0:
                     gross=v/shadow['entry_pool_price']
                     if gross>shadow.get('peak_chart_multiple',1.):
                         shadow['peak_chart_multiple']=gross
@@ -516,6 +533,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('entry_quote') and not x['shadow'].get('last_exit_quote_check_at')),
    'shadow_live_capacity':MAX_SHADOW_CANDIDATES,
+   'shadow_retirements_this_run':shadow_retirements_this_run,
+   'shadow_early_retirements_censored':sum(v for k,v in shadow_retirements_this_run.items() if k!='natural_24h'),
    'shadow_fresh_quote_slots_same_run':len(fresh_shadow_slots_this_run),
    'shadow_reserved_fresh_quote_capacity':FRESH_SHADOW_QUOTE_RESERVE,
    'shadow_mark_budget_per_run':MAX_SHADOW_SELL_QUOTES_PER_RUN,
@@ -623,6 +642,10 @@ for pool,z in st.items():
     shadow_ledger.append({
         'pool':pool,'token_id':z.get('token_id'),'signal_at':sh.get('at'),
         'expired_at':sh.get('expired_at'),
+        'retirement_reason':sh.get('expired_reason','legacy_unspecified'),
+        'completed_24h':bool(sh.get('full_24h_observation')),
+        'shortened_24h_outcome_censored':bool(sh.get('shortened_24h_outcome_censored')),
+        'evaluated_24h_trading_return':False,
         'entry_chart_price':sh.get('entry_pool_price'),
         'entry_liquidity_usd':sh.get('entry_liquidity_usd'),
         'initial_age_minutes':sh.get('initial_age_minutes'),
