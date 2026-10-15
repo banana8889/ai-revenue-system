@@ -183,6 +183,7 @@ jobs:
                   assert receipt['orders']==receipt['trades']==0
                   print('OLD_40_SHADOWS_DO_NOT_BLOCK_FRESH_80_CAPACITY=PASS')
               finally:os.chdir(old_dir)
+          import ast
           # Independent predeclared retirement policy check: it must keep
           # quote winners for 24h and censor weak/unrouteable early dropouts.
           retirement_node=next(z for z in ast.parse(Path(scanner).read_text()).body
