@@ -78,6 +78,11 @@ FRESH_SHADOW_QUOTE_RESERVE=4
 BURST_QUOTE_RESERVE=2
 BURST_CHART_TRIGGER_X=1.8
 BURST_MIN_LIQUIDITY_USD=10000
+HOT_QUOTE_THRESHOLD_X=1.8
+HOT_QUOTE_MAX_AGE_SECONDS=3600
+HOT_QUOTE_MIN_LIQUIDITY_USD=10000
+HOT_QUOTE_RESERVE=1
+hot_quote_slots_this_run=set()
 fresh_shadow_slots_this_run=set()
 burst_quote_slots_this_run=set()
 def burst_quote_eligible(sh, gross, liquidity, scheduled, quoted, pool, burst_slots):
@@ -93,6 +98,30 @@ blocked_candidates_this_run=set()
 shadow_quote_scheduled_this_run=set()
 first_seen_ages_minutes_this_run=[]
 first_seen_unique_mints_this_run=set()
+def hot_shadow_quote_targets(state, selected, now, budget):
+    """Prioritize RECENT ROUTE quotes, never chart highs or hindsight prices."""
+    ranked=[]
+    for pool,item in state.items():
+        sh=item.get('shadow')
+        if (pool in selected or item.get('entry') or not sh or sh.get('expired')
+                or not sh.get('entry_quote')):
+            continue
+        try:
+            multiple=float(sh.get('last_exit_quote_multiple') or 0)
+            quoted_at=d.datetime.fromisoformat(sh['last_exit_quote_at'])
+            freshness=(now-quoted_at).total_seconds()
+            liquidity=float(item.get('last_observed_liquidity_usd') or 0)
+            liquidity_at=d.datetime.fromisoformat(item['last_liquidity_seen_at'])
+            liquidity_freshness=(now-liquidity_at).total_seconds()
+        except (ValueError,TypeError,KeyError):
+            continue
+        if (multiple>=HOT_QUOTE_THRESHOLD_X and 0<=freshness<=HOT_QUOTE_MAX_AGE_SECONDS
+                and liquidity>=HOT_QUOTE_MIN_LIQUIDITY_USD
+                and 0<=liquidity_freshness<=HOT_QUOTE_MAX_AGE_SECONDS):
+            ranked.append((-multiple,quoted_at.isoformat(),pool))
+    ranked.sort()
+    return [pool for _,_,pool in ranked[:max(0,budget)]]
+
 def fair_shadow_quote_targets(state, selected, budget):
     """Choose previously unserved shadows before repeating earlier quote checks.
 
@@ -272,6 +301,14 @@ for cycle in range(CYCLES_PER_RUN):
         # Reserve four of eight exact-size sell checks for fresh signals.
         # Scheduling a quote is not evidence that one was received.
         old_budget=max(0,MAX_SHADOW_SELL_QUOTES_PER_RUN-FRESH_SHADOW_QUOTE_RESERVE-BURST_QUOTE_RESERVE)
+        for pool in hot_shadow_quote_targets(st,shadow_quote_scheduled_this_run,t,
+                                              min(HOT_QUOTE_RESERVE,old_budget)):
+            shadow_quote_scheduled_this_run.add(pool)
+            hot_quote_slots_this_run.add(pool)
+            st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
+            out({'kind':'shadow_sell_quote_scheduled','at':t.isoformat(),'pool':pool,
+                 'quota_slot':len(shadow_quote_scheduled_this_run),
+                 'quote_fetched':False,'no_trade':True,'lane':'recent_route_quote_hot'})
         for pool in fair_shadow_quote_targets(st,shadow_quote_scheduled_this_run,old_budget):
             shadow_quote_scheduled_this_run.add(pool)
             st[pool]['shadow']['last_quote_scheduled_at']=t.isoformat()
@@ -663,6 +700,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'new_sell_quote_mark_attempts':sell_mark_checks,
    'quote_studies_censored_no_fill_total':sum(bool(x.get('quote_study_censored_at')) for x in st.values()),
    'shadow_capacity_reclaimed_this_run':shadow_retirements_this_run.get('capacity_reclaimed_non_tail_under_2x',0),
+   'hot_route_quote_priority_scheduled_this_run':len(hot_quote_slots_this_run),
    'observed_11x_after_signal':sum(x.get('peak_net',0)>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
@@ -919,3 +957,61 @@ cohort_report['historical_completed_or_censored_retained']=len(ledger)
 with open('evidence/prospective_cohort_comparison.json','w') as f:
     json.dump(cohort_report,f,indent=2,allow_nan=False)
 print('LIVE_COHORT_24H_COMPARISON',json.dumps(cohort_report,allow_nan=False))
+
+# A transparent *live-only* ranking. No historical peaks, simulated entries or trades.
+priority=[]
+now=d.datetime.now(d.timezone.utc)
+for pool,item in st.items():
+    sh=item.get('shadow')
+    if not sh or sh.get('expired') or item.get('entry') or not sh.get('entry_quote'):
+        continue
+    try:
+        at=d.datetime.fromisoformat(sh['at'])
+        signal_minutes=(now-at).total_seconds()/60
+        if signal_minutes<0 or signal_minutes>24*60:continue
+        buys=float(sh.get('initial_buys_1h') or 0)
+        sells=float(sh.get('initial_sells_1h') or 0)
+        buyers=float(sh.get('initial_buyers_1h') or 0)
+        liquidity=float(sh.get('entry_liquidity_usd') or 0)
+        volume=float(sh.get('initial_volume_1h_usd') or 0)
+        first_age=float(sh.get('initial_age_minutes') or 0)
+        roundtrip=float(sh['entry_quote'].get('immediate_roundtrip_multiple') or 0)
+    except (ValueError,TypeError,KeyError):
+        continue
+    pressure=buys/max(1.,sells)
+    quote_at=sh.get('last_exit_quote_at')
+    liquidity_at=item.get('last_liquidity_seen_at')
+    try:
+        quote_age=(now-d.datetime.fromisoformat(quote_at)).total_seconds()/60 if quote_at else None
+        liquidity_age=(now-d.datetime.fromisoformat(liquidity_at)).total_seconds()/60 if liquidity_at else None
+    except (ValueError,TypeError):
+        quote_age=None;liquidity_age=None
+    fresh_route=(quote_age is not None and 0<=quote_age<=15
+                 and liquidity_age is not None and 0<=liquidity_age<=15)
+    latest_multiple=float(sh.get('last_exit_quote_multiple') or 0) if quote_at else None
+    current_liquidity=float(item.get('last_observed_liquidity_usd') or 0)
+    score=(min(25.,pressure/3*25)+min(20.,liquidity/50000*20)
+           +min(15.,volume/100000*15)+min(15.,buyers/200*15)
+           +(10 if 0<=first_age<=3 else 5 if first_age<=10 else 0)
+           +min(10.,max(0.,roundtrip-.85)/.15*10)+(5 if fresh_route else 0))
+    priority.append({'pool':pool,'token_id':item.get('token_id'),
+        'score_heuristic_not_probability':round(score,2),
+        'signal_at':sh['at'],'signal_age_minutes':round(signal_minutes,2),
+        'age_at_signal_minutes':round(first_age,2),
+        'initial_buy_sell_ratio':round(pressure,3),
+        'initial_liquidity_usd':round(liquidity,2),
+        'initial_volume_1h_usd':round(volume,2),
+        'initial_roundtrip_quote_x':round(roundtrip,5),
+        'last_known_liquidity_usd':round(current_liquidity,2),
+        'last_quote_only_multiple':latest_multiple,
+        'last_quote_age_minutes':round(quote_age,2) if quote_age is not None else None,
+        'fresh_sell_quote_within_15m':fresh_route,
+        'not_currently_executable':True,'orders':0,'trades':0})
+priority.sort(key=lambda row:(row['fresh_sell_quote_within_15m'],
+    row['score_heuristic_not_probability']),reverse=True)
+priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; never retrospective peak',
+    'ranking_not_win_probability':True,'fresh_quote_is_not_a_fill':True,
+    'tracked_eligible':len(priority),'top':priority[:10],'orders':0,'trades':0}
+with open('evidence/live_candidate_priority.json','w') as f:
+    json.dump(priority_report,f,indent=2,allow_nan=False)
+print('LIVE_CANDIDATE_PRIORITY',json.dumps(priority_report,allow_nan=False))
