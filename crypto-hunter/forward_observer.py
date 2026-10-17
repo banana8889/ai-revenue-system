@@ -3,12 +3,14 @@ url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 quote_checks=0
-MAX_ENTRY_QUOTE_CHECKS=5
+MAX_ENTRY_QUOTE_CHECKS=8
 sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
 MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
 MAX_SHADOW_CANDIDATES=80
+SHADOW_RECLAIM_AFTER_SECONDS=3600
+SHADOW_RECLAIM_BELOW_QUOTE_X=2.0
 SHADOW_RESEARCH_SECONDS=24*3600
 SHADOW_NO_ENTRY_ROUTE_SECONDS=30*60
 SHADOW_FLAT_QUOTE_SECONDS=90*60
@@ -171,16 +173,18 @@ def censor_failed_quote_research(now):
         if item.get('quote_missing_streak',0)<3:
             continue
         liquidity=item.get('last_observed_liquidity_usd')
-        if liquidity is None or num(liquidity)>=100:
-            continue
         try:
             age=(now-item['entry'][0]).total_seconds()
         except (TypeError,ValueError,IndexError):
             continue
-        if age<1800:
+        if liquidity is not None and num(liquidity)<100 and age>=1800:
+            reason='missing_sell_route_with_liquidity_below_100_usd'
+        elif age>=3600 and item.get('quote_missing_streak',0)>=4:
+            reason='persistent_missing_sell_route_over_1h'
+        else:
             continue
         item['quote_study_censored_at']=now.isoformat()
-        item['quote_study_censored_reason']='missing_sell_route_with_liquidity_below_100_usd'
+        item['quote_study_censored_reason']=reason
         item['quote_study_no_exit_fill']=True
         retired+=1
         out({'kind':'quote_study_censored_no_fill','at':now.isoformat(),'pool':pool,
@@ -188,6 +192,36 @@ def censor_failed_quote_research(now):
              'last_liquidity_usd':liquidity,'reason':item['quote_study_censored_reason'],
              'no_exit_quote':True,'no_trade':True,'no_fill':True,'no_realized_return':True})
     return retired
+
+def reclaim_weak_shadow_slot(now):
+    """Censor one weak old non-tail watch to admit a fresh live candidate."""
+    candidates=[]
+    for pool,item in st.items():
+        sh=item.get('shadow')
+        if not sh or sh.get('expired') or item.get('entry') or sh.get('long_tail_24h'):
+            continue
+        try:
+            age=(now-d.datetime.fromisoformat(sh['at'])).total_seconds()
+            peak=float(sh.get('max_exit_quote_multiple') or 0)
+        except (ValueError,TypeError,KeyError):
+            continue
+        if (age>=SHADOW_RECLAIM_AFTER_SECONDS and peak<SHADOW_RECLAIM_BELOW_QUOTE_X
+                and not sh.get('quote_11x_logged')):
+            candidates.append((sh['at'],pool,sh,peak))
+    if not candidates:return None
+    _,pool,sh,peak=min(candidates,key=lambda row:(row[0],row[1]))
+    sh['expired']=True
+    sh['expired_at']=now.isoformat()
+    sh['expired_reason']='capacity_reclaimed_non_tail_under_2x'
+    sh['full_24h_observation']=False
+    sh['shortened_24h_outcome_censored']=True
+    reason=sh['expired_reason']
+    shadow_retirements_this_run[reason]=shadow_retirements_this_run.get(reason,0)+1
+    out({'kind':'shadow_research_retired','at':sh['expired_at'],
+         'pool':pool,'token_id':st[pool].get('token_id'),'reason':reason,
+         'peak_quote_unfilled':peak,'completed_24h':False,'outcome_censored':True,
+         'no_actual_sell':True,'no_trade':True})
+    return pool
 
 def entry_quote_preflight(mint):
     """Require both exact-size 5 USDC entry and sell-back paths at observation time."""
@@ -466,6 +500,14 @@ for cycle in range(CYCLES_PER_RUN):
                              'pool':p,'token_id':token_id,'reason':risk,'new_position':False})
                     known_shadow=bool(token_id and token_id in active_shadow_mints)
                     open_shadows=active_shadow_count
+                    if (not s.get('shadow') and not known_shadow
+                            and open_shadows>=MAX_SHADOW_CANDIDATES
+                            and quote_checks<MAX_ENTRY_QUOTE_CHECKS):
+                        reclaimed=reclaim_weak_shadow_slot(d.datetime.now(d.timezone.utc))
+                        if reclaimed is not None:
+                            active_shadow_count-=1
+                            active_shadow_mints.discard(st[reclaimed].get('token_id'))
+                            open_shadows=active_shadow_count
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
                         active_tail=active_tail_count
                         tail_choice=active_tail<LONG_TAIL_MAX_ACTIVE and tail_is_selected(token_id)
@@ -620,6 +662,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
    'new_sell_quote_mark_attempts':sell_mark_checks,
    'quote_studies_censored_no_fill_total':sum(bool(x.get('quote_study_censored_at')) for x in st.values()),
+   'shadow_capacity_reclaimed_this_run':shadow_retirements_this_run.get('capacity_reclaimed_non_tail_under_2x',0),
    'observed_11x_after_signal':sum(x.get('peak_net',0)>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
