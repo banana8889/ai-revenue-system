@@ -9,6 +9,10 @@ on:
         default: false
   schedule:
     - cron: '3,13,23,33,43,53 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-prospective-study.yml
 permissions:
   contents: read
   actions: write
@@ -111,7 +115,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
       - name: Maintain research loop without relying on GitHub cron
-        if: success() && github.event_name == 'workflow_dispatch' && inputs.chain
+        if: success() && ((github.event_name == 'workflow_dispatch' && inputs.chain) || github.event_name == 'schedule' || github.event_name == 'push')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -120,7 +124,10 @@ jobs:
           # followed by 15s handoff. Removes previous 6-minute blind window.
           # Runs remain research-only. No private keys, orders, or signatures.
           sleep 15
-          active=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=20" --jq '.workflow_runs[] | "\(.id) \(.status)"' | awk -v own="${GITHUB_RUN_ID}" '$1!=own && ($2=="in_progress" || $2=="queued" || $2=="pending"){print; exit}')
+          # A stale older run can be reported as in_progress after it has
+          # already finished, which previously killed the chain forever.
+          # A newer dispatch is a valid successor; an older one is not.
+          active=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?event=workflow_dispatch&per_page=20" --jq '.workflow_runs[] | "\(.id) \(.status)"' | awk -v own="${GITHUB_RUN_ID}" '$1>own && ($2=="in_progress" || $2=="queued" || $2=="pending"){print; exit}')
           if [ -n "$active" ]; then
             echo "CHANGED_RUNNING_WORKFLOW_DETECTED=$active"
             echo "Skipping duplicate chain dispatch"
