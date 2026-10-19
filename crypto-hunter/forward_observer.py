@@ -4,6 +4,8 @@ st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 quote_checks=0
 MAX_ENTRY_QUOTE_CHECKS=8
+MAX_SELL_DEPTH_PROBES_PER_RUN=1
+sell_depth_probes_this_run=0
 sell_mark_checks=0
 MAX_SELL_MARKS_PER_RUN=8
 MAX_OPEN_QUOTED_POSITIONS=4
@@ -180,6 +182,37 @@ def jupiter_quote(input_mint,output_mint,raw_amount):
         return {'ok':False,'http':e.code,'error':'no_quote'}
     except (ValueError,TypeError,urllib.error.URLError,TimeoutError):
         return {'ok':False,'error':'quote_unavailable'}
+def probe_sell_depth(mint,raw_tokens,reference_sell_raw,observed_at,pool,token_id):
+    """Read-only size sensitivity after a real prospective 11x exit quote.
+    The scaled token inventory has NO 25/100 USDC buy-price baseline.
+    Sequential API quotes are not simultaneous or executable fills.
+    """
+    global sell_depth_probes_this_run
+    if sell_depth_probes_this_run>=MAX_SELL_DEPTH_PROBES_PER_RUN:
+        return None
+    if not raw_tokens or not reference_sell_raw or int(raw_tokens)<=0 or int(reference_sell_raw)<=0:
+        return None
+    sell_depth_probes_this_run+=1
+    outcomes=[]
+    for factor in (5,20):
+        q=jupiter_quote(mint,USDC,int(raw_tokens)*factor)
+        available=bool(q.get('ok'))
+        ref=int(reference_sell_raw)*factor
+        retention=(q['out_amount']/ref if available and ref>0 else None)
+        result={'hypothetical_token_inventory_factor':factor,
+                'sell_quote_available':available,
+                'sell_quote_usdc':q['out_amount']/1e6 if available else None,
+                'proportional_quote_retention':round(retention,8) if retention is not None else None,
+                'quote_router':q.get('router'),'http_status':q.get('http'),
+                'sequential_not_atomic':True,'no_buy_baseline_at_this_size':True,'no_fill':True}
+        outcomes.append(result)
+        out({'kind':'sell_depth_quote_only','at':d.datetime.now(d.timezone.utc).isoformat(),
+             'reference_quote_at':observed_at,'pool':pool,'token_id':token_id,
+             **result,'no_trade':True,'not_executable_proof':True})
+    return {'reference_token_raw':int(raw_tokens),
+            'reference_sell_quote_usdc':int(reference_sell_raw)/1e6,
+            'levels':outcomes,'no_execution':True,'no_realized_profit':True}
+
 def paper_entry_risk_reason(now):
     """Prevent more simulated exposure when previously opened positions cannot be marked."""
     open_positions=[p for p in st.values() if p.get('entry_quote') and p.get('entry') and not p.get('exit') and not p.get('quote_study_censored_at')]
@@ -525,6 +558,10 @@ for cycle in range(CYCLES_PER_RUN):
                                  'usdc_proceeds':q['out_amount']/1000000,'quote_multiple':multiple,
                                  'no_trade':True,'no_fill':True,'no_capital_allocated':True})
                             if multiple>=11 and not shadow.get('quote_11x_logged'):
+                                depth=probe_sell_depth(s.get('token_id','').removeprefix('solana_'),
+                                    shadow['entry_quote']['token_raw'],q['out_amount'],
+                                    marked,p,s.get('token_id'))
+                                if depth:shadow['first_11x_sell_depth_probe']=depth
                                 shadow['quote_11x_logged']=True
                                 out({'kind':'shadow_11x_quote_only_unfilled','at':marked,'pool':p,
                                      'token_id':s.get('token_id'),'quote_multiple':multiple,
@@ -647,6 +684,10 @@ for cycle in range(CYCLES_PER_RUN):
                     s['last_valid_sell_quote_at']=mark_at.isoformat()
                     net=q['out_amount']/5000000
                     s['peak_net']=max(s['peak_net'],net)
+                    if net>=11 and not s.get('first_11x_sell_depth_probe'):
+                        depth=probe_sell_depth(mint,s['entry_quote']['token_raw'],
+                            q['out_amount'],mark_at.isoformat(),p,s.get('token_id'))
+                        if depth:s['first_11x_sell_depth_probe']=depth
                     reason=('target_quote_11x' if net>=11 else 'hard_stop_quote_25pct' if net<=0.75
                             else 'peak_trail_quote_25pct' if s['peak_net']>=3 and net<=0.75*s['peak_net']
                             else 'hold_limit_quote_24h' if (mark_at-s['entry'][0]).total_seconds()>=86400 else None)
@@ -716,6 +757,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'observed_11x_after_signal':sum(x.get('peak_net',0)>=11 for x in st.values()),
    'orders':0,'trades':0,'exit_execution_verified':False,
    'quote_preflight_attempts':quote_checks,
+   'sell_depth_size_sensitivity_probes_this_run':sell_depth_probes_this_run,
    'risk_blocked_candidate_mints':len(blocked_candidates_this_run),
    'new_shadow_candidates_research_only':shadow_new_this_run,
    'shadow_active_research_only':sum(bool(x.get('shadow')) and not x['shadow'].get('expired')
@@ -779,6 +821,7 @@ evaluation={
  'paper_exits_with_later_jupiter_sell_quote':len(quoted_exits),
  'paper_quote_exit_multiples':[x['exit'].get('net_multiple_assumed') for x in quoted_exits],
  'quote_based_paper_exit_winners_at_11x':sum(1 for x in quoted_exits if x['exit'].get('net_multiple_assumed',0)>=11),
+ 'paper_positions_with_depth_probe':sum(bool(x.get('first_11x_sell_depth_probe')) for x in quoted),
  'quoted_open_positions':r['quoted_open_positions'],
  'quoted_open_positions_without_sell_route':r['quoted_positions_missing_sell_route'],
  'shadow_research_only_active':len(shadows),
@@ -833,6 +876,7 @@ shadow_report={'at':r['at'],
  'highest_quoted_sell_multiple_unfilled':max(quoted_marks) if quoted_marks else None,
  'median_last_quoted_sell_multiple_unfilled':statistics.median(last_marks) if last_marks else None,
  'quote_failures_accumulated':route_missing,
+ 'active_shadows_with_11x_depth_probe':sum(bool(sh.get('first_11x_sell_depth_probe')) for _,sh in live_shadows),
  'ranked_shadow_quote_only_examples':ranked[:10],
  'realized_profit_count':0,'trades':0,
  'not_a_full_cohort':'Current active shadows only; expired shadows are excluded and retained in canonical checkpoint until ordinary pruning',
