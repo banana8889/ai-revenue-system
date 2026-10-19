@@ -554,6 +554,18 @@ for cycle in range(CYCLES_PER_RUN):
                             shadow['max_exit_quote_multiple']=max(shadow.get('max_exit_quote_multiple',0),multiple)
                             shadow['last_exit_quote_multiple']=multiple
                             shadow['last_exit_quote_at']=marked
+                            # Immutable prospective evidence of WHEN an exact-size
+                            # sell quotation was seen (not when chart peaked).
+                            # Only trace NEW cohorts started under this version.
+                            if shadow.get('quote_trace_version')==1:
+                                trace=shadow.setdefault('quote_trace',[])
+                                trace.append({'at':marked,'ok':True,
+                                    'quote_multiple':round(multiple,8),
+                                    'liquidity_at_sample_usd':round(x['liq'],2),
+                                    'no_fill':True})
+                                if len(trace)>48:
+                                    del trace[:-48]
+                                    shadow['quote_trace_truncated']=True
                             out({'kind':'shadow_exit_quote_only','at':marked,'pool':p,'token_id':s.get('token_id'),
                                  'usdc_proceeds':q['out_amount']/1000000,'quote_multiple':multiple,
                                  'no_trade':True,'no_fill':True,'no_capital_allocated':True})
@@ -568,6 +580,15 @@ for cycle in range(CYCLES_PER_RUN):
                                      'no_trade':True,'no_fill':True,'gas_rent_mev_not_included':True})
                         else:
                             shadow['exit_quote_missing_count']=shadow.get('exit_quote_missing_count',0)+1
+                            if shadow.get('quote_trace_version')==1:
+                                trace=shadow.setdefault('quote_trace',[])
+                                trace.append({'at':marked,'ok':False,
+                                    'quote_multiple':None,
+                                    'liquidity_at_sample_usd':round(x['liq'],2),
+                                    'no_fill':True})
+                                if len(trace)>48:
+                                    del trace[:-48]
+                                    shadow['quote_trace_truncated']=True
                             out({'kind':'shadow_exit_quote_unavailable','at':marked,'pool':p,'token_id':s.get('token_id'),
                                  'quote_error':q,'no_fill':True,'no_capital_allocated':True})
             already_signaled=bool(token_id and token_id in entry_token_ids)
@@ -602,6 +623,9 @@ for cycle in range(CYCLES_PER_RUN):
                                 'initial_sells_1h':x['sells_1h'],
                                 'signal_activity_arm':prospective_activity_arm(x['volume_1h'],x['buyers_1h']),
                                 'initial_dex':x['dex'],
+                                'quote_trace_version':1,
+                                'quote_trace':[],
+                                'quote_trace_truncated':False,
                                 'peak_chart_multiple':1.,'quote_available_count':0,
                                 'reason':risk,'no_capital_allocated':True}
                         # Even when allocating no paper capital, research tradability in
@@ -922,14 +946,77 @@ for pool,z in st.items():
         'initial_roundtrip_quote_multiple':sh.get('entry_quote',{}).get('immediate_roundtrip_multiple'),
         'later_sell_quotes_available':sh.get('quote_available_count',0),
         'later_sell_quotes_failed':sh.get('exit_quote_missing_count',0),
+        'quote_trace_version':sh.get('quote_trace_version'),
+        'quote_trace':sh.get('quote_trace',[])[-48:],
+        'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
         'ever_observed_later_quote_11x':bool(sh.get('quote_11x_logged')),
         'missing_route_does_not_prove_exit':True,
         'return_unrealized':True,'orders':0,'trades':0})
     archived.add(pool)
 shadow_ledger=shadow_ledger[-5000:]
-# Build descriptive, rigorously prospectively sourced comparisons. A missing
-# future sell quotation is CENSORED, not a failed profitable trade or 0x.
+# Primary objective research: PRESELECTED FULL 24H tail only. This avoids
+# labeling stopped 90m/early capacity studies as failures. Still a sample of
+# eligible shadow watches, NOT a random sample of all Solana token launches.
+# The denominator includes missing buy/sell routes and sparse marks.
+fixed_tail=[z for z in shadow_ledger
+            if z.get('long_tail_24h') is True
+            and z.get('long_tail_assignment_method')=='sha256_mint_mod5_at_signal'
+            and z.get('completed_24h') is True]
+fixed_tail_quotable=[z for z in fixed_tail if z.get('initial_buy_sell_quote_available')]
+fixed_tail_marked=[z for z in fixed_tail_quotable
+                   if z.get('later_sell_quotes_available',0)>0
+                   and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+fixed_tail_arms={}
+for label in ('high_activity_50k_450','other_eligible'):
+    arm=[z for z in fixed_tail if z.get('signal_activity_arm')==label]
+    quoted=[z for z in arm if z.get('initial_buy_sell_quote_available')]
+    measured=[z for z in quoted if z.get('later_sell_quotes_available',0)>0
+              and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+    fixed_tail_arms[label]={'completed':len(arm),'entry_quoted':len(quoted),
+        'later_quote_observed':len(measured),
+        'later_quote_missing_unknown':len(quoted)-len(measured),
+        'quote_2x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in measured),
+        'quote_11x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in measured)}
+fixed_tail_trace=[z for z in fixed_tail if z.get('quote_trace_version')==1
+                  and not z.get('quote_trace_truncated')]
+windows={}
+for minutes in (15,60,240,1440):
+    eligible_window=[]
+    for z in fixed_tail_trace:
+        try:signal=d.datetime.fromisoformat(z['signal_at'])
+        except (KeyError,ValueError,TypeError):continue
+        valid=[]
+        for mark in z.get('quote_trace',[]):
+            try:elapsed=(d.datetime.fromisoformat(mark['at'])-signal).total_seconds()/60
+            except (KeyError,ValueError,TypeError):continue
+            if 0<elapsed<=minutes and mark.get('ok') and mark.get('quote_multiple') is not None:
+                valid.append(float(mark['quote_multiple']))
+        if valid:eligible_window.append(max(valid))
+    windows[str(minutes)+'m']={'sell_route_observed':len(eligible_window),
+        'quote_2x_unfilled':sum(q>=2 for q in eligible_window),
+        'quote_11x_unfilled':sum(q>=11 for q in eligible_window),
+        'not_observed_excluded':len(fixed_tail_trace)-len(eligible_window)}
+tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shadow 24h followup',
+    'completed_24h_n':len(fixed_tail),
+    'entry_two_sided_quote_n':len(fixed_tail_quotable),
+    'later_sell_quote_observed_n':len(fixed_tail_marked),
+    'quote_2x_unfilled_n':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in fixed_tail_marked),
+    'quote_11x_unfilled_n':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in fixed_tail_marked),
+    'entry_route_missing_n':len(fixed_tail)-len(fixed_tail_quotable),
+    'later_route_missing_unknown_n':len(fixed_tail_quotable)-len(fixed_tail_marked),
+    'new_precommitted_activity_groups':fixed_tail_arms,
+    'completed_with_full_quote_trace_v1':len(fixed_tail_trace),
+    'quote_only_opportunity_by_observation_window':windows,
+    'min_completed_24h_per_group_before_advantage_claim':40,
+    'prediction_advantage_verified':False,
+    'not_random_all_new_tokens':True,'not_filled_trades':True,
+    'execution_or_realized_profit_proven':False,'orders':0,'trades':0}
+with open('evidence/fixed_24h_tail_truth_report.json','w') as f:
+    json.dump(tail_report,f,indent=2,allow_nan=False)
+print('FIXED_24H_TAIL_TRUTH_REPORT',json.dumps(tail_report,allow_nan=False))
+# Supplemental descriptive comparison ONLY. Early exits are selection biased.
+# A missing future sell quotation is CENSORED, not a failed profit or 0x.
 complete_quotes=[z for z in shadow_ledger
                  if z.get('initial_buy_sell_quote_available')
                  and z.get('later_sell_quotes_available',0)>0
@@ -979,7 +1066,9 @@ shadow_learning={'as_of':r['at'],'archived_mints':len(shadow_ledger),
                  'unknown_later_quote_excluded':sum(x.get('initial_buy_sell_quote_available') and
                         not x.get('later_sell_quotes_available',0) for x in shadow_ledger),
                  'precursor_medians':precursors,
-                 'enough_evidence_for_precursor_inference':bool(precursors),
+                 'enough_evidence_for_precursor_inference':False,
+                 'precursor_medians_are_exploratory_and_selection_biased':True,
+                 'see_primary_preselected_24h_tail_report':True,
                  'no_filled_trades':True,'trades':0}
 with open('evidence/shadow_learning_evaluation.json','w') as f:
     json.dump(shadow_learning,f,indent=2,allow_nan=False)
