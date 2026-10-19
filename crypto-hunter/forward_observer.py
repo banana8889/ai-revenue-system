@@ -19,6 +19,12 @@ SHADOW_KEEP_PEAK_QUOTE_X=1.25
 LONG_TAIL_MAX_ACTIVE=16   # research only; 80 total slots
 LONG_TAIL_MODULUS=5
 EXPLOSIVE_MULTIPLIERS=(11,21,51,101)  # +1000%/+2000%/+5000%/+10000%
+# Fixed live hypothesis, 19 Oct 2026. Never relabel prior observations.
+PROSPECTIVE_ACTIVITY_VOLUME_USD=50000
+PROSPECTIVE_ACTIVITY_BUYERS=450
+def prospective_activity_arm(volume_usd,buyers):
+    return ('high_activity_50k_450' if num(volume_usd)>=PROSPECTIVE_ACTIVITY_VOLUME_USD
+            and num(buyers)>=PROSPECTIVE_ACTIVITY_BUYERS else 'other_eligible')
 def tail_is_selected(mint):
     if not mint:return False
     digest=hashlib.sha256(str(mint).encode('utf-8')).digest()
@@ -557,6 +563,7 @@ for cycle in range(CYCLES_PER_RUN):
                                 'initial_buyers_1h':x['buyers_1h'],
                                 'initial_buys_1h':x['buys_1h'],
                                 'initial_sells_1h':x['sells_1h'],
+                                'signal_activity_arm':prospective_activity_arm(x['volume_1h'],x['buyers_1h']),
                                 'initial_dex':x['dex'],
                                 'peak_chart_multiple':1.,'quote_available_count':0,
                                 'reason':risk,'no_capital_allocated':True}
@@ -595,6 +602,11 @@ for cycle in range(CYCLES_PER_RUN):
                         active_shadow_count+=1
                         if tail_choice:active_tail_count+=1
                         shadow_new_this_run+=1
+                        out({'kind':'prospective_activity_arm_assigned','at':shadow['at'],
+                             'pool':p,'token_id':token_id,'arm':shadow['signal_activity_arm'],
+                             'volume_min_usd':PROSPECTIVE_ACTIVITY_VOLUME_USD,
+                             'buyers_min':PROSPECTIVE_ACTIVITY_BUYERS,
+                             'assigned_before_future_exit_quotes':True,'no_trade':True})
                         out({'kind':'shadow_research_only','at':shadow['at'],'pool':p,
                              'token_id':token_id,'observed_price':v,'entry_intentionally_blocked':True,
                              'entry_route_observed':bool(shadow.get('entry_quote')),
@@ -855,6 +867,7 @@ for pool,z in st.items():
         'initial_buyers_1h':sh.get('initial_buyers_1h'),
         'initial_buys_1h':sh.get('initial_buys_1h'),
         'initial_sells_1h':sh.get('initial_sells_1h'),
+        'signal_activity_arm':sh.get('signal_activity_arm'),
         'initial_dex':sh.get('initial_dex'),
         'long_tail_24h':bool(sh.get('long_tail_24h')),
         'long_tail_assignment_method':sh.get('long_tail_assignment_method'),
@@ -888,6 +901,33 @@ for feature in ('entry_liquidity_usd','initial_age_minutes','initial_volume_1h_u
         precursors[feature]={'quote_2x_winner_median':statistics.median(a),
                             'control_with_valid_later_quote_median':statistics.median(b),
                             'winner_n':len(a),'control_n':len(b)}
+# Forward-only observational comparison. Exclude unlabeled older candidates.
+# Missing sell quotes remain UNKNOWN; none of these are executed trades.
+activity_arm_names=('high_activity_50k_450','other_eligible')
+activity_arms={}
+for arm in activity_arm_names:
+    archived_arm=[z for z in shadow_ledger if z.get('signal_activity_arm')==arm]
+    active_arm=[z['shadow'] for z in st.values() if z.get('shadow')
+                and not z['shadow'].get('expired')
+                and z['shadow'].get('signal_activity_arm')==arm]
+    started=[z for z in archived_arm if z.get('initial_buy_sell_quote_available')]
+    measured=[z for z in started if z.get('later_sell_quotes_available',0)>0
+              and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+    activity_arms[arm]={'active_newly_assigned':len(active_arm),
+        'archived':len(archived_arm),'archived_with_entry_quote':len(started),
+        'archived_with_later_quote':len(measured),
+        'missing_later_quote_censored':len(started)-len(measured),
+        'ever_quote_2x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in measured),
+        'ever_quote_11x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in measured),
+        'no_actual_trades':True}
+activity_report={'as_of':r['at'],
+    'fixed_signal_time_cutoffs':{'initial_volume_1h_usd':PROSPECTIVE_ACTIVITY_VOLUME_USD,
+                                 'initial_buyers_1h':PROSPECTIVE_ACTIVITY_BUYERS},
+    'arms':activity_arms,'legacy_unlabeled_excluded':True,
+    'not_randomized_or_causal':True,'quote_selection_bias_possible':True,
+    'unfilled_outcomes_only':True,'trades':0}
+with open('evidence/prospective_activity_arms.json','w') as f:json.dump(activity_report,f,indent=2,allow_nan=False)
+print('PROSPECTIVE_ACTIVITY_ARMS',json.dumps(activity_report,allow_nan=False))
 shadow_learning={'as_of':r['at'],'archived_mints':len(shadow_ledger),
                  'eligible_quote_observed_after_entry':len(complete_quotes),
                  'unfilled_later_quote_2x_count':len(winner),
@@ -990,6 +1030,21 @@ for pool,item in st.items():
                  and liquidity_age is not None and 0<=liquidity_age<=15)
     latest_multiple=float(sh.get('last_exit_quote_multiple') or 0) if quote_at else None
     current_liquidity=float(item.get('last_observed_liquidity_usd') or 0)
+    # A high initial score cannot hide a drained CURRENT pool. Five-minute
+    # recency is still NOT proof the quoted swap can execute on-chain.
+    if quote_age is None or quote_age<0 or quote_age>5:
+        priority_risk='sell_quote_missing_or_over_5m'
+    elif liquidity_age is None or liquidity_age<0 or liquidity_age>5:
+        priority_risk='liquidity_observation_missing_or_over_5m'
+    elif current_liquidity<10000:
+        priority_risk='current_liquidity_below_10000_usd'
+    elif current_liquidity<0.5*liquidity:
+        priority_risk='current_liquidity_drawdown_over_50pct'
+    elif latest_multiple is None or latest_multiple<0.75:
+        priority_risk='sell_quote_below_0_75x'
+    else:
+        priority_risk=None
+    recent_liquid_quote_observed=priority_risk is None
     score=(min(25.,pressure/3*25)+min(20.,liquidity/50000*20)
            +min(15.,volume/100000*15)+min(15.,buyers/200*15)
            +(10 if 0<=first_age<=3 else 5 if first_age<=10 else 0)
@@ -1006,12 +1061,19 @@ for pool,item in st.items():
         'last_quote_only_multiple':latest_multiple,
         'last_quote_age_minutes':round(quote_age,2) if quote_age is not None else None,
         'fresh_sell_quote_within_15m':fresh_route,
+        'recent_liquid_sell_quote_observed':recent_liquid_quote_observed,
+        'current_liquidity_risk_reason':priority_risk,
         'not_currently_executable':True,'orders':0,'trades':0})
-priority.sort(key=lambda row:(row['fresh_sell_quote_within_15m'],
+priority.sort(key=lambda row:(row['recent_liquid_sell_quote_observed'],
     row['score_heuristic_not_probability']),reverse=True)
 priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; never retrospective peak',
     'ranking_not_win_probability':True,'fresh_quote_is_not_a_fill':True,
-    'tracked_eligible':len(priority),'top':priority[:10],'orders':0,'trades':0}
+    'tracked_eligible':len(priority),
+    'recent_liquid_quote_candidates':sum(p['recent_liquid_sell_quote_observed'] for p in priority),
+    'recent_quote_but_liquidity_failed':sum(p['fresh_sell_quote_within_15m'] and
+        p['current_liquidity_risk_reason'] in
+        ('current_liquidity_below_10000_usd','current_liquidity_drawdown_over_50pct') for p in priority),
+    'top':priority[:10],'orders':0,'trades':0}
 with open('evidence/live_candidate_priority.json','w') as f:
     json.dump(priority_report,f,indent=2,allow_nan=False)
 print('LIVE_CANDIDATE_PRIORITY',json.dumps(priority_report,allow_nan=False))
