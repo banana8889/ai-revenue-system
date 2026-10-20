@@ -106,6 +106,9 @@ blocked_candidates_this_run=set()
 shadow_quote_scheduled_this_run=set()
 first_seen_ages_minutes_this_run=[]
 first_seen_unique_mints_this_run=set()
+first_eligible_signals_this_run=0
+first_eligible_with_discovery_baseline_this_run=0
+first_eligible_already_2x_this_run=0
 def hot_shadow_quote_targets(state, selected, now, budget):
     """Prioritize RECENT ROUTE quotes, never chart highs or hindsight prices."""
     ranked=[]
@@ -423,6 +426,13 @@ for cycle in range(CYCLES_PER_RUN):
                     first_seen_ages_minutes_this_run.append(age)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
+            # Persist the genuine FIRST discovery observation, never
+            # reconstruct a discovery price from future market observations.
+            if s['first']==t and 'first_discovery_price_v1' not in s:
+                s['first_discovery_price_v1']=v
+                s['first_discovery_observed_at_v1']=t.isoformat()
+                s['first_discovery_age_minutes_v1']=round(age,4)
+
             # Cohort selected only from FIRST discovery record, before future prices.
             # Both groups have identical minimum age, liquidity, buyer and seller filters.
             if (not s.get('cohort') and s['count']==0 and not s.get('entry') and
@@ -490,6 +500,29 @@ for cycle in range(CYCLES_PER_RUN):
                 s['count']+=1;s['qualified']=s.get('qualified',0)+1 if gate else 0
                 s['previous_signature']=signature;s['last_distinct_at']=t
             eligible=s.get('qualified',0)>=2 and gate
+            # Snapshot FIRST eligibility independently of whether the research
+            # quote position is blocked. This MUST precede every future exit.
+            if eligible and not s.get('first_eligible_at_v1'):
+                s['first_eligible_at_v1']=t.isoformat()
+                s['first_eligible_age_minutes_v1']=round(age,4)
+                first_price=num(s.get('first_discovery_price_v1'))
+                early_multiple=(v/first_price if first_price>0 else None)
+                if early_multiple is not None and not math.isfinite(early_multiple):
+                    early_multiple=None
+                s['first_eligible_vs_first_discovery_chart_x_v1']=(
+                    round(early_multiple,8) if early_multiple is not None else None)
+                s['first_eligible_price_v1']=v
+                first_eligible_signals_this_run+=1
+                if early_multiple is not None:
+                    first_eligible_with_discovery_baseline_this_run+=1
+                    if early_multiple>=2:first_eligible_already_2x_this_run+=1
+                out({'kind':'first_eligible_signal_leadtime_audit',
+                     'pool':p,'token_id':token_id,'at':t.isoformat(),
+                     'pool_age_minutes':round(age,4),
+                     'discovery_age_minutes':s.get('first_discovery_age_minutes_v1'),
+                     'discovery_to_signal_chart_x':s['first_eligible_vs_first_discovery_chart_x_v1'],
+                     'unknown_reference_excluded':early_multiple is None,
+                     'not_a_quote':True,'not_an_executable_buy':True,'orders':0,'trades':0})
             shadow=s.get('shadow')
             if shadow and not s.get('entry') and not shadow.get('expired'):
                 dt_from=(t-d.datetime.fromisoformat(shadow['at'])).total_seconds()
@@ -622,6 +655,9 @@ for cycle in range(CYCLES_PER_RUN):
                                 'initial_buys_1h':x['buys_1h'],
                                 'initial_sells_1h':x['sells_1h'],
                                 'signal_activity_arm':prospective_activity_arm(x['volume_1h'],x['buyers_1h']),
+                                'pre_signal_chart_x_v1':s.get('first_eligible_vs_first_discovery_chart_x_v1'),
+                                'signal_age_minutes_v1':s.get('first_eligible_age_minutes_v1'),
+                                'discovery_age_minutes_v1':s.get('first_discovery_age_minutes_v1'),
                                 'initial_dex':x['dex'],
                                 'quote_trace_version':1,
                                 'quote_trace':[],
@@ -771,6 +807,9 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'new_mints_first_seen_within_3m':sum(v<=3 for v in first_seen_ages_minutes_this_run),
    'new_mints_first_seen_within_5m':sum(v<=5 for v in first_seen_ages_minutes_this_run),
    'new_mints_first_seen_after_5m':sum(v>5 for v in first_seen_ages_minutes_this_run),
+   'first_eligible_decisions_this_run':first_eligible_signals_this_run,
+   'first_eligible_with_real_discovery_reference_this_run':first_eligible_with_discovery_baseline_this_run,
+   'first_eligible_already_2x_since_first_discovery_this_run':first_eligible_already_2x_this_run,
    'prospective_signals':sum(x['entry'] is not None for x in st.values()),
    'paper_exits':sum(x.get('exit') is not None for x in st.values()),
    'paper_targets_11x':sum(str(x.get('exit',{}).get('reason','')).startswith('target_') for x in st.values() if x.get('exit')),
@@ -936,6 +975,9 @@ for pool,z in st.items():
         'initial_buys_1h':sh.get('initial_buys_1h'),
         'initial_sells_1h':sh.get('initial_sells_1h'),
         'signal_activity_arm':sh.get('signal_activity_arm'),
+        'pre_signal_chart_x_v1':sh.get('pre_signal_chart_x_v1'),
+        'signal_age_minutes_v1':sh.get('signal_age_minutes_v1'),
+        'discovery_age_minutes_v1':sh.get('discovery_age_minutes_v1'),
         'initial_dex':sh.get('initial_dex'),
         'long_tail_24h':bool(sh.get('long_tail_24h')),
         'long_tail_assignment_method':sh.get('long_tail_assignment_method'),
@@ -967,6 +1009,21 @@ fixed_tail_quotable=[z for z in fixed_tail if z.get('initial_buy_sell_quote_avai
 fixed_tail_marked=[z for z in fixed_tail_quotable
                    if z.get('later_sell_quotes_available',0)>0
                    and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+# Pre-signal movement experiment begins ONLY with new v1 enrollments.
+# This baseline is first observed pool price, not token-launch entry/fill.
+fixed_tail_leadtime={}
+for label in ('pre_signal_below_1_5x','pre_signal_at_least_1_5x'):
+    eligible_lead=[z for z in fixed_tail if z.get('pre_signal_chart_x_v1') is not None
+                   and ((num(z['pre_signal_chart_x_v1'])>=1.5)==(label=='pre_signal_at_least_1_5x'))]
+    quoted_lead=[z for z in eligible_lead if z.get('initial_buy_sell_quote_available')]
+    observed_lead=[z for z in quoted_lead if z.get('later_sell_quotes_available',0)>0
+                   and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+    fixed_tail_leadtime[label]={'completed':len(eligible_lead),
+        'two_sided_entry_quote':len(quoted_lead),
+        'later_sell_quote_observed':len(observed_lead),
+        'missing_later_quote_unknown':len(quoted_lead)-len(observed_lead),
+        'later_quote_2x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in observed_lead),
+        'later_quote_11x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in observed_lead)}
 fixed_tail_arms={}
 for label in ('high_activity_50k_450','other_eligible'):
     arm=[z for z in fixed_tail if z.get('signal_activity_arm')==label]
@@ -1006,6 +1063,9 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
     'entry_route_missing_n':len(fixed_tail)-len(fixed_tail_quotable),
     'later_route_missing_unknown_n':len(fixed_tail_quotable)-len(fixed_tail_marked),
     'new_precommitted_activity_groups':fixed_tail_arms,
+    'prospective_leadtime_groups':fixed_tail_leadtime,
+    'leadtime_reference_only_first_observed_price':True,
+    'missing_legacy_leadtime_excluded':sum(z.get('pre_signal_chart_x_v1') is None for z in fixed_tail),
     'completed_with_full_quote_trace_v1':len(fixed_tail_trace),
     'quote_only_opportunity_by_observation_window':windows,
     'min_completed_24h_per_group_before_advantage_claim':40,
