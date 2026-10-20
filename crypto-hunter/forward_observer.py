@@ -512,6 +512,29 @@ for cycle in range(CYCLES_PER_RUN):
                 s['first_eligible_vs_first_discovery_chart_x_v1']=(
                     round(early_multiple,8) if early_multiple is not None else None)
                 s['first_eligible_price_v1']=v
+                # FROZEN v1 prospective challenge, selected before any later
+                # sell quotations; prior 24h cohort used to DESIGN, never to
+                # VALIDATE, this hypothesis. It predicts quote-only 2x
+                # opportunity, NOT executed P&L or 11x probability.
+                if early_multiple is None:
+                    preselected='unknown_missing_discovery_reference'
+                else:
+                    buy_pressure=x['buys_1h']/max(1,x['sells_1h'])
+                    selection=(x['volume_1h']>=50000 and x['buyers_1h']>=450
+                               and buy_pressure>=2 and 0<age<=7 and
+                               0<early_multiple<=1.5)
+                    preselected='high_activity_early_v1' if selection else 'other_eligible_v1'
+                s['frozen_prediction_group_v1']=preselected
+                s['frozen_prediction_at_v1']=t.isoformat()
+                out({'kind':'precommitted_quote_2x_predictor_v1',
+                     'pool':p,'token_id':token_id,'at':t.isoformat(),
+                     'prediction_group':preselected,
+                     'thresholds':{'initial_volume_1h_usd_min':50000,
+                        'buyers_1h_min':450,'buy_sell_ratio_min':2,
+                        'signal_age_minutes_max':7,
+                        'discovery_to_signal_chart_multiple_max':1.5},
+                     'is_not_11x_probability':True,'no_future_quote_used':True,
+                     'not_a_trade_recommendation':True,'orders':0,'trades':0})
                 first_eligible_signals_this_run+=1
                 if early_multiple is not None:
                     first_eligible_with_discovery_baseline_this_run+=1
@@ -656,6 +679,8 @@ for cycle in range(CYCLES_PER_RUN):
                                 'initial_sells_1h':x['sells_1h'],
                                 'signal_activity_arm':prospective_activity_arm(x['volume_1h'],x['buyers_1h']),
                                 'pre_signal_chart_x_v1':s.get('first_eligible_vs_first_discovery_chart_x_v1'),
+                                'frozen_prediction_group_v1':s.get('frozen_prediction_group_v1'),
+                                'frozen_prediction_at_v1':s.get('frozen_prediction_at_v1'),
                                 'signal_age_minutes_v1':s.get('first_eligible_age_minutes_v1'),
                                 'discovery_age_minutes_v1':s.get('first_discovery_age_minutes_v1'),
                                 'initial_dex':x['dex'],
@@ -976,6 +1001,8 @@ for pool,z in st.items():
         'initial_sells_1h':sh.get('initial_sells_1h'),
         'signal_activity_arm':sh.get('signal_activity_arm'),
         'pre_signal_chart_x_v1':sh.get('pre_signal_chart_x_v1'),
+        'frozen_prediction_group_v1':sh.get('frozen_prediction_group_v1'),
+        'frozen_prediction_at_v1':sh.get('frozen_prediction_at_v1'),
         'signal_age_minutes_v1':sh.get('signal_age_minutes_v1'),
         'discovery_age_minutes_v1':sh.get('discovery_age_minutes_v1'),
         'initial_dex':sh.get('initial_dex'),
@@ -1024,6 +1051,22 @@ for label in ('pre_signal_below_1_5x','pre_signal_at_least_1_5x'):
         'missing_later_quote_unknown':len(quoted_lead)-len(observed_lead),
         'later_quote_2x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in observed_lead),
         'later_quote_11x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in observed_lead)}
+# v1 prediction challenge: an immutable rule applied BEFORE any later mark.
+# Finished 24h shadows only; missing quotes remain an unknown outcome.
+frozen_v1={}
+for label in ('high_activity_early_v1','other_eligible_v1'):
+    members=[z for z in fixed_tail if z.get('frozen_prediction_group_v1')==label
+             and z.get('frozen_prediction_at_v1')]
+    quoted=[z for z in members if z.get('initial_buy_sell_quote_available')]
+    marked=[z for z in quoted if z.get('later_sell_quotes_available',0)>0
+            and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+    frozen_v1[label]={'completed_24h':len(members),
+        'entry_buy_and_sell_quoted':len(quoted),
+        'followup_sell_quote_observed':len(marked),
+        'followup_sell_quote_missing_unknown':len(quoted)-len(marked),
+        'quote_only_2x_seen':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in marked),
+        'quote_only_11x_seen':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in marked),
+        'realized_trade_count':0}
 fixed_tail_arms={}
 for label in ('high_activity_50k_450','other_eligible'):
     arm=[z for z in fixed_tail if z.get('signal_activity_arm')==label]
@@ -1064,6 +1107,9 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
     'later_route_missing_unknown_n':len(fixed_tail_quotable)-len(fixed_tail_marked),
     'new_precommitted_activity_groups':fixed_tail_arms,
     'prospective_leadtime_groups':fixed_tail_leadtime,
+    'frozen_v1_prediction_challenge':frozen_v1,
+    'frozen_v1_selected_only_at_first_eligibility':True,
+    'in_sample_design_is_not_validation':True,
     'leadtime_reference_only_first_observed_price':True,
     'missing_legacy_leadtime_excluded':sum(z.get('pre_signal_chart_x_v1') is None for z in fixed_tail),
     'completed_with_full_quote_trace_v1':len(fixed_tail_trace),
@@ -1246,6 +1292,7 @@ for pool,item in st.items():
         'score_heuristic_not_probability':round(score,2),
         'signal_at':sh['at'],'signal_age_minutes':round(signal_minutes,2),
         'age_at_signal_minutes':round(first_age,2),
+        'frozen_prediction_group_v1':sh.get('frozen_prediction_group_v1'),
         'initial_buy_sell_ratio':round(pressure,3),
         'initial_liquidity_usd':round(liquidity,2),
         'initial_volume_1h_usd':round(volume,2),
