@@ -21,6 +21,46 @@ SHADOW_KEEP_PEAK_QUOTE_X=1.25
 LONG_TAIL_MAX_ACTIVE=16   # research only; 80 total slots
 LONG_TAIL_MODULUS=5
 EXPLOSIVE_MULTIPLIERS=(11,21,51,101)  # +1000%/+2000%/+5000%/+10000%
+# Freeze competing quote-only exit policies for NEW shadows only.
+# No wallet, order, fill, or realized net return.
+QUOTE_EXIT_POLICY_VERSION=1
+QUOTE_EXIT_STOP_X=0.75
+QUOTE_EXIT_TARGETS=(('target_2x',2.0),('target_11x',11.0))
+def update_frozen_quote_exit_policies(sh,quote_multiple,quote_at,pool,token_id):
+    """First threshold seen in chronological quotes; not a future peak."""
+    if sh.get('quote_exit_policy_version')!=QUOTE_EXIT_POLICY_VERSION:
+        return 0
+    try:
+        signal=d.datetime.fromisoformat(sh['at'])
+        marked=d.datetime.fromisoformat(quote_at)
+        elapsed=(marked-signal).total_seconds()
+        q=float(quote_multiple)
+    except (KeyError,ValueError,TypeError):
+        return 0
+    if not math.isfinite(q) or q<=0 or elapsed<=0:
+        return 0
+    decisions=sh.setdefault('quote_exit_policy_decisions',{})
+    made=0
+    for label,target in QUOTE_EXIT_TARGETS:
+        if label in decisions:
+            continue
+        if q<=QUOTE_EXIT_STOP_X:
+            reason='first_observed_stop_quote'
+        elif q>=target:
+            reason='first_observed_target_quote'
+        elif elapsed>=SHADOW_RESEARCH_SECONDS:
+            reason='first_observed_24h_horizon_quote'
+        else:
+            continue
+        decisions[label]={'at':quote_at,'elapsed_minutes':round(elapsed/60,2),
+            'target_x':target,'stop_x':QUOTE_EXIT_STOP_X,
+            'reason':reason,'observed_quote_multiple':round(q,8),
+            'no_fill':True,'not_executed':True,'gas_rent_mev_excluded':True}
+        made+=1
+        out({'kind':'frozen_quote_exit_policy_decision','at':quote_at,
+            'pool':pool,'token_id':token_id,'policy':label,
+            **decisions[label],'orders':0,'trades':0})
+    return made
 # Fixed live hypothesis, 19 Oct 2026. Never relabel prior observations.
 PROSPECTIVE_ACTIVITY_VOLUME_USD=50000
 PROSPECTIVE_ACTIVITY_BUYERS=450
@@ -77,6 +117,7 @@ shadow_chart_11x_this_run=0
 shadow_quote_entries_this_run=0
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
+frozen_policy_decisions_this_run=0
 MAX_SHADOW_SELL_QUOTES_PER_RUN=8
 # Guarantee some quote capacity for NEW quoteable candidates in the SAME
 # study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
@@ -610,6 +651,8 @@ for cycle in range(CYCLES_PER_RUN):
                             shadow['max_exit_quote_multiple']=max(shadow.get('max_exit_quote_multiple',0),multiple)
                             shadow['last_exit_quote_multiple']=multiple
                             shadow['last_exit_quote_at']=marked
+                            frozen_policy_decisions_this_run+=update_frozen_quote_exit_policies(
+                                shadow,multiple,marked,p,s.get('token_id'))
                             # Immutable prospective evidence of WHEN an exact-size
                             # sell quotation was seen (not when chart peaked).
                             # Only trace NEW cohorts started under this version.
@@ -685,6 +728,8 @@ for cycle in range(CYCLES_PER_RUN):
                                 'discovery_age_minutes_v1':s.get('first_discovery_age_minutes_v1'),
                                 'initial_dex':x['dex'],
                                 'quote_trace_version':1,
+                                'quote_exit_policy_version':QUOTE_EXIT_POLICY_VERSION,
+                                'quote_exit_policy_decisions':{},
                                 'quote_trace':[],
                                 'quote_trace_truncated':False,
                                 'peak_chart_multiple':1.,'quote_available_count':0,
@@ -862,6 +907,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_buy_and_sell_quote_baselines_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('entry_quote')),
    'shadow_quote_only_exit_checks_this_run':shadow_quote_marks_this_run,
    'shadow_quote_only_exit_available_this_run':shadow_quote_marks_available_this_run,
+   'frozen_quote_exit_policy_decisions_this_run':frozen_policy_decisions_this_run,
    'shadow_quote_slots_scheduled':len(shadow_quote_scheduled_this_run),
    'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
@@ -965,6 +1011,8 @@ shadow_report={'at':r['at'],
  'median_last_quoted_sell_multiple_unfilled':statistics.median(last_marks) if last_marks else None,
  'quote_failures_accumulated':route_missing,
  'active_shadows_with_11x_depth_probe':sum(bool(sh.get('first_11x_sell_depth_probe')) for _,sh in live_shadows),
+ 'active_quote_exit_policy_v1_enrolled':sum(sh.get('quote_exit_policy_version')==QUOTE_EXIT_POLICY_VERSION for _,sh in live_shadows),
+ 'active_quote_exit_policy_11x_decisions':sum(bool(sh.get('quote_exit_policy_decisions',{}).get('target_11x')) for _,sh in live_shadows),
  'ranked_shadow_quote_only_examples':ranked[:10],
  'realized_profit_count':0,'trades':0,
  'not_a_full_cohort':'Current active shadows only; expired shadows are excluded and retained in canonical checkpoint until ordinary pruning',
@@ -1016,6 +1064,8 @@ for pool,z in st.items():
         'later_sell_quotes_available':sh.get('quote_available_count',0),
         'later_sell_quotes_failed':sh.get('exit_quote_missing_count',0),
         'quote_trace_version':sh.get('quote_trace_version'),
+        'quote_exit_policy_version':sh.get('quote_exit_policy_version'),
+        'quote_exit_policy_decisions':sh.get('quote_exit_policy_decisions',{}),
         'quote_trace':sh.get('quote_trace',[])[-48:],
         'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
@@ -1051,6 +1101,27 @@ for label in ('pre_signal_below_1_5x','pre_signal_at_least_1_5x'):
         'missing_later_quote_unknown':len(quoted_lead)-len(observed_lead),
         'later_quote_2x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=2 for z in observed_lead),
         'later_quote_11x_unfilled':sum(z['max_later_sell_quote_multiple_unfilled']>=11 for z in observed_lead)}
+# Censor-aware, fixed-cohort comparison of first-seen exit decisions.
+# No decision means UNKNOWN, not a simulated sale at a perfect later price.
+quote_policy_comparison={}
+for label,target in QUOTE_EXIT_TARGETS:
+    eligible_policy=[z for z in fixed_tail if z.get('quote_exit_policy_version')==QUOTE_EXIT_POLICY_VERSION
+                     and z.get('initial_buy_sell_quote_available')]
+    observed_policy=[z for z in eligible_policy if z.get('quote_exit_policy_decisions',{}).get(label)]
+    reasons={}
+    for z in observed_policy:
+        why=z['quote_exit_policy_decisions'][label]['reason']
+        reasons[why]=reasons.get(why,0)+1
+    quote_policy_comparison[label]={
+        'target_x':target,'stop_x':QUOTE_EXIT_STOP_X,
+        'full_24h_eligible':len(eligible_policy),
+        'first_threshold_quote_decisions':len(observed_policy),
+        'decision_missing_unknown':len(eligible_policy)-len(observed_policy),
+        'reasons':reasons,
+        'median_observed_quote_multiple_unfilled':(round(statistics.median(
+             z['quote_exit_policy_decisions'][label]['observed_quote_multiple']
+             for z in observed_policy),6) if observed_policy else None),
+        'not_net_trading_returns':True,'trades':0}
 # v1 prediction challenge: an immutable rule applied BEFORE any later mark.
 # Finished 24h shadows only; missing quotes remain an unknown outcome.
 frozen_v1={}
@@ -1108,6 +1179,8 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
     'new_precommitted_activity_groups':fixed_tail_arms,
     'prospective_leadtime_groups':fixed_tail_leadtime,
     'frozen_v1_prediction_challenge':frozen_v1,
+    'frozen_quote_exit_policy_comparison':quote_policy_comparison,
+    'frozen_exit_first_threshold_no_hindsight':True,
     'frozen_v1_selected_only_at_first_eligibility':True,
     'in_sample_design_is_not_validation':True,
     'leadtime_reference_only_first_observed_price':True,
