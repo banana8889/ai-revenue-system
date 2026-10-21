@@ -732,13 +732,16 @@ for cycle in range(CYCLES_PER_RUN):
                             out({'kind':'shadow_exit_quote_only','at':marked,'pool':p,'token_id':s.get('token_id'),
                                  'usdc_proceeds':q['out_amount']/1000000,'quote_multiple':multiple,
                                  'no_trade':True,'no_fill':True,'no_capital_allocated':True})
+                            # Larger exact-size exit studies must not be lost
+                            # if the ONE-per-run quota was exhausted on the first
+                            # 11x observation. Retry on another real >=11x mark.
+                            if (multiple>=11 and shadow.get('size_matched_entry_v1')
+                                    and not shadow.get('size_matched_exit_v1')):
+                                larger=probe_size_matched_exit(shadow,
+                                    s.get('token_id','').removeprefix('solana_'),
+                                    p,s.get('token_id'),marked)
+                                if larger:shadow['size_matched_exit_v1']=larger
                             if multiple>=11 and not shadow.get('quote_11x_logged'):
-                                if (shadow.get('size_matched_entry_v1')
-                                        and not shadow.get('size_matched_exit_v1')):
-                                    larger=probe_size_matched_exit(shadow,
-                                        s.get('token_id','').removeprefix('solana_'),
-                                        p,s.get('token_id'),marked)
-                                    if larger:shadow['size_matched_exit_v1']=larger
                                 depth=probe_sell_depth(s.get('token_id','').removeprefix('solana_'),
                                     shadow['entry_quote']['token_raw'],q['out_amount'],
                                     marked,p,s.get('token_id'))
