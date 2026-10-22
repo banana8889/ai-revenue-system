@@ -8,8 +8,11 @@ MAX_SELL_DEPTH_PROBES_PER_RUN=1
 sell_depth_probes_this_run=0
 # A bounded 25/100 USDC exact-size buy+sell route book on NEW high-confidence
 # research shadows. Both-sided quotation, not a filled initial trade.
-MAX_SIZE_MATCHED_ENTRY_STUDIES_PER_RUN=1
+# Reserve one buy-and-sell quote study per frozen prediction group.
+# No hindsight favoring our preferred rule; <= 8 additional keyless quotes.
+MAX_SIZE_MATCHED_ENTRY_STUDIES_PER_RUN=2
 size_matched_entry_studies_this_run=0
+size_matched_entry_by_group_this_run={'high_activity_early_v1':0,'other_eligible_v1':0}
 MAX_SIZE_MATCHED_EXIT_STUDIES_PER_RUN=1
 size_matched_exit_studies_this_run=0
 sell_mark_checks=0
@@ -289,8 +292,11 @@ def probe_size_matched_entry(mint,pool,token_id):
          'token_id':token_id,'sizes':measured,'no_orders':True,'no_fill':True})
     return {'quoted_at':at,'sizes':measured,'no_entry_filled':True}
 
-def probe_size_matched_exit(sh,mint,pool,token_id,reference_quote_at):
-    """Reprice exact historical $25/$100 token quantities on first 11x event."""
+def probe_size_matched_exit(sh,mint,pool,token_id,reference_quote_at,trigger_tier='11x'):
+    """Reprice actual historical $25/$100 buy-quoted token amounts at 2x or 11x.
+
+    Both sides are quote-only. Never equate a quote with actual fill or net P&L.
+    """
     global size_matched_exit_studies_this_run
     if size_matched_exit_studies_this_run>=MAX_SIZE_MATCHED_EXIT_STUDIES_PER_RUN:
         return None
@@ -315,10 +321,12 @@ def probe_size_matched_exit(sh,mint,pool,token_id,reference_quote_at):
             'no_execution':True}
     marked=d.datetime.now(d.timezone.utc).isoformat()
     out({'kind':'size_matched_later_sell_quotes_only','at':marked,
+        'trigger_tier':trigger_tier,
         'original_reference_quote_at':reference_quote_at,'pool':pool,
         'token_id':token_id,'sizes':results,'no_trades':True,'no_fills':True,
         'gas_rent_mev_not_included':True})
     return {'quoted_at':marked,'original_reference_quote_at':reference_quote_at,
+            'trigger_tier':trigger_tier,
             'sizes':results,'no_executed_trades':True,'not_net_profits':True}
 
 def paper_entry_risk_reason(now):
@@ -732,6 +740,17 @@ for cycle in range(CYCLES_PER_RUN):
                             out({'kind':'shadow_exit_quote_only','at':marked,'pool':p,'token_id':s.get('token_id'),
                                  'usdc_proceeds':q['out_amount']/1000000,'quote_multiple':multiple,
                                  'no_trade':True,'no_fill':True,'no_capital_allocated':True})
+                            # First ask if an apparent 2x on $5 is also
+                            # quoted at matched $25/$100 original buy amounts.
+                            # The first available 2x event is recorded once.
+                            # A quota-deferred study can retry on a later
+                            # genuinely observed 2x quotation, never a chart peak.
+                            if (2<=multiple<11 and shadow.get('size_matched_entry_v1')
+                                    and not shadow.get('size_matched_exit_at_2x_v2')):
+                                at2=probe_size_matched_exit(shadow,
+                                    s.get('token_id','').removeprefix('solana_'),
+                                    p,s.get('token_id'),marked,trigger_tier='2x')
+                                if at2:shadow['size_matched_exit_at_2x_v2']=at2
                             # Larger exact-size exit studies must not be lost
                             # if the ONE-per-run quota was exhausted on the first
                             # 11x observation. Retry on another real >=11x mark.
@@ -818,10 +837,16 @@ for cycle in range(CYCLES_PER_RUN):
                                 shadow_quote_entries_this_run+=1
                                 # Strictly at SIGNAL, before future mark outcomes.
                                 # No large-size retroactive buys for old winners.
-                                if (shadow.get('frozen_prediction_group_v1')=='high_activity_early_v1'
+                                arm=shadow.get('frozen_prediction_group_v1')
+                                if (arm in size_matched_entry_by_group_this_run
+                                        and size_matched_entry_by_group_this_run[arm]<1
                                         and size_matched_entry_studies_this_run<MAX_SIZE_MATCHED_ENTRY_STUDIES_PER_RUN):
-                                    shadow['size_matched_entry_v1']=probe_size_matched_entry(
+                                    size_probe=probe_size_matched_entry(
                                         token_id.removeprefix('solana_'),p,token_id)
+                                    if size_probe:
+                                        size_probe['precommitted_arm']=arm
+                                        shadow['size_matched_entry_v1']=size_probe
+                                        size_matched_entry_by_group_this_run[arm]+=1
                                 # Only assign a scarce real-time mark slot when
                                 # there is a FOLLOWING cycle left to observe.
                                 # Keep the initial quote time separate from the
@@ -971,6 +996,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'quote_preflight_attempts':quote_checks,
    'sell_depth_size_sensitivity_probes_this_run':sell_depth_probes_this_run,
    'size_matched_entry_studies_this_run':size_matched_entry_studies_this_run,
+   'size_matched_entry_by_group_this_run':size_matched_entry_by_group_this_run,
    'size_matched_exit_studies_this_run':size_matched_exit_studies_this_run,
    'risk_blocked_candidate_mints':len(blocked_candidates_this_run),
    'new_shadow_candidates_research_only':shadow_new_this_run,
@@ -1096,6 +1122,7 @@ shadow_report={'at':r['at'],
  'active_quote_exit_policy_11x_decisions':sum(bool(sh.get('quote_exit_policy_decisions',{}).get('target_11x')) for _,sh in live_shadows),
  'active_size_matched_25_100_entry_quoted':sum(bool(sh.get('size_matched_entry_v1')) for _,sh in live_shadows),
  'active_size_matched_25_100_exit_quoted':sum(bool(sh.get('size_matched_exit_v1')) for _,sh in live_shadows),
+ 'active_size_matched_25_100_exit_quoted_at_2x':sum(bool(sh.get('size_matched_exit_at_2x_v2')) for _,sh in live_shadows),
  'ranked_shadow_quote_only_examples':ranked[:10],
  'realized_profit_count':0,'trades':0,
  'not_a_full_cohort':'Current active shadows only; expired shadows are excluded and retained in canonical checkpoint until ordinary pruning',
@@ -1151,6 +1178,7 @@ for pool,z in st.items():
         'quote_exit_policy_decisions':sh.get('quote_exit_policy_decisions',{}),
         'size_matched_entry_v1':sh.get('size_matched_entry_v1'),
         'size_matched_exit_v1':sh.get('size_matched_exit_v1'),
+        'size_matched_exit_at_2x_v2':sh.get('size_matched_exit_at_2x_v2'),
         'quote_trace':sh.get('quote_trace',[])[-48:],
         'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
@@ -1207,6 +1235,26 @@ for label,target in QUOTE_EXIT_TARGETS:
              z['quote_exit_policy_decisions'][label]['observed_quote_multiple']
              for z in observed_policy),6) if observed_policy else None),
         'not_net_trading_returns':True,'trades':0}
+# Matched 25/100-dollar two-sided quotes from fixed, preselected 24h cohort;
+# compare both signal-time prediction groups. A quote is NOT a fill.
+size_matched_truth={}
+for arm in ('high_activity_early_v1','other_eligible_v1'):
+    sized=[z for z in fixed_tail if (z.get('size_matched_entry_v1') or {}).get('precommitted_arm')==arm]
+    sized_2x=[z for z in sized if z.get('size_matched_exit_at_2x_v2')]
+    sized_11x=[z for z in sized if z.get('size_matched_exit_v1')]
+    counts={}
+    for usdc in ('25','100'):
+        for tier,group in (('2x',sized_2x),('11x',sized_11x)):
+            quotes=[v[usdc] for z in group
+                    for v in [(z['size_matched_exit_at_2x_v2'] if tier=='2x' else z['size_matched_exit_v1'])['sizes']]
+                    if usdc in v and v[usdc].get('later_sell_quote_available')]
+            counts[usdc+'_dollar_'+tier]={'route_quoted':len(quotes),
+                'at_least_double_quote_only':sum(num(q.get('later_quote_multiple_unfilled'))>=2 for q in quotes),
+                'at_least_11x_quote_only':sum(num(q.get('later_quote_multiple_unfilled'))>=11 for q in quotes)}
+    size_matched_truth[arm]={'completed_24h_matched_entry':len(sized),
+       'exit_2x_checked_n':len(sized_2x),'exit_11x_checked_n':len(sized_11x),
+       'exit_not_checked_unknown_at_2x':len(sized)-len(sized_2x),
+       'quote_only_levels':counts,'real_executions':0}
 # v1 prediction challenge: an immutable rule applied BEFORE any later mark.
 # Finished 24h shadows only; missing quotes remain an unknown outcome.
 frozen_v1={}
@@ -1265,6 +1313,7 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
     'prospective_leadtime_groups':fixed_tail_leadtime,
     'frozen_v1_prediction_challenge':frozen_v1,
     'frozen_quote_exit_policy_comparison':quote_policy_comparison,
+    'size_matched_25_100_forward_comparison':size_matched_truth,
     'frozen_exit_first_threshold_no_hindsight':True,
     'frozen_v1_selected_only_at_first_eligibility':True,
     'in_sample_design_is_not_validation':True,
