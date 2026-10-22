@@ -35,6 +35,59 @@ EXPLOSIVE_MULTIPLIERS=(11,21,51,101)  # +1000%/+2000%/+5000%/+10000%
 QUOTE_EXIT_POLICY_VERSION=1
 QUOTE_EXIT_STOP_X=0.75
 QUOTE_EXIT_TARGETS=(('target_2x',2.0),('target_11x',11.0))
+# Forward-only split exit: half inventory quote at >=2x, remaining half
+# after a later >=11x, no fill assumptions, strict per-run API budget.
+MOONSHOT_SPLIT_VERSION=1
+MOONSHOT_SPLIT_MIN_LIQUIDITY_USD=10000
+MOONSHOT_SPLIT_PRINCIPAL_QUOTE_USDC=5.25
+MAX_MOONSHOT_SPLIT_QUOTES_PER_RUN=2
+moonshot_split_quotes_this_run=0
+def probe_moonshot_split(sh,mint,pool,token_id,at,multiple,liquidity):
+    """Two NON-ATOMIC half-lot quotes. Never calculate half value by scaling."""
+    global moonshot_split_quotes_this_run
+    if (sh.get('moonshot_split_version')!=MOONSHOT_SPLIT_VERSION
+            or not sh.get('entry_quote') or num(liquidity)<MOONSHOT_SPLIT_MIN_LIQUIDITY_USD
+            or moonshot_split_quotes_this_run>=MAX_MOONSHOT_SPLIT_QUOTES_PER_RUN):
+        return None
+    first=sh.get('moonshot_split_first_leg_quote_v1')
+    if not first:
+        if multiple<2:return None
+        leg='recover_principal_quote'
+    else:
+        if (multiple<11 or not first.get('gross_principal_buffer_observed')
+                or sh.get('moonshot_split_second_leg_quote_v1')
+                or at<=first['at']):
+            return None
+        leg='remaining_half_moonshot_quote'
+    raw=int(sh['entry_quote'].get('token_raw') or 0)//2
+    if raw<=0:return None
+    moonshot_split_quotes_this_run+=1
+    q=jupiter_quote(mint,USDC,raw)
+    usd=(q['out_amount']/1000000) if q.get('ok') else None
+    result={'at':d.datetime.now(d.timezone.utc).isoformat(),
+        'trigger_full_lot_quote_at':at,'leg':leg,'half_token_raw_amount':raw,
+        'full_lot_quote_multiple_at_trigger':round(num(multiple),8),
+        'observed_liquidity_usd':round(num(liquidity),2),
+        'half_lot_sale_quote_usdc':usd,'half_sell_route_quoted':bool(q.get('ok')),
+        'gross_principal_buffer_observed':bool(leg=='recover_principal_quote'
+           and usd is not None and usd>=MOONSHOT_SPLIT_PRINCIPAL_QUOTE_USDC),
+        'no_actual_fill':True,'no_sold_tokens':True,
+        'gas_mev_execution_excluded':True}
+    out({'kind':'moonshot_split_half_lot_quote_only','pool':pool,
+         'token_id':token_id,**result,'orders':0,'trades':0})
+    if q.get('ok'):
+        key=('moonshot_split_first_leg_quote_v1' if leg=='recover_principal_quote'
+             else 'moonshot_split_second_leg_quote_v1')
+        sh[key]=result
+        if leg=='remaining_half_moonshot_quote':
+            sh['moonshot_split_two_sequential_quotes_v1']={
+                'first_quote_usdc':first['half_lot_sale_quote_usdc'],
+                'second_quote_usdc':usd,
+                'sum_usdc_if_both_quotes_could_have_executed':
+                   round(first['half_lot_sale_quote_usdc']+usd,6),
+                'not_a_realized_return':True,'trades':0}
+    return result
+
 def update_frozen_quote_exit_policies(sh,quote_multiple,quote_at,pool,token_id):
     """First threshold seen in chronological quotes; not a future peak."""
     if sh.get('quote_exit_policy_version')!=QUOTE_EXIT_POLICY_VERSION:
@@ -725,6 +778,10 @@ for cycle in range(CYCLES_PER_RUN):
                             shadow['last_exit_quote_at']=marked
                             frozen_policy_decisions_this_run+=update_frozen_quote_exit_policies(
                                 shadow,multiple,marked,p,s.get('token_id'))
+                            if shadow.get('moonshot_split_version')==MOONSHOT_SPLIT_VERSION:
+                                probe_moonshot_split(shadow,
+                                   s.get('token_id','').removeprefix('solana_'),
+                                   p,s.get('token_id'),marked,multiple,x['liq'])
                             # Immutable prospective evidence of WHEN an exact-size
                             # sell quotation was seen (not when chart peaked).
                             # Only trace NEW cohorts started under this version.
@@ -822,6 +879,7 @@ for cycle in range(CYCLES_PER_RUN):
                                 'quote_trace_version':1,
                                 'quote_exit_policy_version':QUOTE_EXIT_POLICY_VERSION,
                                 'quote_exit_policy_decisions':{},
+                                'moonshot_split_version':MOONSHOT_SPLIT_VERSION,
                                 'quote_trace':[],
                                 'quote_trace_truncated':False,
                                 'peak_chart_multiple':1.,'quote_available_count':0,
@@ -998,6 +1056,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'size_matched_entry_studies_this_run':size_matched_entry_studies_this_run,
    'size_matched_entry_by_group_this_run':size_matched_entry_by_group_this_run,
    'size_matched_exit_studies_this_run':size_matched_exit_studies_this_run,
+   'moonshot_split_half_lot_quote_probes_this_run':moonshot_split_quotes_this_run,
    'risk_blocked_candidate_mints':len(blocked_candidates_this_run),
    'new_shadow_candidates_research_only':shadow_new_this_run,
    'shadow_active_research_only':sum(bool(x.get('shadow')) and not x['shadow'].get('expired')
@@ -1123,6 +1182,8 @@ shadow_report={'at':r['at'],
  'active_size_matched_25_100_entry_quoted':sum(bool(sh.get('size_matched_entry_v1')) for _,sh in live_shadows),
  'active_size_matched_25_100_exit_quoted':sum(bool(sh.get('size_matched_exit_v1')) for _,sh in live_shadows),
  'active_size_matched_25_100_exit_quoted_at_2x':sum(bool(sh.get('size_matched_exit_at_2x_v2')) for _,sh in live_shadows),
+ 'active_moonshot_split_first_leg_quotes':sum(bool(sh.get('moonshot_split_first_leg_quote_v1')) for _,sh in live_shadows),
+ 'active_moonshot_split_second_leg_quotes':sum(bool(sh.get('moonshot_split_second_leg_quote_v1')) for _,sh in live_shadows),
  'ranked_shadow_quote_only_examples':ranked[:10],
  'realized_profit_count':0,'trades':0,
  'not_a_full_cohort':'Current active shadows only; expired shadows are excluded and retained in canonical checkpoint until ordinary pruning',
@@ -1179,6 +1240,9 @@ for pool,z in st.items():
         'size_matched_entry_v1':sh.get('size_matched_entry_v1'),
         'size_matched_exit_v1':sh.get('size_matched_exit_v1'),
         'size_matched_exit_at_2x_v2':sh.get('size_matched_exit_at_2x_v2'),
+        'moonshot_split_version':sh.get('moonshot_split_version'),
+        'moonshot_split_first_leg_quote_v1':sh.get('moonshot_split_first_leg_quote_v1'),
+        'moonshot_split_second_leg_quote_v1':sh.get('moonshot_split_second_leg_quote_v1'),
         'quote_trace':sh.get('quote_trace',[])[-48:],
         'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
@@ -1314,6 +1378,13 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
     'frozen_v1_prediction_challenge':frozen_v1,
     'frozen_quote_exit_policy_comparison':quote_policy_comparison,
     'size_matched_25_100_forward_comparison':size_matched_truth,
+    'moonshot_split_24h_quote_observation':{
+        'new_split_policy_enrolled':sum(z.get('moonshot_split_version')==MOONSHOT_SPLIT_VERSION for z in fixed_tail),
+        'first_half_quote_observed':sum(bool(z.get('moonshot_split_first_leg_quote_v1')) for z in fixed_tail),
+        'first_half_quote_with_5_25_usdc_gross_buffer':sum(bool(
+            (z.get('moonshot_split_first_leg_quote_v1') or {}).get('gross_principal_buffer_observed')) for z in fixed_tail),
+        'second_half_11x_quote_observed':sum(bool(z.get('moonshot_split_second_leg_quote_v1')) for z in fixed_tail),
+        'two_non_atomic_quotes_are_not_trades':True,'real_profit_verified':False},
     'frozen_exit_first_threshold_no_hindsight':True,
     'frozen_v1_selected_only_at_first_eligibility':True,
     'in_sample_design_is_not_validation':True,
