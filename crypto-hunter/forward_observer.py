@@ -1399,6 +1399,78 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
 with open('evidence/fixed_24h_tail_truth_report.json','w') as f:
     json.dump(tail_report,f,indent=2,allow_nan=False)
 print('FIXED_24H_TAIL_TRUTH_REPORT',json.dumps(tail_report,allow_nan=False))
+# AUTOMATED REAL HISTORICAL QUOTE REPLAY, not a trading backtest:
+# chronological first available observed quote, no look-ahead peaks.
+# Never mark a quote-missing position at $0 or a perfect target fill.
+paper_observed=[num(x) for x in evaluation['paper_quote_exit_multiples']
+                if x is not None and num(x)>0]
+paper_entry_quoted=evaluation['paper_entries_with_route_quotes']
+paper_replay={'entry_quoted_total':paper_entry_quoted,
+    'later_exit_quote_observed':len(paper_observed),
+    'unknown_exit_or_open':paper_entry_quoted-len(paper_observed),
+    'winners_quote_gt_1x':sum(x>1 for x in paper_observed),
+    'losers_quote_lt_1x':sum(x<1 for x in paper_observed),
+    'exit_quotes_at_least_11x':sum(x>=11 for x in paper_observed),
+    'median_observed_exit_x':(round(statistics.median(paper_observed),8)
+                              if paper_observed else None),
+    'gross_quote_pl_usdc_conditional_on_later_quote':round(
+        5*(sum(paper_observed)-len(paper_observed)),3),
+    'quoted_exit_notional_usdc':5*len(paper_observed),
+    'not_portfolio_return_missing_ignored':True,
+    'not_filled_gas_mev_slippage_excluded':True}
+def replay_first_observed_quote_thresholds(z,target,stop=0.75):
+    """Only contemporaneous sell quotes strictly after the initial signal."""
+    try:signal=d.datetime.fromisoformat(z['signal_at'])
+    except (ValueError,TypeError,KeyError):return None
+    marks=sorted(enumerate(z.get('quote_trace') or []),
+                 key=lambda e:(e[1].get('at') or '',e[0]))
+    for _,mark in marks:
+        if not mark.get('ok') or mark.get('quote_multiple') is None:continue
+        try:
+            seen=d.datetime.fromisoformat(mark['at'])
+            elapsed=(seen-signal).total_seconds()
+            multiple=float(mark['quote_multiple'])
+        except (ValueError,TypeError,KeyError):continue
+        if not (0<elapsed<=SHADOW_RESEARCH_SECONDS
+                and math.isfinite(multiple) and multiple>0):continue
+        if multiple<=stop:return ('stop',multiple)
+        if multiple>=target:return ('target',multiple)
+    return None
+# Fixed, hash-preselected, full 24h only. Exclude *truncated* records
+# instead of pretending the missing earlier marks never happened.
+replay_cohort=[z for z in fixed_tail
+               if z.get('initial_buy_sell_quote_available')
+               and z.get('quote_trace_version')==1
+               and not z.get('quote_trace_truncated')]
+first_quote_replays={}
+for target in (2,3,5,11):
+    outcomes=[replay_first_observed_quote_thresholds(z,target)
+              for z in replay_cohort]
+    observed=[v for v in outcomes if v is not None]
+    first_quote_replays[str(target)+'x']={
+        'eligible_quote_24h_traces':len(replay_cohort),
+        'target_first':sum(a=='target' for a,b in observed),
+        'stop_first':sum(a=='stop' for a,b in observed),
+        'unresolved_censored':len(outcomes)-len(observed),
+        'quote_profit_usdc_on_5usd_per_resolved':round(
+            5*sum(b-1 for a,b in observed),3),
+        'quoted_entry_cost_resolved_usdc':5*len(observed),
+        'stop_not_guaranteed_at_0_75x':True,
+        'quotes_not_fills':True}
+historical_backtest={'as_of':r['at'],'source':'prospective_immutable_quotes_only',
+    'paper_exit_quote_subpopulation':paper_replay,
+    'strict_fixed_24h_first_observed_quote_replays':first_quote_replays,
+    'full_24h_cohort_completed':len(fixed_tail),
+    'quote_complete_24h_count':len(fixed_tail_marked),
+    'full_24h_11x_quote_observed':sum(
+        z['max_later_sell_quote_multiple_unfilled']>=11 for z in fixed_tail_marked),
+    'all_entries_without_exit_are_unknown_not_zero':True,
+    'strategy_profitable_proven':False,
+    'real_fills':0,'orders':0,
+    'does_not_model_taxes_slippage_mev_priority_fees':True}
+with open('evidence/historical_quote_backtest.json','w',encoding='utf-8') as f:
+    json.dump(historical_backtest,f,indent=2,allow_nan=False)
+print('HISTORICAL_QUOTE_BACKTEST',json.dumps(historical_backtest,allow_nan=False))
 # Supplemental descriptive comparison ONLY. Early exits are selection biased.
 # A missing future sell quotation is CENSORED, not a failed profit or 0x.
 complete_quotes=[z for z in shadow_ledger
