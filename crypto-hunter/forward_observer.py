@@ -174,6 +174,15 @@ try:CYCLES_PER_RUN=max(3,min(12,int(os.getenv('CRYPTO_STUDY_CYCLES','3'))))
 except (TypeError,ValueError):CYCLES_PER_RUN=3
 COHORT_GROUPS=('buy_pressure','lower_pressure_control')
 cohort_added_this_run={x:0 for x in COHORT_GROUPS}
+# Precommitted matched 5-USDC buy+sell quotes at FIRST DISCOVERY for
+# independent pressure/control arms. Preserve denominator when route missing.
+# Max two extra entry checks and two sell checks per run, not live orders.
+COHORT_EXECUTABILITY_STUDY_VERSION=1
+COHORT_MIN_LIQUIDITY_FOR_EXIT_USD=10000
+COHORT_ENTRY_QUOTE_PER_ARM_PER_RUN=1
+COHORT_SELL_QUOTE_PER_ARM_PER_RUN=1
+cohort_entry_quote_checks={x:0 for x in COHORT_GROUPS}
+cohort_followup_quote_checks={x:0 for x in COHORT_GROUPS}
 shadow_new_this_run=0
 shadow_chart_11x_this_run=0
 shadow_quote_entries_this_run=0
@@ -617,7 +626,32 @@ for cycle in range(CYCLES_PER_RUN):
                         'first_buys_1h':x['buys_1h'],'first_sells_1h':x['sells_1h'],
                         'last_observed_at':None,'n_observations':0,
                         'peak_chart_multiple':1.,'peak_liquidity_usd':x['liq'],
+                        'cohort_executability_study_version':COHORT_EXECUTABILITY_STUDY_VERSION,
+                        'cohort_entry_quote_attempted':False,
+                        'cohort_quote_marks_v1':[],
                         'no_trade':True,'no_executable_quote':True}
+                    # Fixed budget by arm, at discovery rather than retrospectively
+                    # choosing chart winners. A failed quote remains unknown.
+                    co_enroll=s['cohort']
+                    if cohort_entry_quote_checks[group]<COHORT_ENTRY_QUOTE_PER_ARM_PER_RUN:
+                        cohort_entry_quote_checks[group]+=1
+                        co_enroll['cohort_entry_quote_attempted']=True
+                        mint=token_id.removeprefix('solana_')
+                        buy=jupiter_quote(USDC,mint,5000000)
+                        raw=int(buy.get('out_amount') or 0)
+                        sell=jupiter_quote(mint,USDC,raw) if buy.get('ok') and raw>0 else {'ok':False}
+                        back=(sell.get('out_amount',0)/5000000 if sell.get('ok') else None)
+                        ok=bool(back is not None and back>=0.85)
+                        if ok:
+                            co_enroll['cohort_entry_quote_v1']={'observed_at':d.datetime.now(d.timezone.utc).isoformat(),
+                                'token_raw':raw,'immediate_roundtrip_multiple':round(back,8),
+                                'entry_usdc':5,'quote_only':True}
+                        out({'kind':'cohort_discovery_matched_entry_quote_v1','pool':p,
+                            'at':d.datetime.now(d.timezone.utc).isoformat(),'token_id':token_id,
+                            'group':group,'route_buy':bool(buy.get('ok')),
+                            'route_sell':bool(sell.get('ok')),
+                            'two_sided_quote_acceptability':ok,
+                            'no_transaction':True,'no_fill':True})
                     cohort_added_this_run[group]+=1
                     out({'kind':'prospective_cohort_baseline','pool':p,'token_id':token_id,
                          'at':t.isoformat(),'group':group,'baseline':s['cohort'],
@@ -645,6 +679,32 @@ for cycle in range(CYCLES_PER_RUN):
                                  'group':co['group'],'at':t.isoformat(),
                                  'chart_multiple':multiple,'liquidity_usd':x['liq'],
                                  'unfilled':True,'not_executable_quote':True})
+                        # The chart threshold alone is NEVER a sellable return.
+                        # Use a pre-discovery quoted token amount, current
+                        # minimum liquidity, and equal per-arm quote budget.
+                        tier='11x' if multiple>=11 else '2x'
+                        if (multiple>=2 and x['liq']>=COHORT_MIN_LIQUIDITY_FOR_EXIT_USD
+                            and co.get('cohort_executability_study_version')==COHORT_EXECUTABILITY_STUDY_VERSION
+                            and co.get('cohort_entry_quote_v1')
+                            and cohort_followup_quote_checks[co['group']]<COHORT_SELL_QUOTE_PER_ARM_PER_RUN):
+                            marks=co.setdefault('cohort_quote_marks_v1',[])
+                            tier_attempts=sum(z.get('tier')==tier for z in marks)
+                            tier_observed=any(z.get('tier')==tier and z.get('sell_quote_available') for z in marks)
+                            if tier_attempts<2 and not tier_observed:
+                                cohort_followup_quote_checks[co['group']]+=1
+                                mint=token_id.removeprefix('solana_')
+                                q=jupiter_quote(mint,USDC,int(co['cohort_entry_quote_v1']['token_raw']))
+                                qm=(q['out_amount']/5000000 if q.get('ok') else None)
+                                mark={'at':d.datetime.now(d.timezone.utc).isoformat(),'tier':tier,
+                                    'chart_trigger_x':round(multiple,6),
+                                    'current_liquidity_usd':round(x['liq'],2),
+                                    'sell_quote_available':bool(q.get('ok')),
+                                    'quote_only_x':round(qm,8) if qm is not None else None,
+                                    'no_fill':True,'no_executed_order':True}
+                                marks.append(mark)
+                                out({'kind':'cohort_matched_exit_quote_v1','pool':p,
+                                    'token_id':token_id,'group':co['group'],**mark,
+                                    'realized_profit':False,'orders':0,'trades':0})
             s['last_observed_liquidity_usd']=x['liq']
             s['last_liquidity_seen_at']=d.datetime.now(d.timezone.utc).isoformat()
             if s.get('entry') and not s.get('exit') and x['liq']<100:
@@ -1066,6 +1126,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_chart_11x_new_this_run':shadow_chart_11x_this_run,
    'cohort_new_buy_pressure':cohort_added_this_run['buy_pressure'],
    'cohort_new_control':cohort_added_this_run['lower_pressure_control'],
+   'cohort_entry_quotes_attempted_by_arm':cohort_entry_quote_checks,
+   'cohort_later_sell_quotes_attempted_by_arm':cohort_followup_quote_checks,
    'cohort_total':sum(bool(z.get('cohort')) for z in st.values()),
    'shadow_chart_11x_first_observed_liquidity_below_usd_10000':sum(1 for x in st.values()
        if x.get('shadow') and x['shadow'].get('chart_11x_illiquid_at_first_observation') is True),
@@ -1576,6 +1638,10 @@ for pool,z in st.items():
         'completed':bool(co.get('completed')),'censored':bool(co.get('censored')),
         'peak_chart_multiple':co.get('peak_chart_multiple',1.),
         'peak_liquidity_usd':co.get('peak_liquidity_usd'),
+        'cohort_executability_study_version':co.get('cohort_executability_study_version'),
+        'cohort_entry_quote_attempted':bool(co.get('cohort_entry_quote_attempted')),
+        'cohort_entry_quote_v1':co.get('cohort_entry_quote_v1'),
+        'cohort_quote_marks_v1':co.get('cohort_quote_marks_v1',[]),
         'not_an_executable_quote':True,'trades':0})
     known.add(pool)
 # A 24h chart cohort is not an actual fill. Retain only the last 1000
@@ -1583,6 +1649,34 @@ for pool,z in st.items():
 ledger=ledger[-1000:]
 with open(ledger_path,'w',encoding='utf-8') as f:json.dump(ledger,f,indent=1)
 cohort_report['historical_completed_or_censored_retained']=len(ledger)
+# Match both buy and future sell QUOTES in the SAME frozen cohort.
+# Missing quotes and earlier chart-only cohorts remain separate denominators.
+cohort_route_arm_report={}
+for group in COHORT_GROUPS:
+    members=[z for z in ledger if z.get('completed') and z.get('group')==group
+             and z.get('cohort_executability_study_version')==COHORT_EXECUTABILITY_STUDY_VERSION]
+    attempted=[z for z in members if z.get('cohort_entry_quote_attempted')]
+    entered=[z for z in attempted if z.get('cohort_entry_quote_v1')]
+    later=[z for z in entered if any(q.get('sell_quote_available') for q in z.get('cohort_quote_marks_v1',[]))]
+    qmarks=[q for z in later for q in z['cohort_quote_marks_v1']
+            if q.get('sell_quote_available') and q.get('quote_only_x') is not None]
+    reached_2=sum(any(num(q.get('quote_only_x'))>=2 for q in z.get('cohort_quote_marks_v1',[])) for z in later)
+    reached_11=sum(any(num(q.get('quote_only_x'))>=11 for q in z.get('cohort_quote_marks_v1',[])) for z in later)
+    cohort_route_arm_report[group]={'completed_24h':len(members),
+        'entry_quote_checked':len(attempted),'two_sided_entry_quote':len(entered),
+        'later_sell_quote_route_observed':len(later),'later_route_missing_or_not_checked':len(entered)-len(later),
+        'observed_matched_quote_2x':reached_2,
+        'observed_matched_quote_11x':reached_11,
+        'future_quotes_not_fills':True,'trades':0}
+cohort_route_report={'as_of':r['at'],'study_version':COHORT_EXECUTABILITY_STUDY_VERSION,
+    'hypothesis':'higher first-discovery buy/sell pressure predicts later matched sellable quote',
+    'preselected_24h_arms':cohort_route_arm_report,'historic_chart_cohorts_excluded':True,
+    'new_unquoted_preselected_members_count':sum(
+       z.get('completed') and not z.get('cohort_executability_study_version') for z in ledger),
+    'not_randomized':True,'not_independent_trades':True,'trades':0}
+with open('evidence/prospective_cohort_executable_quote_validation.json','w') as f:
+    json.dump(cohort_route_report,f,indent=2,allow_nan=False)
+print('COHORT_EXECUTABLE_QUOTE_VALIDATION',json.dumps(cohort_route_report,allow_nan=False))
 with open('evidence/prospective_cohort_comparison.json','w') as f:
     json.dump(cohort_report,f,indent=2,allow_nan=False)
 print('LIVE_COHORT_24H_COMPARISON',json.dumps(cohort_report,allow_nan=False))
