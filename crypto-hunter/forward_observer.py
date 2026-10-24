@@ -3,8 +3,8 @@ url='https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page='
 st={}
 USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 quote_checks=0
-MAX_ENTRY_QUOTE_CHECKS=8
-MAX_SELL_DEPTH_PROBES_PER_RUN=1
+MAX_ENTRY_QUOTE_CHECKS=10
+MAX_SELL_DEPTH_PROBES_PER_RUN=2
 sell_depth_probes_this_run=0
 # A bounded 25/100 USDC exact-size buy+sell route book on NEW high-confidence
 # research shadows. Both-sided quotation, not a filled initial trade.
@@ -13,10 +13,10 @@ sell_depth_probes_this_run=0
 MAX_SIZE_MATCHED_ENTRY_STUDIES_PER_RUN=2
 size_matched_entry_studies_this_run=0
 size_matched_entry_by_group_this_run={'high_activity_early_v1':0,'other_eligible_v1':0}
-MAX_SIZE_MATCHED_EXIT_STUDIES_PER_RUN=1
+MAX_SIZE_MATCHED_EXIT_STUDIES_PER_RUN=2
 size_matched_exit_studies_this_run=0
 sell_mark_checks=0
-MAX_SELL_MARKS_PER_RUN=8
+MAX_SELL_MARKS_PER_RUN=10
 MAX_OPEN_QUOTED_POSITIONS=4
 MAX_SELL_QUOTE_AGE_SECONDS=900
 MAX_SHADOW_CANDIDATES=80
@@ -40,7 +40,7 @@ QUOTE_EXIT_TARGETS=(('target_2x',2.0),('target_11x',11.0))
 MOONSHOT_SPLIT_VERSION=1
 MOONSHOT_SPLIT_MIN_LIQUIDITY_USD=10000
 MOONSHOT_SPLIT_PRINCIPAL_QUOTE_USDC=5.25
-MAX_MOONSHOT_SPLIT_QUOTES_PER_RUN=2
+MAX_MOONSHOT_SPLIT_QUOTES_PER_RUN=3
 moonshot_split_quotes_this_run=0
 def probe_moonshot_split(sh,mint,pool,token_id,at,multiple,liquidity):
     """Two NON-ATOMIC half-lot quotes. Never calculate half value by scaling."""
@@ -194,8 +194,8 @@ cohort_added_this_run={x:0 for x in COHORT_GROUPS}
 # Max two extra entry checks and two sell checks per run, not live orders.
 COHORT_EXECUTABILITY_STUDY_VERSION=1
 COHORT_MIN_LIQUIDITY_FOR_EXIT_USD=10000
-COHORT_ENTRY_QUOTE_PER_ARM_PER_RUN=1
-COHORT_SELL_QUOTE_PER_ARM_PER_RUN=1
+COHORT_ENTRY_QUOTE_PER_ARM_PER_RUN=2
+COHORT_SELL_QUOTE_PER_ARM_PER_RUN=2
 cohort_entry_quote_checks={x:0 for x in COHORT_GROUPS}
 cohort_followup_quote_checks={x:0 for x in COHORT_GROUPS}
 shadow_new_this_run=0
@@ -204,7 +204,7 @@ shadow_quote_entries_this_run=0
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
 frozen_policy_decisions_this_run=0
-MAX_SHADOW_SELL_QUOTES_PER_RUN=8
+MAX_SHADOW_SELL_QUOTES_PER_RUN=12
 # Guarantee some quote capacity for NEW quoteable candidates in the SAME
 # study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
 FRESH_SHADOW_QUOTE_RESERVE=4
