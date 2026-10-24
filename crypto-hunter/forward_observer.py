@@ -129,6 +129,21 @@ PROSPECTIVE_ACTIVITY_BUYERS=450
 def prospective_activity_arm(volume_usd,buyers):
     return ('high_activity_50k_450' if num(volume_usd)>=PROSPECTIVE_ACTIVITY_VOLUME_USD
             and num(buyers)>=PROSPECTIVE_ACTIVITY_BUYERS else 'other_eligible')
+# Three explicit, fixed v2 prospective moonshot signal groups. Designed
+# after inspecting data through 24 Oct 2026. Historical comparisons
+# below are retrospective, NOT an untouched blind test.
+MOONSHOT_RULES_V2={
+  'age5_pressure2':{'age_max':5,'min_pressure':2},
+  'age5_volume50k_buyers450':{'age_max':5,'min_volume':50000,'min_buyers':450},
+  'age5_volume20k_buyers100':{'age_max':5,'min_volume':20000,'min_buyers':100}}
+def moonshot_rule_tags_v2(age,volume,buyers,buys,sells):
+    pressure=num(buys)/max(1,num(sells))
+    values={'age_max':num(age),'min_volume':num(volume),
+            'min_buyers':num(buyers),'min_pressure':pressure}
+    return [name for name,rule in MOONSHOT_RULES_V2.items()
+            if values['age_max']<=rule['age_max']
+            and all(values[feature]>=threshold for feature,threshold in rule.items()
+                    if feature!='age_max')]
 def tail_is_selected(mint):
     if not mint:return False
     digest=hashlib.sha256(str(mint).encode('utf-8')).digest()
@@ -930,6 +945,10 @@ for cycle in range(CYCLES_PER_RUN):
                                 'initial_buys_1h':x['buys_1h'],
                                 'initial_sells_1h':x['sells_1h'],
                                 'signal_activity_arm':prospective_activity_arm(x['volume_1h'],x['buyers_1h']),
+                                'moonshot_rules_frozen_v2':moonshot_rule_tags_v2(
+                                    age,x['volume_1h'],x['buyers_1h'],
+                                    x['buys_1h'],x['sells_1h']),
+                                'moonshot_rule_version':2,
                                 'pre_signal_chart_x_v1':s.get('first_eligible_vs_first_discovery_chart_x_v1'),
                                 'frozen_prediction_group_v1':s.get('frozen_prediction_group_v1'),
                                 'frozen_prediction_at_v1':s.get('frozen_prediction_at_v1'),
@@ -1281,6 +1300,8 @@ for pool,z in st.items():
         'initial_buys_1h':sh.get('initial_buys_1h'),
         'initial_sells_1h':sh.get('initial_sells_1h'),
         'signal_activity_arm':sh.get('signal_activity_arm'),
+        'moonshot_rule_version':sh.get('moonshot_rule_version'),
+        'moonshot_rules_frozen_v2':sh.get('moonshot_rules_frozen_v2'),
         'pre_signal_chart_x_v1':sh.get('pre_signal_chart_x_v1'),
         'frozen_prediction_group_v1':sh.get('frozen_prediction_group_v1'),
         'frozen_prediction_at_v1':sh.get('frozen_prediction_at_v1'),
@@ -1461,6 +1482,62 @@ tail_report={'as_of':r['at'],'population':'fixed prospective hash-selected shado
 with open('evidence/fixed_24h_tail_truth_report.json','w') as f:
     json.dump(tail_report,f,indent=2,allow_nan=False)
 print('FIXED_24H_TAIL_TRUTH_REPORT',json.dumps(tail_report,allow_nan=False))
+# Backtest signal groups on stored history. 21 Oct is a calendar split,
+# NOT a genuinely unseen holdout: the candidate rules were examined
+# retrospectively before launch. True v2 validation uses frozen tags only.
+def summarize_moonshot_samples(source,versioned=False):
+    by_rule={}
+    for name in ('all_eligible',)+tuple(MOONSHOT_RULES_V2):
+        assigned=[]
+        for z in source:
+            if name=='all_eligible':
+                selected=True
+            elif versioned:
+                selected=z.get('moonshot_rule_version')==2 and name in (z.get('moonshot_rules_frozen_v2') or [])
+            else:
+                selected=name in moonshot_rule_tags_v2(
+                    z.get('initial_age_minutes'),z.get('initial_volume_1h_usd'),
+                    z.get('initial_buyers_1h'),z.get('initial_buys_1h'),
+                    z.get('initial_sells_1h'))
+            if selected:assigned.append(z)
+        with_entry=[z for z in assigned if z.get('initial_buy_sell_quote_available')]
+        with_later=[z for z in with_entry if z.get('later_sell_quotes_available',0)>0
+                    and z.get('max_later_sell_quote_multiple_unfilled') is not None]
+        wins2=sum(num(z['max_later_sell_quote_multiple_unfilled'])>=2 for z in with_later)
+        wins11=sum(num(z['max_later_sell_quote_multiple_unfilled'])>=11 for z in with_later)
+        by_rule[name]={'enrolled_n':len(assigned),
+            'entry_quote_n':len(with_entry),'later_quote_n':len(with_later),
+            'missing_later_quote_unknown_n':len(with_entry)-len(with_later),
+            'quote_only_2x_n':wins2,'quote_only_11x_n':wins11,
+            'quote_only_2x_rate_conditional':round(wins2/len(with_later),7) if with_later else None,
+            'quote_only_11x_rate_conditional':round(wins11/len(with_later),7) if with_later else None,
+            'zero_fills':True}
+    return by_rule
+seen_ids=set()
+unique_shadow=[]
+for z in sorted(shadow_ledger,key=lambda q:q.get('signal_at') or ''):
+    key=z.get('token_id') or z.get('pool')
+    if not key or key in seen_ids:continue
+    seen_ids.add(key)
+    unique_shadow.append(z)
+calendar_cut='2026-10-21T00:00:00+00:00'
+older=[z for z in unique_shadow if (z.get('signal_at') or '')<calendar_cut]
+newer=[z for z in unique_shadow if (z.get('signal_at') or '')>=calendar_cut]
+frozen_new=[z for z in unique_shadow if z.get('moonshot_rule_version')==2]
+moonshot_hypotheses={
+ 'as_of':r['at'],'archive_only_last_5000_records':True,
+ 'dedup_by_token_id':True,'train_or_design_period_before':calendar_cut,
+ 'not_an_unseen_holdout_or_p_value':True,
+ 'earlier_calendar_part_retrospective':summarize_moonshot_samples(older),
+ 'later_calendar_part_still_retrospective':summarize_moonshot_samples(newer),
+ 'new_forward_frozen_rule_records':summarize_moonshot_samples(frozen_new,versioned=True),
+ 'archive_early_retirements_selection_bias':True,
+ 'later_quote_missing_is_unknown':True,
+ 'quote_only_not_realizable_profit':True,
+ 'claim_of_live_strategy_advantage':False,'orders':0,'trades':0}
+with open('evidence/moonshot_rule_validation_v2.json','w',encoding='utf-8') as fh:
+    json.dump(moonshot_hypotheses,fh,indent=2,allow_nan=False)
+print('MOONSHOT_RULE_VALIDATION_V2',json.dumps(moonshot_hypotheses,allow_nan=False))
 # AUTOMATED REAL HISTORICAL QUOTE REPLAY, not a trading backtest:
 # chronological first available observed quote, no look-ahead peaks.
 # Never mark a quote-missing position at $0 or a perfect target fill.
