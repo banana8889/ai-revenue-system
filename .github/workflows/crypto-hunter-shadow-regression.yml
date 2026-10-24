@@ -176,10 +176,11 @@ jobs:
                   assert report['trades']==0
                   print('THOUSANDS_PERCENT_11X_21X_51X_QUOTES_NEVER_FILLS=PASS')
               finally:os.chdir(wd)
-          # A burst watcher should receive a quote in the SAME market sample,
-          # even when fair rotation chose two unrelated older watches.
+          # A burst watcher should receive a quote in the SAME market sample.
+          # Under the expanded 12-slot budget, fair rotation consumes SIX
+          # older slots first; the 2-slot burst reserve must still trigger.
           burst_state=dict(state)
-          for i in range(2):
+          for i in range(6):
               name='OldScheduledShadow%d'%i
               burst_state[name]={'first':old,'entry':None,'count':1,'qualified':0,
                   'last_distinct_at':None,'previous_signature':None,
