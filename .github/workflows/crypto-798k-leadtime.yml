@@ -34,5 +34,7 @@ jobs:
         if: always()
         with:
           name: 798k-chart-11x-peak-lead-time
-          path: evidence/corpus_798k_leadtime/lead_time_truth.json
+          path: |
+            evidence/corpus_798k_leadtime/lead_time_truth.json
+            evidence/corpus_798k_leadtime/all_11x_chart_mints.csv
           if-no-files-found: warn
