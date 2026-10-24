@@ -3,7 +3,7 @@
 Unlike peak time, first threshold crossing provides a prospective timing upper
 bound. Sparse chart paths remain UNSUITABLE as proofs of executed gains.
 """
-import gzip,hashlib,json,math,os,urllib.request,collections
+import gzip,hashlib,json,math,os,urllib.request,collections,csv
 from pathlib import Path
 OUT=Path("evidence/july_entry_delay");OUT.mkdir(parents=True,exist_ok=True)
 URL="https://raw.githubusercontent.com/mivor7/pumpfun-pumpswap-market-data/main/launches/launches_dataset.jsonl.gz"
@@ -34,6 +34,11 @@ def buck(t):
 def main():
     c=collections.Counter()
     derived=[]
+    all_winners=[]
+    crash_times_50=[]
+    crash_times_90=[]
+    known_peak_with_future=0
+    peak_no_later_sample=0
     for line in gzip.open(source(),"rt",encoding="utf-8"):
         try:d=json.loads(line)
         except ValueError:
@@ -61,6 +66,37 @@ def main():
         if crossings:
             c["chart_ge11_from_30s_baseline"]+=1
             c["first_11x_cross_"+buck(crossings[0])]+=1
+            # A 10-minute SPARSE path permits upper bounds on observed
+            # first crossing and crash; not continuous tick timing/fills.
+            peak_at,peak_x=max(points,key=lambda x:x[1])
+            later=[(t,p) for t,p in points if t>peak_at]
+            drop50=next((t for t,p in later if p<=peak_x*0.5),None)
+            drop90=next((t for t,p in later if p<=peak_x*0.1),None)
+            if later:known_peak_with_future+=1
+            else:peak_no_later_sample+=1
+            if drop50 is not None:crash_times_50.append(drop50-peak_at)
+            if drop90 is not None:crash_times_90.append(drop90-peak_at)
+            snap15=d.get("snap_15") if isinstance(d.get("snap_15"),dict) else {}
+            all_winners.append({
+               "mint":d.get("mint"),"symbol_if_recorded":d.get("symbol"),
+               "created_ts":d.get("created_ts"),
+               "first_11x_crossing_observed_sec_after_30s":min(crossings),
+               "peak_chart_x":round(peak_x,6),
+               "peak_observed_sec_after_30s":peak_at,
+               "post_peak_points_count":len(later),
+               "first_50pct_from_peak_observed_sec_after_30s":drop50,
+               "minutes_from_peak_to_first_50pct_drop":round((drop50-peak_at)/60,4) if drop50 is not None else None,
+               "first_90pct_from_peak_observed_sec_after_30s":drop90,
+               "minutes_from_peak_to_first_90pct_drop":round((drop90-peak_at)/60,4) if drop90 is not None else None,
+               "observed_path_end_sec_after_30s":max(t for t,p in points),
+               "snap15_trades":snap15.get("n_trades"),
+               "snap30_trades":snap30.get("n_trades"),
+               "snap30_buyers":snap30.get("uniq_buyers"),
+               "snap30_net_sol":snap30.get("net_sol"),
+               "snap30_dev_share":snap30.get("dev_share"),
+               "rugged_flag_if_present":outcome.get("rugged"),
+               "not_an_executable_quote":True})
+
         snap60=d.get("snap_60")
         price60=number(snap60.get("price")) if isinstance(snap60,dict) else None
         if not price60 or price60<=0:
@@ -96,6 +132,17 @@ def main():
       "no_wallets":True,"orders":0,"trades":0,
       "warning":"first observed >=11x in a sampled price path is not continuous first trade crossing, not necessarily fillable",
       "purpose":"Sanity-check whether ranking after 30s or 60s still has time to catch late, non-executable 11x chart rise"}
+    stats["11x_observed_peak_has_later_sample"]=known_peak_with_future
+    stats["11x_peak_last_observation_no_future"]=peak_no_later_sample
+    stats["11x_with_observed_half_peak_drop_after_peak"]=len(crash_times_50)
+    stats["11x_with_observed_90pct_peak_drop_after_peak"]=len(crash_times_90)
+    stats["cannot_estimate_crash_after_10min_sparse_window"]=True
+    stats["crash_detection_is_interval_censored_not_exact_tick"]=True
+    stats["winner_mint_list_file"]="all_11x_winners_with_observed_crash_windows.csv"
+    if all_winners:
+        with open(OUT/"all_11x_winners_with_observed_crash_windows.csv","w",newline="",encoding="utf-8") as w:
+            wr=csv.DictWriter(w,fieldnames=list(all_winners[0]))
+            wr.writeheader();wr.writerows(all_winners)
     (OUT/"entry_lag_first_crossing.json").write_text(json.dumps(stats,indent=2))
     (OUT/"token_observed_crossings.json").write_text(json.dumps(derived[:2000],indent=2))
     print("JULY_ENTRY_DELAY_REALITY_CHECK",json.dumps(stats))
