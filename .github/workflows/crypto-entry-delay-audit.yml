@@ -35,5 +35,7 @@ jobs:
         if: always()
         with:
           name: july-crossing-after-30-and-60-seconds
-          path: evidence/july_entry_delay/entry_lag_first_crossing.json
+          path: |
+            evidence/july_entry_delay/entry_lag_first_crossing.json
+            evidence/july_entry_delay/all_11x_winners_with_observed_crash_windows.csv
           if-no-files-found: warn
