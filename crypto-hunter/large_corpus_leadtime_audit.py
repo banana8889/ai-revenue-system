@@ -17,7 +17,8 @@ def main():
         os.replace(str(file)+".part",file)
     assert hashlib.sha256(file.read_bytes()).hexdigest()==SHA
     fields=["mint","detected_at","peak_market_cap_at","initial_market_cap_sol","peak_market_cap_sol",
-            "top10_pct_suspect","is_mayhem_mode","initial_holder_count"]
+            "top10_pct_suspect","is_mayhem_mode","initial_holder_count",
+            "initial_buy_sol","dev_buy_pct_corrected"]
     f=pd.read_parquet(file,columns=fields)
     f["detected_at"]=pd.to_datetime(f.detected_at,utc=True,errors="coerce")
     f["peak_market_cap_at"]=pd.to_datetime(f.peak_market_cap_at,utc=True,errors="coerce")
@@ -29,12 +30,24 @@ def main():
     f["secs"]=dt[usable]
     f["day"]=f.detected_at.dt.strftime("%Y-%m-%d")
     extreme=f[f.peak_x>=11].copy()
+    # COMPLETE named-by-mint census of eligible chart peaks. Dataset does not
+    # contain a trustworthy human-readable name/symbol or after-peak path.
+    # Mint is the unique public identifier; peak is NOT 11x executable profit.
+    cols=["mint","detected_at","peak_market_cap_at","peak_x","secs",
+          "initial_buy_sol","initial_holder_count","dev_buy_pct_corrected",
+          "is_mayhem_mode"]
+    extreme[cols].sort_values(["detected_at","mint"]).to_csv(
+        OUTPUT/"all_11x_chart_mints.csv",index=False)
     buckets=[("0-5 seconds",0,5),("5-15 seconds",5,15),("15-60 seconds",15,60),
              ("1-5 minutes",60,300),("5-60 minutes",300,3600),
              ("1-24 hours",3600,86400.1)]
     hist={k:int(extreme.secs.ge(start).mul(extreme.secs.lt(end)).sum()) for k,start,end in buckets}
     report={
       "source_sha":SHA,"eligible":len(f),"chart_11x_total":len(extreme),
+      "all_11x_chart_mints_csv":"all_11x_chart_mints.csv",
+      "mint_ids_not_verified_symbols":True,
+      "post_peak_price_series_in_this_table":False,
+      "post_peak_crash_latency_known_from_this_table":False,
       "peak_after_1min":int((extreme.secs>=60).sum()),
       "peak_after_5min":int((extreme.secs>=300).sum()),
       "peak_after_1h":int((extreme.secs>=3600).sum()),
