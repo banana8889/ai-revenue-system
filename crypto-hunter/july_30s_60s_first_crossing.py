@@ -109,6 +109,26 @@ def main():
                         if warn_at is not None and warn_at<crash_at:
                             alerts_before_crash[k]=round(crash_at-warn_at,6)
             last_time=max(t for t,p in at_or_after)
+            # Chart-only first-observed exit marks. A delay is NOT a
+            # guaranteed fill at the threshold price. If no later sample
+            # falls in the horizon, the hypothetical exit is unknown.
+            mark120=next(((t,p) for t,p in at_or_after
+                        if first_cross+120<=t<=first_cross+180),None)
+            delayed_marks={}
+            for pct in (20,40,60):
+                for delay in (0,15,30):
+                    warning_time=alerts[str(pct)]
+                    key=str(pct)+'pct_'+str(delay)+'s'
+                    if warning_time is not None and warning_time<=first_cross+120:
+                        sampled=next(((t,p) for t,p in at_or_after
+                           if warning_time+delay<=t<=first_cross+120),None)
+                    else:
+                        sampled=mark120
+                    delayed_marks[key]={
+                        'at':sampled[0] if sampled else None,
+                        'chart_exit_x_vs_30s':round(sampled[1],8) if sampled else None,
+                        'warning_observed':warning_time is not None
+                           and warning_time<=first_cross+120}
             horizon_complete=bool(last_time-first_cross>=EVAL_WINDOW_SECONDS
                                   and len(at_or_after)>=3)
             # Time-window label requires observed crash within 120 seconds.
@@ -137,6 +157,9 @@ def main():
                 'warn60_first_at':alerts['60'],
                 'observed_chart_11x_to_final_x':round(at_or_after[-1][1]/first_eligible_price,8)
                       if first_eligible_price>0 else None,
+                'first_11x_reference_chart_x':round(first_eligible_price,8),
+                'hold_120s_first_observed_chart_x':round(mark120[1],8) if mark120 else None,
+                'exit_replay_chart_quotes_v1':delayed_marks,
                 'first_warn20_exit_x_vs_30s':exits.get('20',{}).get('price_multiple_vs_30s'),
                 'first_warn40_exit_x_vs_30s':exits.get('40',{}).get('price_multiple_vs_30s'),
                 'first_warn60_exit_x_vs_30s':exits.get('60',{}).get('price_multiple_vs_30s'),
@@ -224,6 +247,36 @@ def main():
            'warning_lead_median_seconds':round(statistics.median(lead),4) if lead else None,
            'warning_lead_max_seconds':round(max(lead),4) if lead else None,
            'warning_is_chart_only':True}
+    # Paired policy-versus-hold comparisons, ONLY where both arms have a
+    # post-cross 120-second reference and an observed exit mark.
+    # Selection is after first 11x; this cannot establish profitability of
+    # buying at launch or whether a DEX route existed at observed prices.
+    stop_vs_hold={}
+    for pct in (20,40,60):
+        for delay in (0,15,30):
+            label=str(pct)+'pct_'+str(delay)+'s'
+            pairs=[]
+            for z in replay_records:
+                h=z['hold_120s_first_observed_chart_x']
+                obs=z['exit_replay_chart_quotes_v1'][label]
+                if h is None or obs['chart_exit_x_vs_30s'] is None:
+                    continue
+                if z['first_11x_reference_chart_x']<=0:
+                    continue
+                # BOTH policies use identical 11x-cross reference prices.
+                exit_x=obs['chart_exit_x_vs_30s']/z['first_11x_reference_chart_x']
+                hold_x=h/z['first_11x_reference_chart_x']
+                pairs.append((exit_x,hold_x,obs['warning_observed']))
+            active=[x for x in pairs if x[2]]
+            stop_vs_hold[label]={
+                'paired_mints_with_horizon_quote':len(pairs),
+                'warning_activated_before_120s':len(active),
+                'exit_better_than_hold_mark_n':sum(e>h for e,h,_ in pairs),
+                'exit_worse_than_hold_mark_n':sum(e<h for e,h,_ in pairs),
+                'median_exit_chart_x_since_11x':round(statistics.median(e for e,h,_ in pairs),6) if pairs else None,
+                'median_hold_chart_x_since_11x':round(statistics.median(h for e,h,_ in pairs),6) if pairs else None,
+                'median_paired_exit_minus_hold_x':round(statistics.median(e-h for e,h,_ in pairs),6) if pairs else None,
+                'no_venue_execution_or_fees':True}
     feature_contrasts={}
     for col in ('snap30_trades','snap30_unique_buyers','snap30_net_sol','snap30_dev_share',
                 'cross11_at_sec_after30'):
@@ -243,6 +296,7 @@ def main():
       'unknown_followup_censored':len(replay_records)-len(horizon),
       'warnings_before_crash_by_observed_drawdown':warning_results,
       'snapshot_before_cross_descriptive_groups':feature_contrasts,
+      'paired_delayed_exit_vs_hold_chart_only':stop_vs_hold,
       'no_unseen_holdout_optimization':True,
       'thresholds_selected_before_scoring':True,
       'same_sample_warning_is_not_lead':True,
