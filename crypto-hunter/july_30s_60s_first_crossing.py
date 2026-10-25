@@ -3,7 +3,7 @@
 Unlike peak time, first threshold crossing provides a prospective timing upper
 bound. Sparse chart paths remain UNSUITABLE as proofs of executed gains.
 """
-import gzip,hashlib,json,math,os,urllib.request,collections,csv
+import gzip,hashlib,json,math,os,urllib.request,collections,csv,statistics
 from pathlib import Path
 OUT=Path("evidence/july_entry_delay");OUT.mkdir(parents=True,exist_ok=True)
 URL="https://raw.githubusercontent.com/mivor7/pumpfun-pumpswap-market-data/main/launches/launches_dataset.jsonl.gz"
@@ -39,6 +39,12 @@ def main():
     crash_times_90=[]
     known_peak_with_future=0
     peak_no_later_sample=0
+    replay_records=[]
+    # Precommitted contemporaneous trailing drawdowns. Compute only from
+    # observations known at the time, never the future/global peak.
+    WARN_DRAWDOWNS=(.20,.40,.60)
+    CRASH_DRAWDOWN=.90
+    EVAL_WINDOW_SECONDS=120
     for line in gzip.open(source(),"rt",encoding="utf-8"):
         try:d=json.loads(line)
         except ValueError:
@@ -76,7 +82,69 @@ def main():
             else:peak_no_later_sample+=1
             if drop50 is not None:crash_times_50.append(drop50-peak_at)
             if drop90 is not None:crash_times_90.append(drop90-peak_at)
+            # NEW: prospective-style replay anchored at FIRST observed 11x.
+            # Running high is known at each point; crash means an observed
+            # >=90% drawdown from THAT running high (not final hindsight peak).
+            first_cross=next(t for t,p in points if p>=11)
+            at_or_after=[(t,p) for t,p in points if t>=first_cross]
+            rolling_peak=0.0
+            crash_at=None
+            alerts={str(int(x*100)):None for x in WARN_DRAWDOWNS}
+            alerts_before_crash={str(int(x*100)):None for x in WARN_DRAWDOWNS}
+            first_eligible_price=next(p for t,p in at_or_after if t==first_cross)
+            exits={}
+            for t,p in at_or_after:
+                rolling_peak=max(rolling_peak,p)
+                drawdown=(1-p/rolling_peak) if rolling_peak>0 else 0
+                for dd in WARN_DRAWDOWNS:
+                    k=str(int(dd*100))
+                    if drawdown>=dd and alerts[k] is None:
+                        alerts[k]=t
+                        exits[k]={'at':t,'price_multiple_vs_30s':round(p,8),
+                                  'running_peak_x_at_exit':round(rolling_peak,8)}
+                if drawdown>=CRASH_DRAWDOWN and crash_at is None:
+                    crash_at=t
+                    # Alerts recorded at the same timestamp offer ZERO lead.
+                    for k,warn_at in alerts.items():
+                        if warn_at is not None and warn_at<crash_at:
+                            alerts_before_crash[k]=round(crash_at-warn_at,6)
+            last_time=max(t for t,p in at_or_after)
+            horizon_complete=bool(last_time-first_cross>=EVAL_WINDOW_SECONDS
+                                  and len(at_or_after)>=3)
+            # Time-window label requires observed crash within 120 seconds.
+            # No later sample or an earlier end makes it censored, not safe.
+            if crash_at is not None and crash_at-first_cross<=EVAL_WINDOW_SECONDS:
+                risk_label='crash_90pct_within_120s'
+            elif horizon_complete:
+                risk_label='no_observed_crash_within_120s'
+            else:
+                risk_label='unknown_short_followup'
             snap15=d.get("snap_15") if isinstance(d.get("snap_15"),dict) else {}
+            replay_records.append({
+                'mint':str(d.get('mint')),'created_ts':d.get('created_ts'),
+                'cross11_at_sec_after30':first_cross,
+                'cross11_chart_price_x':round(first_eligible_price,8),
+                'last_observed_sec_after30':last_time,
+                'observed_points_at_or_after_11x':len(at_or_after),
+                'risk_label_120s':risk_label,
+                'crash90_running_peak_at_sec_after30':crash_at,
+                'seconds_first_11x_to_running_peak_crash90':(
+                   round(crash_at-first_cross,6) if crash_at is not None else None),
+                'lead_seconds_before_observed_crash90_warn20':alerts_before_crash['20'],
+                'lead_seconds_before_observed_crash90_warn40':alerts_before_crash['40'],
+                'lead_seconds_before_observed_crash90_warn60':alerts_before_crash['60'],
+                'warn20_first_at':alerts['20'],'warn40_first_at':alerts['40'],
+                'warn60_first_at':alerts['60'],
+                'observed_chart_11x_to_final_x':round(at_or_after[-1][1]/first_eligible_price,8)
+                      if first_eligible_price>0 else None,
+                'first_warn20_exit_x_vs_30s':exits.get('20',{}).get('price_multiple_vs_30s'),
+                'first_warn40_exit_x_vs_30s':exits.get('40',{}).get('price_multiple_vs_30s'),
+                'first_warn60_exit_x_vs_30s':exits.get('60',{}).get('price_multiple_vs_30s'),
+                'snap30_trades':number(snap30.get('n_trades')),
+                'snap30_unique_buyers':number(snap30.get('uniq_buyers')),
+                'snap30_net_sol':number(snap30.get('net_sol')),
+                'snap30_dev_share':number(snap30.get('dev_share')),
+                'no_liquidity_or_fill_verification':True})
             all_winners.append({
                "mint":d.get("mint"),"symbol_if_recorded":d.get("symbol"),
                "created_ts":d.get("created_ts"),
@@ -132,6 +200,61 @@ def main():
       "no_wallets":True,"orders":0,"trades":0,
       "warning":"first observed >=11x in a sampled price path is not continuous first trade crossing, not necessarily fillable",
       "purpose":"Sanity-check whether ranking after 30s or 60s still has time to catch late, non-executable 11x chart rise"}
+    # CRASH-WARNING REALITY CHECK. Never count same-sample detection as
+    # positive warning: if the price gaps >90% there was no prior warning.
+    horizon=[z for z in replay_records if z['risk_label_120s']!='unknown_short_followup']
+    positives=[z for z in horizon if z['risk_label_120s']=='crash_90pct_within_120s']
+    negatives=[z for z in horizon if z['risk_label_120s']=='no_observed_crash_within_120s']
+    warning_results={}
+    for pct in (20,40,60):
+        alertkey='warn'+str(pct)+'_first_at'
+        leadkey='lead_seconds_before_observed_crash90_warn'+str(pct)
+        early=[z for z in positives if z[leadkey] is not None and z[leadkey]>0]
+        on_crash=[z for z in positives if z[alertkey] is not None
+                  and z[leadkey] is None]
+        false=[z for z in negatives if z[alertkey] is not None
+               and z[alertkey]-z['cross11_at_sec_after30']<=EVAL_WINDOW_SECONDS]
+        lead=[z[leadkey] for z in early]
+        warning_results[str(pct)+'pct']={
+           'positives_warned_before_crash':len(early),
+           'positive_crash_cases':len(positives),
+           'detected_only_at_crash_no_lead':len(on_crash),
+           'no_crash_group_false_warnings':len(false),
+           'observed_no_crash_group':len(negatives),
+           'warning_lead_median_seconds':round(statistics.median(lead),4) if lead else None,
+           'warning_lead_max_seconds':round(max(lead),4) if lead else None,
+           'warning_is_chart_only':True}
+    feature_contrasts={}
+    for col in ('snap30_trades','snap30_unique_buyers','snap30_net_sol','snap30_dev_share',
+                'cross11_at_sec_after30'):
+        pos=[z[col] for z in positives if z[col] is not None]
+        neg=[z[col] for z in negatives if z[col] is not None]
+        feature_contrasts[col]={
+            'crash_group_median':round(statistics.median(pos),5) if pos else None,
+            'no_observed_crash_group_median':round(statistics.median(neg),5) if neg else None,
+            'n_crash':len(pos),'n_no_observed_crash':len(neg),
+            'descriptive_only_not_an_ex_ante_classifier':True}
+    crash_report={
+      'scope':'492 earliest observed 11x July launches; sparse 10m chart paths',
+      'asof_source_sha':SHA,'total_cross11_mints':len(replay_records),
+      'at_risk_after_first_11x':len(horizon),
+      'crash90_within_120s_after_first_11x':len(positives),
+      'no_observed_crash_with_120s_followup':len(negatives),
+      'unknown_followup_censored':len(replay_records)-len(horizon),
+      'warnings_before_crash_by_observed_drawdown':warning_results,
+      'snapshot_before_cross_descriptive_groups':feature_contrasts,
+      'no_unseen_holdout_optimization':True,
+      'thresholds_selected_before_scoring':True,
+      'same_sample_warning_is_not_lead':True,
+      'missing_future_is_not_safe':True,
+      'chart_quotes_are_not_trades':True,'trades':0,'orders':0}
+    with open(OUT/"crash_warning_first11x_study.json","w",encoding="utf-8") as w:
+        json.dump(crash_report,w,indent=2,allow_nan=False)
+    if replay_records:
+        with open(OUT/"all_11x_online_drawdown_warning_cases.csv","w",newline="",encoding="utf-8") as w:
+            writer=csv.DictWriter(w,fieldnames=list(replay_records[0]))
+            writer.writeheader();writer.writerows(replay_records)
+    print('JULY_FIRST_11X_CRASH_WARNING_REPLAY',json.dumps(crash_report,allow_nan=False))
     stats["11x_observed_peak_has_later_sample"]=known_peak_with_future
     stats["11x_peak_last_observation_no_future"]=peak_no_later_sample
     stats["11x_with_observed_half_peak_drop_after_peak"]=len(crash_times_50)
