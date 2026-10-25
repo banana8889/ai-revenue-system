@@ -29,6 +29,15 @@ jobs:
           assert q['chart_ge11_from_60s_baseline']==sum(v for k,v in q.items() if k.startswith('first_11x_from60_'))
           assert q['chart_ge11_from_60s_baseline']<=q['future_60s_path_observable']
           assert x['no_outcome_means_censored'] and x['no_quote_or_fill_data'] and x['orders']==x['trades']==0
+          with open('evidence/july_entry_delay/crash_warning_first11x_study.json') as f:crash=json.load(f)
+          assert crash['total_cross11_mints']==q['chart_ge11_from_30s_baseline']
+          assert crash['at_risk_after_first_11x']+crash['unknown_followup_censored']==crash['total_cross11_mints']
+          assert crash['crash90_within_120s_after_first_11x']+crash['no_observed_crash_with_120s_followup']==crash['at_risk_after_first_11x']
+          assert crash['same_sample_warning_is_not_lead'] and crash['chart_quotes_are_not_trades']
+          for warning in crash['warnings_before_crash_by_observed_drawdown'].values():
+              assert warning['positives_warned_before_crash']<=warning['positive_crash_cases']
+              assert warning['no_crash_group_false_warnings']<=warning['observed_no_crash_group']
+          print('CHRONOLOGICAL_FIRST_11X_CRASH_WARNING_NO_LEAKAGE=PASS')
           print('FIRST_CROSSING_EX_ANTE_DELAY_AND_NO_FILL_AUDIT=PASS')
           PY
       - uses: actions/upload-artifact@v4
@@ -38,4 +47,6 @@ jobs:
           path: |
             evidence/july_entry_delay/entry_lag_first_crossing.json
             evidence/july_entry_delay/all_11x_winners_with_observed_crash_windows.csv
+            evidence/july_entry_delay/crash_warning_first11x_study.json
+            evidence/july_entry_delay/all_11x_online_drawdown_warning_cases.csv
           if-no-files-found: warn
