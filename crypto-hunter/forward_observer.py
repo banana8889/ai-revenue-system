@@ -204,6 +204,14 @@ shadow_quote_entries_this_run=0
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
 frozen_policy_decisions_this_run=0
+# Single bounded real-time micro-window to test whether a quoted market
+# can actually be observed on the ~30s historical crash time scale.
+RAPID_QUOTE_WINDOWS_PER_RUN=1
+RAPID_QUOTE_SAMPLES=3
+RAPID_QUOTE_SECONDS_BETWEEN=8
+rapid_quote_windows_this_run=0
+rapid_quote_available_marks_this_run=0
+rapid_quote_warning_events_this_run=0
 MAX_SHADOW_SELL_QUOTES_PER_RUN=12
 # Guarantee some quote capacity for NEW quoteable candidates in the SAME
 # study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
@@ -405,6 +413,53 @@ def probe_size_matched_exit(sh,mint,pool,token_id,reference_quote_at,trigger_tie
     return {'quoted_at':marked,'original_reference_quote_at':reference_quote_at,
             'trigger_tier':trigger_tier,
             'sizes':results,'no_executed_trades':True,'not_net_profits':True}
+
+def rapid_quote_crash_watch(sh,mint,pool,token_id):
+    """~30s live quote sequence after frozen initial $5 two-sided quote.
+
+    Keyless Jupiter router. Bounded to 3 calls and 8s waits. These are
+    sequential *unfilled* quotes and cannot establish continuous exitability.
+    """
+    global rapid_quote_available_marks_this_run,rapid_quote_warning_events_this_run
+    if not sh.get('entry_quote'):return None
+    qty=int(sh['entry_quote'].get('token_raw') or 0)
+    if qty<=0:return None
+    first=num(sh['entry_quote'].get('immediate_roundtrip_multiple'))
+    baseline_at=sh['entry_quote'].get('observed_at')
+    stamps=[{'at':baseline_at,'quoted_x':round(first,8) if first>0 else None,
+             'quote_ok':first>0,'relative_time':'signal','unfilled':True}]
+    peak=first if first>0 else 0
+    warnings=set()
+    for i in range(RAPID_QUOTE_SAMPLES):
+        time.sleep(RAPID_QUOTE_SECONDS_BETWEEN)
+        q=jupiter_quote(mint,USDC,qty)
+        now=d.datetime.now(d.timezone.utc).isoformat()
+        multiple=(q['out_amount']/5000000 if q.get('ok') else None)
+        row={'at':now,'quoted_x':round(multiple,8) if multiple is not None else None,
+             'quote_ok':bool(q.get('ok')),'relative_time':'followup_'+str(i+1),
+             'unfilled':True}
+        if multiple is not None and multiple>0:
+            rapid_quote_available_marks_this_run+=1
+            peak=max(peak,multiple)
+            drawdown=(1-multiple/peak) if peak>0 else 0
+            row['peak_so_far_quote_x']=round(peak,8)
+            row['drawdown_from_observed_peak_pct']=round(100*drawdown,3)
+            for threshold in (20,40,60):
+                if drawdown*100>=threshold and threshold not in warnings:
+                    warnings.add(threshold)
+                    rapid_quote_warning_events_this_run+=1
+                    out({'kind':'rapid_quote_crash_warning','pool':pool,
+                         'token_id':token_id,'at':now,'threshold_pct':threshold,
+                         'quoted_x':round(multiple,8),'not_an_executed_exit':True,
+                         'no_trade':True})
+        stamps.append(row)
+        out({'kind':'rapid_sell_quote_observation_only','pool':pool,
+             'token_id':token_id,**row,'trades':0,'orders':0})
+    return {'version':1,'at':d.datetime.now(d.timezone.utc).isoformat(),
+        'sample_count':RAPID_QUOTE_SAMPLES,'quotes':stamps,
+        'observed_warning_thresholds_pct':sorted(warnings),
+        'not_continuous_or_executable':True,'capital_allocated':0,
+        'trades':0,'orders':0}
 
 def paper_entry_risk_reason(now):
     """Prevent more simulated exposure when previously opened positions cannot be marked."""
@@ -984,6 +1039,17 @@ for cycle in range(CYCLES_PER_RUN):
                                         size_probe['precommitted_arm']=arm
                                         shadow['size_matched_entry_v1']=size_probe
                                         size_matched_entry_by_group_this_run[arm]+=1
+                                # Quote baseline BEFORE choosing live micro-window.
+                                # Production long study only; deterministic 3-cycle
+                                # fixture avoids modifying legacy regression timings.
+                                if (CYCLES_PER_RUN>=9 and cycle<CYCLES_PER_RUN-2
+                                    and rapid_quote_windows_this_run<RAPID_QUOTE_WINDOWS_PER_RUN
+                                    and age<=5 and x['liq']>=10000
+                                    and x['volume_1h']>=20000 and x['buyers_1h']>=100):
+                                    rapid_quote_windows_this_run+=1
+                                    burst=rapid_quote_crash_watch(shadow,
+                                        token_id.removeprefix('solana_'),p,token_id)
+                                    if burst:shadow['rapid_quote_window_v1']=burst
                                 # Only assign a scarce real-time mark slot when
                                 # there is a FOLLOWING cycle left to observe.
                                 # Keep the initial quote time separate from the
@@ -1154,6 +1220,9 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'shadow_buy_and_sell_quote_baselines_total':sum(1 for x in st.values() if x.get('shadow') and x['shadow'].get('entry_quote')),
    'shadow_quote_only_exit_checks_this_run':shadow_quote_marks_this_run,
    'shadow_quote_only_exit_available_this_run':shadow_quote_marks_available_this_run,
+   'rapid_quote_windows_this_run':rapid_quote_windows_this_run,
+   'rapid_quote_available_marks_this_run':rapid_quote_available_marks_this_run,
+   'rapid_quote_warning_events_this_run':rapid_quote_warning_events_this_run,
    'frozen_quote_exit_policy_decisions_this_run':frozen_policy_decisions_this_run,
    'shadow_quote_slots_scheduled':len(shadow_quote_scheduled_this_run),
    'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
@@ -1326,6 +1395,7 @@ for pool,z in st.items():
         'moonshot_split_version':sh.get('moonshot_split_version'),
         'moonshot_split_first_leg_quote_v1':sh.get('moonshot_split_first_leg_quote_v1'),
         'moonshot_split_second_leg_quote_v1':sh.get('moonshot_split_second_leg_quote_v1'),
+        'rapid_quote_window_v1':sh.get('rapid_quote_window_v1'),
         'quote_trace':sh.get('quote_trace',[])[-48:],
         'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
