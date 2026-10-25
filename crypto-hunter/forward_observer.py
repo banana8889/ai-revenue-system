@@ -1452,6 +1452,87 @@ for pool,z in st.items():
         'return_unrealized':True,'orders':0,'trades':0})
     archived.add(pool)
 shadow_ledger=shadow_ledger[-5000:]
+# Quantify first-quote cliff events from *actually observed* intraminute
+# Jupiter sell routes. Historical and new v1 windows both have timestamped
+# quotations; no unobserved intervals are interpolated, no fills assumed.
+# One candidate per pool: active checkpoint takes precedence over archive.
+rapid_records={}
+for old in shadow_ledger:
+    if old.get('rapid_quote_window_v1') and old.get('pool'):
+        rapid_records[old['pool']]=old
+for pool,rec in st.items():
+    sh=rec.get('shadow') or {}
+    if sh.get('rapid_quote_window_v1'):
+        rapid_records[pool]={'pool':pool,'token_id':rec.get('token_id'),
+            'entry_liquidity_usd':sh.get('entry_liquidity_usd'),
+            'initial_age_minutes':sh.get('initial_age_minutes'),
+            'initial_volume_1h_usd':sh.get('initial_volume_1h_usd'),
+            'initial_buyers_1h':sh.get('initial_buyers_1h'),
+            'initial_dex':sh.get('initial_dex'),
+            'rapid_quote_window_v1':sh.get('rapid_quote_window_v1'),
+            'first_liquidity_drop_90pct_v1':sh.get('first_liquidity_drop_90pct_v1'),
+            'first_liquidity_drop_99pct_v1':sh.get('first_liquidity_drop_99pct_v1')}
+rapid_cases=[]
+for pool,z in rapid_records.items():
+    history=(z.get('rapid_quote_window_v1') or {}).get('quotes') or []
+    valid=[]
+    for step in history:
+        v=num(step.get('quoted_x'))
+        at=step.get('at')
+        if step.get('quote_ok') and v>0 and at:
+            valid.append((at,v))
+    first=history[0] if history else {}
+    if not valid:continue
+    baseline_at,baseline_x=valid[0]
+    following=[(at,v) for at,v in valid if at>baseline_at]
+    if not following:continue
+    follow_at,follow_x=following[0]
+    try:gap_s=(d.datetime.fromisoformat(follow_at)-d.datetime.fromisoformat(baseline_at)).total_seconds()
+    except (TypeError,ValueError):continue
+    if gap_s<=0:continue
+    cliff=follow_x<=baseline_x*.1
+    severe=follow_x<=baseline_x*.01
+    liquidity_90=z.get('first_liquidity_drop_90pct_v1')
+    liquidity_99=z.get('first_liquidity_drop_99pct_v1')
+    rapid_cases.append({'pool':pool,'token_id':z.get('token_id'),
+        'entry_liquidity_usd':z.get('entry_liquidity_usd'),
+        'entry_volume_1h_usd':z.get('initial_volume_1h_usd'),
+        'initial_buyers_1h':z.get('initial_buyers_1h'),
+        'initial_age_minutes':z.get('initial_age_minutes'),
+        'initial_dex':z.get('initial_dex'),
+        'signal_quote_x':round(baseline_x,8),
+        'first_followup_quote_x':round(follow_x,8),
+        'first_followup_elapsed_seconds':round(gap_s,3),
+        'first_followup_quote_loss_pct':round(100*(1-follow_x/baseline_x),4),
+        'first_followup_90pct_cliff':cliff,
+        'first_followup_99pct_cliff':severe,
+        'no_prior_warning_between_two_quotes':cliff,
+        'observed_liquidity_drop_90pct_at':liquidity_90.get('at') if liquidity_90 else None,
+        'observed_liquidity_drop_99pct_at':liquidity_99.get('at') if liquidity_99 else None,
+        'observed_later_liquidity_usd':(liquidity_99 or liquidity_90 or {}).get('observed_liquidity_usd'),
+        'not_exact_crash_time':True,'not_executable_profit':True})
+cliffed=[z for z in rapid_cases if z['first_followup_90pct_cliff']]
+rapid_report={
+    'as_of':r['at'],'enrolled_quote_windows_total':len(rapid_records),
+    'with_valid_baseline_and_later_quote':len(rapid_cases),
+    'first_followup_90pct_cliff_count':len(cliffed),
+    'first_followup_99pct_cliff_count':sum(z['first_followup_99pct_cliff'] for z in rapid_cases),
+    'first_followup_90pct_cliff_no_advance_warning_count':len(cliffed),
+    'later_liquidity_90pct_drop_observed_count':sum(bool(z['observed_liquidity_drop_90pct_at']) for z in rapid_cases),
+    'later_liquidity_99pct_drop_observed_count':sum(bool(z['observed_liquidity_drop_99pct_at']) for z in rapid_cases),
+    'median_baseline_to_next_quote_seconds':round(statistics.median(
+        z['first_followup_elapsed_seconds'] for z in rapid_cases),3) if rapid_cases else None,
+    'pre_signal_filter_test_is_exploratory_only':True,
+    'small_convenience_sample_not_base_rate':True,
+    'realized_profit_verified':False,'real_orders':0,'real_trades':0,
+    'no_intrainterval_quote_or_liquidity_assumed':True,
+    'case_count':len(rapid_cases),
+    'cases_most_severe_first':sorted(rapid_cases,
+        key=lambda x:x['first_followup_quote_loss_pct'],reverse=True)[:50]}
+with open('evidence/rapid_quote_crash_risk_study.json','w',encoding='utf-8') as f:
+    json.dump(rapid_report,f,indent=2,allow_nan=False)
+print('RAPID_QUOTE_CRASH_RISK_STUDY',json.dumps({
+    k:v for k,v in rapid_report.items() if k!='cases_most_severe_first'},allow_nan=False))
 # Primary objective research: PRESELECTED FULL 24H tail only. This avoids
 # labeling stopped 90m/early capacity studies as failures. Still a sample of
 # eligible shadow watches, NOT a random sample of all Solana token launches.
