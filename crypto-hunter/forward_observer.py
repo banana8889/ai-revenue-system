@@ -208,7 +208,7 @@ frozen_policy_decisions_this_run=0
 # can actually be observed on the ~30s historical crash time scale.
 RAPID_QUOTE_WINDOWS_PER_RUN=1
 RAPID_QUOTE_SAMPLES=3
-RAPID_QUOTE_SECONDS_BETWEEN=8
+RAPID_QUOTE_SECONDS_BETWEEN=2  # keyless Jupiter also rate-limits itself at 2.3s
 rapid_quote_windows_this_run=0
 rapid_quote_available_marks_this_run=0
 rapid_quote_warning_events_this_run=0
@@ -1072,8 +1072,21 @@ for cycle in range(CYCLES_PER_RUN):
                             if proposal.get('ok'):
                                 shadow['entry_quote']=proposal
                                 shadow_quote_entries_this_run+=1
-                                # Strictly at SIGNAL, before future mark outcomes.
-                                # No large-size retroactive buys for old winners.
+                                # Prioritize the critical first rapid sell
+                                # quotation BEFORE expensive $25/$100 size probes.
+                                # Both are still strictly prospective, no trade.
+                                # Existing deterministic 3-cycle fixtures do not
+                                # activate the 12-cycle-only production burst.
+                                if (CYCLES_PER_RUN>=9 and cycle<CYCLES_PER_RUN-2
+                                    and rapid_quote_windows_this_run<RAPID_QUOTE_WINDOWS_PER_RUN
+                                    and age<=5 and x['liq']>=10000
+                                    and x['volume_1h']>=20000 and x['buyers_1h']>=100):
+                                    rapid_quote_windows_this_run+=1
+                                    burst=rapid_quote_crash_watch(shadow,
+                                        token_id.removeprefix('solana_'),p,token_id)
+                                    if burst:shadow['rapid_quote_window_v1']=burst
+                                # Preserve the existing size-aware research,
+                                # conducted AFTER the latency-sensitive phase.
                                 arm=shadow.get('frozen_prediction_group_v1')
                                 if (arm in size_matched_entry_by_group_this_run
                                         and size_matched_entry_by_group_this_run[arm]<1
@@ -1084,17 +1097,6 @@ for cycle in range(CYCLES_PER_RUN):
                                         size_probe['precommitted_arm']=arm
                                         shadow['size_matched_entry_v1']=size_probe
                                         size_matched_entry_by_group_this_run[arm]+=1
-                                # Quote baseline BEFORE choosing live micro-window.
-                                # Production long study only; deterministic 3-cycle
-                                # fixture avoids modifying legacy regression timings.
-                                if (CYCLES_PER_RUN>=9 and cycle<CYCLES_PER_RUN-2
-                                    and rapid_quote_windows_this_run<RAPID_QUOTE_WINDOWS_PER_RUN
-                                    and age<=5 and x['liq']>=10000
-                                    and x['volume_1h']>=20000 and x['buyers_1h']>=100):
-                                    rapid_quote_windows_this_run+=1
-                                    burst=rapid_quote_crash_watch(shadow,
-                                        token_id.removeprefix('solana_'),p,token_id)
-                                    if burst:shadow['rapid_quote_window_v1']=burst
                                 # Only assign a scarce real-time mark slot when
                                 # there is a FOLLOWING cycle left to observe.
                                 # Keep the initial quote time separate from the
