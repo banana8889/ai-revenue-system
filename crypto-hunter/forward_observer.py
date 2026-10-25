@@ -212,6 +212,7 @@ RAPID_QUOTE_SECONDS_BETWEEN=8
 rapid_quote_windows_this_run=0
 rapid_quote_available_marks_this_run=0
 rapid_quote_warning_events_this_run=0
+rapid_quote_first_sample_90pct_cliffs_this_run=0
 MAX_SHADOW_SELL_QUOTES_PER_RUN=12
 # Guarantee some quote capacity for NEW quoteable candidates in the SAME
 # study (first follow-up is ~65s), not ~13 minutes at the next self-dispatch.
@@ -421,6 +422,7 @@ def rapid_quote_crash_watch(sh,mint,pool,token_id):
     sequential *unfilled* quotes and cannot establish continuous exitability.
     """
     global rapid_quote_available_marks_this_run,rapid_quote_warning_events_this_run
+    global rapid_quote_first_sample_90pct_cliffs_this_run
     if not sh.get('entry_quote'):return None
     qty=int(sh['entry_quote'].get('token_raw') or 0)
     if qty<=0:return None
@@ -430,6 +432,8 @@ def rapid_quote_crash_watch(sh,mint,pool,token_id):
              'quote_ok':first>0,'relative_time':'signal','unfilled':True}]
     peak=first if first>0 else 0
     warnings=set()
+    last_valid=(baseline_at,first) if first>0 and baseline_at else None
+    first_sample_cliff=False
     for i in range(RAPID_QUOTE_SAMPLES):
         time.sleep(RAPID_QUOTE_SECONDS_BETWEEN)
         q=jupiter_quote(mint,USDC,qty)
@@ -440,6 +444,27 @@ def rapid_quote_crash_watch(sh,mint,pool,token_id):
              'unfilled':True}
         if multiple is not None and multiple>0:
             rapid_quote_available_marks_this_run+=1
+            # A jump directly from a normal quote to near-zero is NOT an
+            # actionable 20%/40%/60% warning: all thresholds were skipped.
+            # Record the FIRST actual next-quote interval; do not infer the
+            # exact intrainterval event timestamp or market fill price.
+            if i==0 and last_valid is not None and multiple<=last_valid[1]*0.1:
+                try:
+                    elapsed=(d.datetime.fromisoformat(now)
+                             -d.datetime.fromisoformat(last_valid[0])).total_seconds()
+                except (TypeError,ValueError):
+                    elapsed=None
+                first_sample_cliff=True
+                rapid_quote_first_sample_90pct_cliffs_this_run+=1
+                row['first_observation_cliff_90pct_with_no_prior_warning']=True
+                row['first_observation_elapsed_seconds']=round(elapsed,3) if elapsed is not None else None
+                out({'kind':'rapid_quote_no_advance_warning_gap','pool':pool,
+                     'token_id':token_id,'previous_at':last_valid[0],
+                     'at':now,'prior_quote_x':round(last_valid[1],8),
+                     'now_quote_x':round(multiple,8),
+                     'observed_interval_seconds':row['first_observation_elapsed_seconds'],
+                     'not_exact_crash_time':True,'not_an_executable_exit':True,
+                     'orders':0,'trades':0})
             peak=max(peak,multiple)
             drawdown=(1-multiple/peak) if peak>0 else 0
             row['peak_so_far_quote_x']=round(peak,8)
@@ -450,14 +475,17 @@ def rapid_quote_crash_watch(sh,mint,pool,token_id):
                     rapid_quote_warning_events_this_run+=1
                     out({'kind':'rapid_quote_crash_warning','pool':pool,
                          'token_id':token_id,'at':now,'threshold_pct':threshold,
-                         'quoted_x':round(multiple,8),'not_an_executed_exit':True,
-                         'no_trade':True})
+                         'quoted_x':round(multiple,8),
+                         'first_sample_no_advance_warning':bool(first_sample_cliff and i==0),
+                         'not_an_executed_exit':True,'no_trade':True})
+            last_valid=(now,multiple)
         stamps.append(row)
         out({'kind':'rapid_sell_quote_observation_only','pool':pool,
              'token_id':token_id,**row,'trades':0,'orders':0})
     return {'version':1,'at':d.datetime.now(d.timezone.utc).isoformat(),
         'sample_count':RAPID_QUOTE_SAMPLES,'quotes':stamps,
         'observed_warning_thresholds_pct':sorted(warnings),
+        'first_sample_no_advance_warning_90pct_cliff':first_sample_cliff,
         'not_continuous_or_executable':True,'capital_allocated':0,
         'trades':0,'orders':0}
 
@@ -844,6 +872,23 @@ for cycle in range(CYCLES_PER_RUN):
                      'not_a_quote':True,'not_an_executable_buy':True,'orders':0,'trades':0})
             shadow=s.get('shadow')
             if shadow and not s.get('entry') and not shadow.get('expired'):
+                # Compare liquidity against the actual signal-time snapshot.
+                # Fresh market-data samples are minutes apart, so this is
+                # an upper bound on a drain observation, NOT early notice.
+                initial_liq=num(shadow.get('entry_liquidity_usd'))
+                if initial_liq>0 and x['liq']>=0:
+                    for fraction,label in ((.1,'90'),(.01,'99')):
+                        key='first_liquidity_drop_'+label+'pct_v1'
+                        if x['liq']<=fraction*initial_liq and not shadow.get(key):
+                            mark={'at':t.isoformat(),'initial_liquidity_usd':round(initial_liq,2),
+                                  'observed_liquidity_usd':round(x['liq'],8),
+                                  'elapsed_since_signal_seconds':round(
+                                    (t-d.datetime.fromisoformat(shadow['at'])).total_seconds(),2),
+                                  'not_exact_drain_time_or_trade_exit':True}
+                            shadow[key]=mark
+                            out({'kind':'shadow_liquidity_drain_observed','pool':p,
+                                 'token_id':token_id,'threshold_drop_pct':int(label),
+                                 **mark,'orders':0,'trades':0})
                 dt_from=(t-d.datetime.fromisoformat(shadow['at'])).total_seconds()
                 if dt_from>0 and shadow.get('entry_pool_price',0)>0:
                     gross=v/shadow['entry_pool_price']
@@ -1223,6 +1268,7 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'rapid_quote_windows_this_run':rapid_quote_windows_this_run,
    'rapid_quote_available_marks_this_run':rapid_quote_available_marks_this_run,
    'rapid_quote_warning_events_this_run':rapid_quote_warning_events_this_run,
+   'rapid_quote_first_sample_90pct_cliffs_this_run':rapid_quote_first_sample_90pct_cliffs_this_run,
    'frozen_quote_exit_policy_decisions_this_run':frozen_policy_decisions_this_run,
    'shadow_quote_slots_scheduled':len(shadow_quote_scheduled_this_run),
    'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
@@ -1396,6 +1442,8 @@ for pool,z in st.items():
         'moonshot_split_first_leg_quote_v1':sh.get('moonshot_split_first_leg_quote_v1'),
         'moonshot_split_second_leg_quote_v1':sh.get('moonshot_split_second_leg_quote_v1'),
         'rapid_quote_window_v1':sh.get('rapid_quote_window_v1'),
+        'first_liquidity_drop_90pct_v1':sh.get('first_liquidity_drop_90pct_v1'),
+        'first_liquidity_drop_99pct_v1':sh.get('first_liquidity_drop_99pct_v1'),
         'quote_trace':sh.get('quote_trace',[])[-48:],
         'quote_trace_truncated':bool(sh.get('quote_trace_truncated')),
         'max_later_sell_quote_multiple_unfilled':sh.get('max_exit_quote_multiple'),
