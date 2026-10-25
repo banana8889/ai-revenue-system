@@ -11,6 +11,46 @@ jobs:
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+      - name: Verify quote-gap collapse is NOT an actionable early stop
+        run: |
+          python3 - <<'PY'
+          import ast,datetime as d,types
+          src=open('crypto-hunter/forward_observer.py').read()
+          parsed=ast.parse(src)
+          fn=next(x for x in parsed.body if isinstance(x,ast.FunctionDef)
+                  and x.name=='rapid_quote_crash_watch')
+          module=ast.Module(body=[fn],type_ignores=[])
+          events=[]
+          quotes=iter([7929,7930,7931])
+          scope={'d':d,'num':float,'USDC':'fake_USDC','RAPID_QUOTE_SAMPLES':3,
+                 'RAPID_QUOTE_SECONDS_BETWEEN':0,
+                 'rapid_quote_available_marks_this_run':0,
+                 'rapid_quote_warning_events_this_run':0,
+                 'rapid_quote_first_sample_90pct_cliffs_this_run':0,
+                 'time':types.SimpleNamespace(sleep=lambda _:None),
+                 'jupiter_quote':lambda *args:{'ok':True,'out_amount':next(quotes)},
+                 'out':events.append}
+          exec(compile(module,'rapid_fixture','exec'),scope)
+          sh={'entry_quote':{'observed_at':d.datetime.now(d.timezone.utc).isoformat(),
+                            'immediate_roundtrip_multiple':.9436554,'token_raw':326807788423}}
+          case=scope['rapid_quote_crash_watch'](sh,'FAKE_MINT','FAKE_POOL','solana_FAKE_MINT')
+          assert case['sample_count']==3
+          assert case['first_sample_no_advance_warning_90pct_cliff']
+          assert case['observed_warning_thresholds_pct']==[20,40,60]
+          assert scope['rapid_quote_first_sample_90pct_cliffs_this_run']==1
+          assert scope['rapid_quote_warning_events_this_run']==3
+          gaps=[e for e in events if e['kind']=='rapid_quote_no_advance_warning_gap']
+          assert len(gaps)==1 and gaps[0]['not_an_executable_exit'] and gaps[0]['prior_quote_x']>.9
+          warnings=[e for e in events if e['kind']=='rapid_quote_crash_warning']
+          assert len(warnings)==3 and all(w['first_sample_no_advance_warning'] for w in warnings)
+          assert all(e.get('orders',0)==e.get('trades',0)==0 for e in events)
+          # A small ordinary decline must NOT trigger the cliff classifier.
+          scope['jupiter_quote']=lambda *args:{'ok':True,'out_amount':4400000}
+          case2=scope['rapid_quote_crash_watch'](sh,'SAFE','P2','solana_SAFE')
+          assert not case2['first_sample_no_advance_warning_90pct_cliff']
+          assert scope['rapid_quote_first_sample_90pct_cliffs_this_run']==1
+          print('RAPID_QUOTE_GAP_NO_ADVANCE_WARNING_FIXTURE=PASS')
+          PY
       - name: Simulated API fixtures verify blocked trade never becomes a fake fill
         run: |
           python3 - <<'PY'
