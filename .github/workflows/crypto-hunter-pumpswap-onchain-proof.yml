@@ -24,3 +24,5 @@ jobs:
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-live-proof
       - name: Verify direct Solana WebSocket account subscriptions for both pool vaults
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-ws-live-proof
+      - name: Verify mainnet pool LP mint supply, creator LP holdings and largest LP account
+        run: python3 -u crypto-hunter/forward_observer.py --pumpswap-lp-live-proof
