@@ -17,7 +17,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -593,6 +593,7 @@ def run_embedded_liquidity_sensor():
                         if isinstance(msg.get("result"),int):
                             vault_subscriptions[msg["result"]]=(item,side,mint)
                             stats["vault_ws_subscriptions"]=len(vault_subscriptions)
+                            stats["max_vault_ws_subscriptions"]=max(stats["max_vault_ws_subscriptions"],len(vault_subscriptions))
                         elif msg.get("error"):
                             stats["errors"]+=1
                             emit("subscription_error",id=idx,reason="vault_account_subscribe",
@@ -686,10 +687,12 @@ def run_embedded_liquidity_sensor():
                 if not queue.full():
                     queue.put_nowait(item)
         finally:
-            for pending in urgent_ws_tasks:
-                pending.cancel()
             if urgent_ws_tasks:
-                await asyncio.gather(*urgent_ws_tasks,return_exceptions=True)
+                _,pending=await asyncio.wait(urgent_ws_tasks,timeout=7)
+                for unfinished in pending:
+                    unfinished.cancel()
+                if pending:
+                    await asyncio.gather(*pending,return_exceptions=True)
             task.cancel()
             try:
                 await task
@@ -2971,7 +2974,7 @@ gates={
     'direct_onchain_vault_reserve_tracking_verified':(
         int(sensor_health.get('pump_vault_confirmed') or 0)>0),
     'direct_pumpswap_vault_websocket_subscriptions_verified':(
-        int(sensor_health.get('vault_ws_subscriptions') or 0)>=2),
+        int(sensor_health.get('max_vault_ws_subscriptions') or 0)>=2),
     'other_dex_onchain_vault_coverage_verified':False,
     'real_filled_entry_and_exit_returns_verified':False,
     'secure_wallet_signing_and_send_verified':False}
@@ -2982,7 +2985,7 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
