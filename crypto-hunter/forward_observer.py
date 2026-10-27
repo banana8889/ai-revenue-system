@@ -419,9 +419,25 @@ def run_embedded_liquidity_sensor():
                   "no_future_data_used_to_set_risk":True,
                   "no_real_trade":True,**detail}
         LP_PROSPECTIVE.parent.mkdir(parents=True,exist_ok=True)
-        with LP_PROSPECTIVE.open("a",encoding="utf-8") as f:
-            f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\n")
-        emit("onchain_lp_control_snapshot",**snapshot)
+        if detail.get("available"):
+            first_already_recorded=False
+            try:
+                with LP_PROSPECTIVE.open("r",encoding="utf-8") as previous_evidence:
+                    for oldline in previous_evidence:
+                        try:
+                            prev=json.loads(oldline)
+                        except (TypeError,ValueError):
+                            continue
+                        if prev.get("pool")==item["pool"] and prev.get("available"):
+                            first_already_recorded=True
+                            break
+            except OSError:
+                pass
+            if not first_already_recorded:
+                with LP_PROSPECTIVE.open("a",encoding="utf-8") as f:
+                    f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\n")
+        emit("onchain_lp_control_snapshot",first_verified_baseline_preserved=True,
+             **snapshot)
 
     async def inspect_pumpswap_vaults(item):
         if stats["pump_vault_queries"]>=16:
@@ -3238,5 +3254,69 @@ alert_latency_report={
 with open('evidence/liquidity_alert_latency.json','w',encoding='utf-8') as evidence:
     json.dump(alert_latency_report,evidence,indent=2,allow_nan=False)
 print('LIQUIDITY_ALERT_LATENCY',json.dumps(alert_latency_report,allow_nan=False))
+
+# Frozen before the outcomes: first verifiable LP ownership observation per
+# pool. The current run may then provide a later observed reserve-drain label.
+# Unobserved events, provider gaps and future runs remain censored/unknown.
+lp_ledger={}
+try:
+    with open('evidence/onchain_lp_control_prospective.jsonl',encoding='utf-8') as lpfile:
+        for lp_line in lpfile:
+            try:
+                lp_row=json.loads(lp_line)
+            except (TypeError,ValueError):
+                continue
+            pool=lp_row.get('pool')
+            if not (pool and lp_row.get('available') and
+                    lp_row.get('sample_completed_at')):
+                continue
+            lp_ledger.setdefault(pool,lp_row)
+except OSError:
+    pass
+lp_drain_events=[event for event in events
+                 if event.get('kind') in (
+                     'onchain_vault_joint_drop','onchain_vault_ws_joint_drop')]
+lp_labels=[]
+for pool,baseline in lp_ledger.items():
+    try:
+        frozen_at=d.datetime.fromisoformat(baseline['sample_completed_at'])
+    except (KeyError,TypeError,ValueError):
+        continue
+    matched=[]
+    for ev in lp_drain_events:
+        if ev.get('pool')!=pool:
+            continue
+        try:
+            lag=(d.datetime.fromisoformat(ev['at'])-frozen_at).total_seconds()
+        except (KeyError,TypeError,ValueError):
+            continue
+        if lag>=30:
+            matched.append((lag,ev))
+    if matched:
+        lag,first=min(matched,key=lambda x:x[0])
+        lp_labels.append({'pool':pool,'lp_measured_at':baseline['sample_completed_at'],
+            'risk_at_measurement':baseline.get('structural_risk_tier'),
+            'first_onchain_joint_drain_at':first['at'],
+            'lead_seconds':round(lag,3),
+            'first_drain_event_type':first['kind'],
+            'read_only_event_not_realized_exit':True})
+lp_study={
+    'as_of':now.isoformat(),
+    'method':'Frozen first onchain LP ownership evidence; later same-pool joint vault decrease >=20% on both legs',
+    'first_verified_lp_snapshots':len(lp_ledger),
+    'elevated_structural_risk_at_first_snapshot':sum(
+        z.get('structural_risk_tier')=='elevated' for z in lp_ledger.values()),
+    'incomplete_structural_risk_at_first_snapshot':sum(
+        z.get('structural_risk_tier')=='incomplete' for z in lp_ledger.values()),
+    'subsequent_verified_joint_drain_observed_after_30s':len(lp_labels),
+    'matched_future_drain_evidence':lp_labels[:30],
+    'no_outcome_for_unmatched_cohort_is_censored_not_negative':True,
+    'provider_outages_possible':True,'unseen_events_between_runs_unknown':True,
+    'prediction_quality_or_success_rate_proven':False,
+    'no_executed_trades':True}
+with open('evidence/onchain_lp_early_warning_study.json','w',encoding='utf-8') as resultfile:
+    json.dump(lp_study,resultfile,indent=2,allow_nan=False)
+print('LP_CONTROL_FORWARD_VALIDATION',json.dumps(lp_study,allow_nan=False))
+
 
 
