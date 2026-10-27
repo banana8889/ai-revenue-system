@@ -644,13 +644,22 @@ for cycle in range(CYCLES_PER_RUN):
                  'quote_fetched':False,'no_trade':True,'lane':'unused_fresh_capacity'})
     try:
         data=[]
+        available_discovery_pages=0
         for page in (1,2,3):
             try:
-                data.extend(read(url+str(page)))
+                page_data=read(url+str(page))
+                if page_data:
+                    data.extend(page_data)
+                    available_discovery_pages+=1
             except Exception as ex:
                 out({'kind':'discovery_page_error','at':t.isoformat(),'page':page,'error':str(ex)[:120]})
-                if page==1:raise
             time.sleep(2)
+        if not data:
+            raise RuntimeError('all_new_pool_pages_unavailable')
+        if available_discovery_pages<3:
+            out({'kind':'discovery_partial_coverage','at':t.isoformat(),
+                 'pages_ok':available_discovery_pages,'pages_requested':3,
+                 'missing_discovery_censored':True})
         seen=set()
         data=[p for p in data if p.get('attributes',{}).get('address') and not (p['attributes']['address'] in seen or seen.add(p['attributes']['address']))]
         active=[a for a,x in st.items() if (x.get('entry') and not x.get('exit') and not x.get('quote_study_censored_at')) or (x.get('qualified',0)>0 and not x.get('entry') and (t-x['first']).total_seconds()<1200)]
