@@ -22,3 +22,5 @@ jobs:
           python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'
       - name: Verify published PumpSwap pool and exact two vault balances on mainnet
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-live-proof
+      - name: Verify direct Solana WebSocket account subscriptions for both pool vaults
+        run: python3 -u crypto-hunter/forward_observer.py --pumpswap-ws-live-proof
