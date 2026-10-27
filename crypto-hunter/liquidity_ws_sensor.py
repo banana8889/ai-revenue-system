@@ -86,7 +86,7 @@ def candidates():
         except (KeyError,ValueError,TypeError):
             age=1e9
         risk=latest/initial if latest else 0.
-        priority=(0 if item.get("entry") and not item.get("exit") else 1,risk,age)
+        priority=(0 if item.get("entry") and not item.get("exit") else 1,0 if latest>=10000 else 1,age,-latest)
         selected.append((priority,pool,{"pool":pool,"mint":mint,"qty":qty,"initial":initial,"last":latest,"seen":0.,"last_check":0.,"risk":None}))
     selected.sort(key=lambda item:item[0])
     return [item[2] for item in selected[:MAX_POOLS]]
@@ -114,11 +114,12 @@ async def inspect(item):
     danger=reserve<10000 or entry_drop>=0.5 or fast_drop>=0.25
     warning=danger or fast_drop>=0.10
     level="critical" if danger else "warning" if warning else "normal"
-    if item["risk"]==level and not danger:
+    if item["risk"]==level and (not danger or now-item.get("last_alert",0)<40):
         return
     item["risk"]=level
     if not warning:
         return
+    item["last_alert"]=now
     details={"pool":item["pool"],"mint":item["mint"],"initial_reserve_usd":round(initial,2),"observed_reserve_usd":round(reserve,2),"drop_from_entry_pct":round(entry_drop*100,2),"last_60s_drop_pct":round(fast_drop*100,2),"source":"geckoterminal_after_solana_logs","quote_only":True,"no_executed_sale":True}
     if danger:
         stats["critical"]+=1
