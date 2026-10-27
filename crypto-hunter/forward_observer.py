@@ -2422,12 +2422,19 @@ try:
         sensor_health=json.load(sensor_file)
 except (OSError,ValueError,TypeError):
     sensor_health={}
+try:
+    with open('evidence/observations.jsonl',encoding='utf-8') as observation_file:
+        sample_available=any(row.get('kind')=='sample' and row.get('pool_count',0)>0
+            for line in observation_file if line.strip()
+            for row in (json.loads(line),))
+except (OSError,ValueError,TypeError):
+    sample_available=False
 quoted=historical_backtest['paper_exit_quote_subpopulation']
 quoted_edge=(quoted['later_exit_quote_observed']>=100 and
              quoted['gross_quote_pl_usdc_conditional_on_later_quote']>0 and
              quoted['winners_quote_gt_1x']>quoted['losers_quote_lt_1x'])
 gates={
-    'live_market_samples_available':any(z.get('kind')=='sample' and z.get('pool_count',0)>0 for z in rows),
+    'live_market_samples_available':sample_available,
     'live_ws_subscriptions_observed':int(sensor_health.get('subscriptions') or 0)>0,
     'live_liquidity_checks_observed':int(sensor_health.get('checks') or 0)>0,
     'liquid_buy_and_sell_quotes_fresh':priority_report['recent_liquid_quote_candidates']>0,
