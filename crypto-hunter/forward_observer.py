@@ -368,12 +368,12 @@ def run_embedded_liquidity_sensor():
         snapshot={"pool":item["pool"],"mint":item["mint"],
                   "sample_started_at":observed_at,"sample_completed_at":stamp(),
                   "as_observed_not_at_original_signal":True,
-                  "outcome_not_yet_observed_or_assigned":True,
+                  "future_outcome_not_used_to_set_risk":True,
                   "no_future_data_used_to_set_risk":True,
                   "no_real_trade":True,**detail}
         LP_PROSPECTIVE.parent.mkdir(parents=True,exist_ok=True)
         with LP_PROSPECTIVE.open("a",encoding="utf-8") as f:
-            f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\\n")
+            f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\n")
         emit("onchain_lp_control_snapshot",**snapshot)
 
     async def inspect_pumpswap_vaults(item):
@@ -801,6 +801,23 @@ def run_embedded_liquidity_sensor():
                 pass
 
     async def main():
+        if "--pumpswap-lp-live-proof" in sys.argv:
+            pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
+            mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
+            proof=await asyncio.to_thread(read_pumpswap_vaults,pool,mint)
+            if not proof.get("verified_pumpswap_layout"):
+                raise RuntimeError("pump_pool_layout_not_verified")
+            try:
+                ownership=await asyncio.to_thread(read_lp_control,proof)
+            except Exception as error:
+                ownership={"available":False,"reason":type(error).__name__}
+            print("PUMPSWAP_REAL_LP_CONTROL_PROOF",
+                  json.dumps({"at":stamp(),"pool":pool,"mint":mint,
+                      "read_only":True,"orders":0,"trades":0,**ownership},
+                      allow_nan=False),flush=True)
+            if not ownership.get("available"):
+                raise SystemExit(1)
+            return
         if "--pumpswap-ws-live-proof" in sys.argv:
             pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
             mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
@@ -942,7 +959,8 @@ def run_embedded_liquidity_sensor():
     asyncio.run(main())
 
 if ('--liquidity-sensor' in sys.argv or '--liquidity-selftest' in sys.argv
-        or '--pumpswap-live-proof' in sys.argv or '--pumpswap-ws-live-proof' in sys.argv):
+        or '--pumpswap-live-proof' in sys.argv or '--pumpswap-ws-live-proof' in sys.argv
+        or '--pumpswap-lp-live-proof' in sys.argv):
     run_embedded_liquidity_sensor()
     raise SystemExit(0)
 
