@@ -53,3 +53,7 @@ jobs:
           print('PAPER_ENTRY_RISK_POLICY_TESTS=PASS')
           print('SOURCE_SYNTAX_AND_READ_ONLY_POLICY=PASS')
           PY
+      - name: Embedded live sensor parser and pool identity checks
+        run: |
+          python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'
+          python3 crypto-hunter/forward_observer.py --liquidity-selftest
