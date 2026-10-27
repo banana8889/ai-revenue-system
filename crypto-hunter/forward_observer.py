@@ -9,6 +9,7 @@ def run_embedded_liquidity_sensor():
     EVENTS=Path("evidence/liquidity_ws_events.jsonl")
     HEALTH=Path("evidence/liquidity_ws_health.json")
     LIVE_FEED=Path("evidence/liquidity_live_candidates.jsonl")
+    LP_PROSPECTIVE=Path("evidence/onchain_lp_control_prospective.jsonl")
     WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
     USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
@@ -17,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -30,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -221,10 +222,13 @@ def run_embedded_liquidity_sensor():
             blob=base64.b64decode(data[0],validate=True)
         except (ValueError,TypeError):
             return None
-        if len(blob)<203 or blob[:8]!=PUMP_POOL_DISCRIMINATOR:
+        if len(blob)<211 or blob[:8]!=PUMP_POOL_DISCRIMINATOR:
             return None
         keys={"base_mint":encode_pubkey(blob[43:75]),
               "quote_mint":encode_pubkey(blob[75:107]),
+              "lp_mint":encode_pubkey(blob[107:139]),
+              "pool_creator":encode_pubkey(blob[11:43]),
+              "pool_lp_supply_raw":str(int.from_bytes(blob[203:211],"little")) if len(blob)>=211 else None,
               "base_vault":encode_pubkey(blob[139:171]),
               "quote_vault":encode_pubkey(blob[171:203])}
         if mint not in (keys["base_mint"],keys["quote_mint"]):
@@ -271,10 +275,106 @@ def run_embedded_liquidity_sensor():
                     "reason":"vault_account_mint_or_owner_mismatch"}
         return {"verified_pumpswap_layout":True,
                 "base_mint":layout["base_mint"],"quote_mint":layout["quote_mint"],
+                "lp_mint":layout["lp_mint"],
+                "pool_creator":layout["pool_creator"],
+                "pool_lp_supply_raw":layout["pool_lp_supply_raw"],
                 "base_vault":layout["base_vault"],"quote_vault":layout["quote_vault"],
                 "base_raw":str(amounts[0]),"quote_raw":str(amounts[1]),
                 "slot":(pair or {}).get("context",{}).get("slot"),
                 "raw_token_reserves_not_USD_or_effective_quote":True}
+
+    def lp_control_risk_from_balances(lp_supply_raw,token_supply_raw,
+                                      creator_lp_raw,largest_lp_raw):
+        # Structural susceptibility, not intent. Missing chain data stays unknown.
+        try:
+            pool_supply=int(lp_supply_raw)
+            issued=int(token_supply_raw)
+            creator=int(creator_lp_raw)
+            largest=int(largest_lp_raw)
+        except (TypeError,ValueError):
+            return {"available":False,"reason":"missing_or_invalid_lp_amounts"}
+        if (pool_supply<=0 or issued<0 or creator<0 or largest<0
+                or issued>pool_supply or creator>issued or largest>issued):
+            return {"available":False,"reason":"inconsistent_lp_supply"}
+        outstanding=issued/pool_supply
+        creator_frac=creator/pool_supply
+        largest_frac=largest/pool_supply
+        # A burned LP token is distinct from a liquid token account.
+        # Current mint supply cannot prove ALL LP tokens are time-locked.
+        flags=[]
+        if outstanding>=0.8:
+            flags.append("outstanding_lp_supply_ge_80pct_of_pool_basis")
+        if creator_frac>=0.2:
+            flags.append("creator_direct_lp_balance_ge_20pct")
+        if largest_frac>=0.5:
+            flags.append("largest_account_lp_balance_ge_50pct")
+        return {"available":True,
+                "outstanding_lp_supply_fraction":round(outstanding,6),
+                "creator_direct_lp_fraction":round(creator_frac,6),
+                "largest_token_account_lp_fraction":round(largest_frac,6),
+                "structural_risk_flags":flags,
+                "structural_risk_tier":("elevated" if flags else "unflagged_not_safe"),
+                "not_probability_or_advance_knowledge":True,
+                "creator_related_wallets_not_inferred":True}
+
+    def read_lp_control(proof):
+        lp=proof["lp_mint"]
+        creator=proof["pool_creator"]
+        supply_result=rpc_read("getTokenSupply",[lp,{"commitment":"confirmed"}])
+        value=(supply_result or {}).get("value") or {}
+        mint_supply=value.get("amount")
+        top=rpc_read("getTokenLargestAccounts",[lp,{"commitment":"confirmed"}])
+        top_values=(top or {}).get("value") or []
+        top_amount=max((int(x.get("amount") or 0) for x in top_values
+                        if isinstance(x,dict)),default=0)
+        creator_response=rpc_read("getTokenAccountsByOwner",[
+            creator,{"mint":lp},{"encoding":"jsonParsed","commitment":"confirmed"}])
+        own_accounts=(creator_response or {}).get("value") or []
+        own_amount=0
+        for acct in own_accounts:
+            info=(((acct.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+            if info.get("mint")!=lp or info.get("owner")!=creator:
+                continue
+            own_amount+=int(((info.get("tokenAmount") or {}).get("amount")) or 0)
+        risk=lp_control_risk_from_balances(
+            proof.get("pool_lp_supply_raw"),mint_supply,own_amount,top_amount)
+        return {"lp_mint":lp,"pool_creator":creator,
+                "pool_lp_supply_raw":proof.get("pool_lp_supply_raw"),
+                "current_lp_mint_supply_raw":mint_supply,
+                "creator_direct_lp_raw":str(own_amount),
+                "largest_lp_token_account_raw":str(top_amount),
+                "owner_scope":"direct creator public key only, not related wallets",
+                "two_rpc_supply_and_largest_accounts_slots":(
+                    (supply_result or {}).get("context",{}).get("slot"),
+                    (top or {}).get("context",{}).get("slot")),
+                **risk}
+
+    async def inspect_lp_control(item,proof):
+        if item.get("lp_control_checked") or stats["lp_control_probes"]>=6:
+            return
+        item["lp_control_checked"]=True
+        stats["lp_control_probes"]+=1
+        observed_at=stamp()
+        try:
+            detail=await asyncio.to_thread(read_lp_control,proof)
+        except Exception as error:
+            detail={"available":False,"reason":type(error).__name__}
+        if detail.get("available"):
+            stats["lp_control_confirmed"]+=1
+            if detail.get("structural_risk_flags"):
+                stats["lp_control_high_risk"]+=1
+        else:
+            stats["lp_control_unknown"]+=1
+        snapshot={"pool":item["pool"],"mint":item["mint"],
+                  "sample_started_at":observed_at,"sample_completed_at":stamp(),
+                  "as_observed_not_at_original_signal":True,
+                  "outcome_not_yet_observed_or_assigned":True,
+                  "no_future_data_used_to_set_risk":True,
+                  "no_real_trade":True,**detail}
+        LP_PROSPECTIVE.parent.mkdir(parents=True,exist_ok=True)
+        with LP_PROSPECTIVE.open("a",encoding="utf-8") as f:
+            f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\\n")
+        emit("onchain_lp_control_snapshot",**snapshot)
 
     async def inspect_pumpswap_vaults(item):
         if stats["pump_vault_queries"]>=16:
@@ -301,6 +401,7 @@ def run_embedded_liquidity_sensor():
         previous=item.get("last_vault_raw")
         item["last_vault_raw"]=current
         emit("onchain_pumpswap_vaults",pool=item["pool"],mint=item["mint"],**result)
+        await inspect_lp_control(item,result)
         # A swap normally moves vault balances in opposite directions.
         # Both vaults dropping together warrants an urgent sell quotation.
         if (previous and all(x>0 for x in previous)
@@ -780,6 +881,8 @@ def run_embedded_liquidity_sensor():
                 base_mint)
             assert parsed_pool["base_mint"]==base_mint
             assert parsed_pool["quote_mint"]==quote_mint
+            assert parsed_pool["lp_mint"]==encode_pubkey(bytes([0])*32)
+            assert parsed_pool["pool_lp_supply_raw"]=="0"
             assert parse_pumpswap_pool({"owner":"wrong",
                 "data":[base64.b64encode(fake).decode(),"base64"]},base_mint) is None
             fake[:8]=b"invalid!"
@@ -793,6 +896,9 @@ def run_embedded_liquidity_sensor():
             assert parse_pumpswap_vault_amounts(pair,a,parsed_pool)==[100,200]
             pair["value"][1]["data"]["parsed"]["info"]["owner"]="wrong"
             assert parse_pumpswap_vault_amounts(pair,a,parsed_pool) is None
+            assert lp_control_risk_from_balances(1000,900,250,600)["structural_risk_tier"]=="elevated"
+            assert lp_control_risk_from_balances(1000,200,0,100)["structural_risk_tier"]=="unflagged_not_safe"
+            assert lp_control_risk_from_balances(1000,1200,0,100)["available"] is False
             assert vault_joint_drop((100,200),(79,159)) is True
             assert vault_joint_drop((100,200),(80,160)) is True
             assert vault_joint_drop((100,200),(70,210)) is False
@@ -808,7 +914,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (21 source/pool/mint/PumpSwap/vault-WS checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (24 source/pool/LP-concentration/vault-WS checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -2985,7 +3091,7 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
