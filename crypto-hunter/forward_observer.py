@@ -14,7 +14,7 @@ def run_embedded_liquidity_sensor():
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
     ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -26,7 +26,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -170,15 +170,20 @@ def run_embedded_liquidity_sensor():
         else:
             stats["warnings"]+=1
         emit("liquidity_"+level,**details)
-        if not danger:
-            return
+        if warning:
+            await urgent_quote_only(item,reason="reserve_warning" if not danger else "reserve_critical",details=details)
+
+    async def urgent_quote_only(item,reason,details=None):
+        nonlocal last_quote
         delay=max(0.,2.4-(time.monotonic()-last_quote))
         if delay:
             await asyncio.sleep(delay)
         last_quote=time.monotonic()
         result=await asyncio.to_thread(quote,item["mint"],item["qty"])
         stats["quote_checks"]+=1
-        emit("urgent_sell_quote",**details,**result,amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
+        emit("urgent_sell_quote",pool=item["pool"],mint=item["mint"],
+             trigger=reason,**(details or {}),**result,amount_raw=item["qty"],
+             quote_only=True,requires_wallet_and_confirmed_fill=True)
 
     def feed_candidate(raw):
         pool=raw.get("pool","")
@@ -210,6 +215,8 @@ def run_embedded_liquidity_sensor():
             while True:
                 item=await queue.get()
                 try:
+                    if item.pop("early_lp_hint",False):
+                        await urgent_quote_only(item,reason="unverified_lp_withdrawal_log")
                     await inspect(item)
                 except Exception as error:
                     stats["errors"]+=1
@@ -268,7 +275,19 @@ def run_embedded_liquidity_sensor():
                 if item is None or value.get("err") is not None:
                     continue
                 stats["events"]+=1
-                if time.monotonic()-seen.get(item["pool"],0)<30:
+                logs=value.get("logs") or []
+                lp_hint=any(
+                    isinstance(line,str) and any(op in line.lower() for op in
+                        ("instruction: removeliquidity","instruction: decreaseliquidity",
+                         "instruction: withdrawliquidity","instruction: removeliquidityv2"))
+                    for line in logs)
+                if lp_hint:
+                    # Program instruction text only; NOT proof of reserves withdrawn.
+                    stats["lp_instruction_hints"]+=1
+                    emit("lp_withdrawal_log_hint",pool=item["pool"],mint=item["mint"],
+                         signature=value.get("signature"),verified_reserve_change=False)
+                    item["early_lp_hint"]=True
+                if not lp_hint and time.monotonic()-seen.get(item["pool"],0)<30:
                     continue
                 seen[item["pool"]]=time.monotonic()
                 if not queue.full():
