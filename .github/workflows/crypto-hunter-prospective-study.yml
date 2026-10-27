@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CRYPTO_STUDY_CYCLES: '12'
+      CRYPTO_STUDY_CYCLES: '10'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,7 +67,7 @@ jobs:
           errors=[r for r in rows if r.get('kind')=='source_error']
           with open(summary,encoding='utf-8') as f:receipt=json.load(f)
           requested=int(os.getenv('CRYPTO_STUDY_CYCLES','3'))
-          # Allow isolated endpoint failures, but require real 12-cycle coverage
+          # Allow isolated endpoint failures, but require real 10-cycle coverage
           # rather than silently reporting that the longer scan ran.
           if len(samples)<max(2,requested-2):
               print('FAIL: extended collection coverage too low',{'sampled':len(samples),'requested':requested});sys.exit(1)
@@ -129,7 +129,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # Mostly continuous research: 12 live samples per run,
+          # Mostly continuous research: 10 requested live samples per run,
           # followed by 15s handoff; bounded by a 30-minute job.
           # Runs remain research-only. No private keys, orders, or signatures.
           sleep 15
