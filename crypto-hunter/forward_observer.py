@@ -285,68 +285,115 @@ def run_embedded_liquidity_sensor():
 
     def lp_control_risk_from_balances(lp_supply_raw,token_supply_raw,
                                       creator_lp_raw,largest_lp_raw):
-        # Structural susceptibility, not intent. Missing chain data stays unknown.
+        # Provable bounds only. An unknown owner is NOT zero LP.
         try:
             pool_supply=int(lp_supply_raw)
             issued=int(token_supply_raw)
-            creator=int(creator_lp_raw)
-            largest=int(largest_lp_raw)
         except (TypeError,ValueError):
-            return {"available":False,"reason":"missing_or_invalid_lp_amounts"}
-        if (pool_supply<=0 or issued<0 or creator<0 or largest<0
-                or issued>pool_supply or creator>issued or largest>issued):
+            return {"available":False,"reason":"unknown_total_supply"}
+        if pool_supply<=0 or issued<0 or issued>pool_supply:
             return {"available":False,"reason":"inconsistent_lp_supply"}
+        creator=None
+        largest=None
+        try:
+            if creator_lp_raw is not None:
+                creator=int(creator_lp_raw)
+            if largest_lp_raw is not None:
+                largest=int(largest_lp_raw)
+        except (TypeError,ValueError):
+            return {"available":False,"reason":"malformed_holder_amounts"}
+        if any(v is not None and (v<0 or v>issued) for v in (creator,largest)):
+            return {"available":False,"reason":"holder_exceeds_supply"}
+        if issued==0:
+            # All liquid balances are necessarily zero when mint supply is zero.
+            creator=largest=0
         outstanding=issued/pool_supply
-        creator_frac=creator/pool_supply
-        largest_frac=largest/pool_supply
-        # A burned LP token is distinct from a liquid token account.
-        # Current mint supply cannot prove ALL LP tokens are time-locked.
+        creator_frac=creator/pool_supply if creator is not None else None
+        largest_frac=largest/pool_supply if largest is not None else None
         flags=[]
         if outstanding>=0.8:
             flags.append("outstanding_lp_supply_ge_80pct_of_pool_basis")
-        if creator_frac>=0.2:
+        if creator_frac is not None and creator_frac>=0.2:
             flags.append("creator_direct_lp_balance_ge_20pct")
-        if largest_frac>=0.5:
+        if largest_frac is not None and largest_frac>=0.5:
             flags.append("largest_account_lp_balance_ge_50pct")
-        return {"available":True,
+        return {"available":True,"holder_detail_complete":creator is not None and largest is not None,
                 "outstanding_lp_supply_fraction":round(outstanding,6),
-                "creator_direct_lp_fraction":round(creator_frac,6),
-                "largest_token_account_lp_fraction":round(largest_frac,6),
+                "creator_direct_lp_fraction":round(creator_frac,6) if creator_frac is not None else None,
+                "largest_token_account_lp_fraction":round(largest_frac,6) if largest_frac is not None else None,
                 "structural_risk_flags":flags,
-                "structural_risk_tier":("elevated" if flags else "unflagged_not_safe"),
+                "structural_risk_tier":("elevated" if flags else
+                                        "incomplete" if creator is None or largest is None else
+                                        "unflagged_not_safe"),
+                "mint_supply_upper_bound_on_lp_withdrawal_not_guarantee":True,
                 "not_probability_or_advance_knowledge":True,
                 "creator_related_wallets_not_inferred":True}
 
     def read_lp_control(proof):
         lp=proof["lp_mint"]
         creator=proof["pool_creator"]
-        supply_result=rpc_read("getTokenSupply",[lp,{"commitment":"confirmed"}])
+        endpoint_health={}
+        def query(method,params):
+            try:
+                result=rpc_read(method,params)
+                endpoint_health[method]="ok"
+                return result
+            except urllib.error.HTTPError as error:
+                endpoint_health[method]="HTTP_"+str(error.code)
+                return None
+            except Exception as error:
+                endpoint_health[method]=type(error).__name__
+                return None
+        supply_result=query("getTokenSupply",[lp,{"commitment":"confirmed"}])
         value=(supply_result or {}).get("value") or {}
         mint_supply=value.get("amount")
-        top=rpc_read("getTokenLargestAccounts",[lp,{"commitment":"confirmed"}])
-        top_values=(top or {}).get("value") or []
-        top_amount=max((int(x.get("amount") or 0) for x in top_values
-                        if isinstance(x,dict)),default=0)
-        creator_response=rpc_read("getTokenAccountsByOwner",[
-            creator,{"mint":lp},{"encoding":"jsonParsed","commitment":"confirmed"}])
-        own_accounts=(creator_response or {}).get("value") or []
-        own_amount=0
-        for acct in own_accounts:
-            info=(((acct.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
-            if info.get("mint")!=lp or info.get("owner")!=creator:
-                continue
-            own_amount+=int(((info.get("tokenAmount") or {}).get("amount")) or 0)
+        top_result=None
+        creator_response=None
+        if mint_supply is not None:
+            try:
+                no_supply=int(mint_supply)==0
+            except (ValueError,TypeError):
+                no_supply=False
+            if no_supply:
+                # No outstanding LP means no LP holder account can hold units.
+                top_amount=0
+                own_amount=0
+                endpoint_health["getTokenLargestAccounts"]="deduced_zero_from_mint_supply"
+                endpoint_health["getTokenAccountsByOwner"]="deduced_zero_from_mint_supply"
+            else:
+                top_result=query("getTokenLargestAccounts",[
+                    lp,{"commitment":"confirmed"}])
+                top_values=(top_result or {}).get("value") if top_result else None
+                top_amount=(max((int(x.get("amount") or 0) for x in top_values
+                                if isinstance(x,dict)),default=0)
+                            if isinstance(top_values,list) else None)
+                creator_response=query("getTokenAccountsByOwner",[
+                    creator,{"mint":lp},{"encoding":"jsonParsed","commitment":"confirmed"}])
+                own_accounts=(creator_response or {}).get("value") if creator_response else None
+                own_amount=None
+                if isinstance(own_accounts,list):
+                    own_amount=0
+                    for acct in own_accounts:
+                        info=(((acct.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+                        if info.get("mint")!=lp or info.get("owner")!=creator:
+                            continue
+                        own_amount+=int(((info.get("tokenAmount") or {}).get("amount")) or 0)
+        else:
+            top_amount=None
+            own_amount=None
         risk=lp_control_risk_from_balances(
             proof.get("pool_lp_supply_raw"),mint_supply,own_amount,top_amount)
         return {"lp_mint":lp,"pool_creator":creator,
                 "pool_lp_supply_raw":proof.get("pool_lp_supply_raw"),
                 "current_lp_mint_supply_raw":mint_supply,
-                "creator_direct_lp_raw":str(own_amount),
-                "largest_lp_token_account_raw":str(top_amount),
+                "creator_direct_lp_raw":str(own_amount) if own_amount is not None else None,
+                "largest_lp_token_account_raw":str(top_amount) if top_amount is not None else None,
+                "read_endpoint_health":endpoint_health,
                 "owner_scope":"direct creator public key only, not related wallets",
-                "two_rpc_supply_and_largest_accounts_slots":(
-                    (supply_result or {}).get("context",{}).get("slot"),
-                    (top or {}).get("context",{}).get("slot")),
+                "pool_state_slot":proof.get("slot"),
+                "supply_slot":(supply_result or {}).get("context",{}).get("slot"),
+                "largest_slot":(top_result or {}).get("context",{}).get("slot"),
+                "max_request_budget":3,
                 **risk}
 
     async def inspect_lp_control(item,proof):
@@ -916,6 +963,10 @@ def run_embedded_liquidity_sensor():
             assert lp_control_risk_from_balances(1000,900,250,600)["structural_risk_tier"]=="elevated"
             assert lp_control_risk_from_balances(1000,200,0,100)["structural_risk_tier"]=="unflagged_not_safe"
             assert lp_control_risk_from_balances(1000,1200,0,100)["available"] is False
+            partial=lp_control_risk_from_balances(1000,900,None,None)
+            assert partial["available"] and partial["structural_risk_tier"]=="elevated"
+            assert partial["creator_direct_lp_fraction"] is None
+            assert lp_control_risk_from_balances(1000,None,None,None)["available"] is False
             assert vault_joint_drop((100,200),(79,159)) is True
             assert vault_joint_drop((100,200),(80,160)) is True
             assert vault_joint_drop((100,200),(70,210)) is False
