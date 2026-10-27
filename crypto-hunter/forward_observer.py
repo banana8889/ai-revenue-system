@@ -3164,6 +3164,22 @@ try:
                 continue
 except OSError:
     pass
+# Attach only FIRST verified LP observation for each pool. If no coverage
+# exists, never silently treat it as creator ownership being zero.
+first_lp_control_by_pool={}
+try:
+    with open('evidence/onchain_lp_control_prospective.jsonl',
+              encoding='utf-8') as lp_index_file:
+        for lp_line in lp_index_file:
+            try:
+                lp_row=json.loads(lp_line)
+                key=lp_row.get('pool')
+                if key and lp_row.get('available'):
+                    first_lp_control_by_pool.setdefault(key,lp_row)
+            except (ValueError,TypeError):
+                continue
+except OSError:
+    pass
 for candidate in priority:
     mint=(candidate.get('token_id') or '').removeprefix('solana_')
     audit=mint_audits.get(mint) or {}
@@ -3178,11 +3194,36 @@ for candidate in priority:
     candidate['mint_safety_assessment']='flagged' if authority_risk else (
         'no_listed_authority_flags' if fresh_audit else 'unknown_or_stale')
     candidate['mint_risk_review_passed']=fresh_audit and not authority_risk
+    lp_control=first_lp_control_by_pool.get(candidate['pool']) or {}
+    try:
+        lp_age=(now-d.datetime.fromisoformat(
+            lp_control['sample_completed_at'])).total_seconds()
+    except (KeyError,ValueError,TypeError):
+        lp_age=float('inf')
+    lp_recent=bool(lp_control.get('available') and 0<=lp_age<=2*3600)
+    lp_flags=lp_control.get('structural_risk_flags') if lp_recent else None
+    candidate['lp_control_snapshot_available']=lp_recent
+    candidate['lp_control_snapshot_age_seconds']=round(lp_age,1) if lp_recent else None
+    candidate['lp_outstanding_fraction']=(
+        lp_control.get('outstanding_lp_supply_fraction') if lp_recent else None)
+    candidate['lp_creator_direct_fraction']=(
+        lp_control.get('creator_direct_lp_fraction') if lp_recent else None)
+    candidate['lp_structural_flags']=lp_flags
+    candidate['lp_structural_risk_tier']=(
+        lp_control.get('structural_risk_tier') if lp_recent else 'unknown')
+    # Unflagged LP is not an exhaustive security audit or proof of profit.
+    candidate['risk_review_complete']=bool(
+        lp_recent and lp_control.get('holder_detail_complete')
+        and not lp_flags and fresh_audit and not authority_risk)
     candidate['eligible_for_unattended_capital']=False
 
 priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; never retrospective peak',
     'ranking_not_win_probability':True,'fresh_quote_is_not_a_fill':True,
     'tracked_eligible':len(priority),
+    'lp_control_snapshots_recent':sum(x['lp_control_snapshot_available'] for x in priority),
+    'lp_control_structurally_elevated':sum(x['lp_structural_risk_tier']=='elevated' for x in priority),
+    'lp_control_unknown':sum(x['lp_structural_risk_tier']=='unknown' for x in priority),
+    'risk_review_complete_not_capital_authorized':sum(x['risk_review_complete'] for x in priority),
     'onchain_mint_audits_fresh':sum(x['onchain_mint_audit_available'] for x in priority),
     'onchain_mint_authority_flags':sum(x['onchain_mint_authority_risk'] is True for x in priority),
     'mint_risk_review_pass_count':sum(x['mint_risk_review_passed'] for x in priority),
