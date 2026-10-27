@@ -14,7 +14,7 @@ def run_embedded_liquidity_sensor():
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
     ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -26,7 +26,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -248,6 +248,57 @@ def run_embedded_liquidity_sensor():
             emit("onchain_token_balance_error",pool=item["pool"],
                  reason=type(error).__name__)
 
+    def parse_onchain_mint_risk(account):
+        # Mint authorities indicate control risk, not certainty of a rug.
+        if not isinstance(account,dict):
+            return {"available":False,"reason":"no_account"}
+        data=account.get("data") or {}
+        parsed=data.get("parsed") or {}
+        if parsed.get("type")!="mint":
+            return {"available":False,"reason":"not_parsed_mint"}
+        info=parsed.get("info") or {}
+        if "mintAuthority" not in info and "freezeAuthority" not in info:
+            return {"available":False,"reason":"mint_authorities_not_reported"}
+        extensions=info.get("extensions") or []
+        flags=[x.get("extension") for x in extensions if isinstance(x,dict) and x.get("extension")]
+        risky={"transferFeeConfig","permanentDelegate","transferHook","defaultAccountState",
+               "nonTransferable","confidentialTransferMint","pausableConfig"}
+        special=sorted(set(flags)&risky)
+        return {"available":True,"program_owner":account.get("owner"),
+                "mint_authority_active":bool(info.get("mintAuthority")),
+                "freeze_authority_active":bool(info.get("freezeAuthority")),
+                "risk_extensions":special,
+                "risk_notice":bool(info.get("mintAuthority") or
+                                   info.get("freezeAuthority") or special),
+                "not_a_guarantee_of_safety":True}
+
+    def read_mint_account(mint):
+        url=os.getenv("SOLANA_HTTP_RPC_URL","https://api.mainnet-beta.solana.com")
+        payload=json.dumps({"jsonrpc":"2.0","id":1,"method":"getAccountInfo",
+            "params":[mint,{"encoding":"jsonParsed","commitment":"confirmed"}]}).encode("utf-8")
+        request=urllib.request.Request(url,data=payload,
+            headers={"Accept":"application/json","Content-Type":"application/json",
+                     "User-Agent":"CryptoHunterLiquidityWatch/1.1"})
+        with urllib.request.urlopen(request,timeout=8) as response:
+            body=json.load(response)
+        result=body.get("result") or {}
+        return parse_onchain_mint_risk(result.get("value"))
+
+    async def inspect_onchain_mint_risk(item):
+        if item.get("mint_risk_checked") or stats["mint_risk_checks"]>=8:
+            return
+        item["mint_risk_checked"]=True
+        stats["mint_risk_checks"]+=1
+        try:
+            result=await asyncio.to_thread(read_mint_account,item["mint"])
+            if result.get("risk_notice"):
+                stats["mint_risk_warnings"]+=1
+            emit("onchain_mint_risk",pool=item["pool"],mint=item["mint"],**result)
+        except Exception as error:
+            stats["tx_rpc_errors"]+=1
+            emit("onchain_mint_risk",pool=item["pool"],mint=item["mint"],
+                 available=False,reason=type(error).__name__)
+
     async def urgent_quote_only(item,reason,details=None):
         nonlocal last_quote
         delay=max(0.,2.4-(time.monotonic()-last_quote))
@@ -297,6 +348,7 @@ def run_embedded_liquidity_sensor():
                         await urgent_quote_only(item,reason="unverified_lp_withdrawal_log")
                         await verify_lp_hint_onchain(item,signature)
                     await inspect(item)
+                    await inspect_onchain_mint_risk(item)
                 except Exception as error:
                     stats["errors"]+=1
                     emit("ws_error",reason="event_worker_error",detail=type(error).__name__)
@@ -391,13 +443,18 @@ def run_embedded_liquidity_sensor():
                 "pairAddress":a,"liquidity":{"usd":30000}}]},a) is None
             assert parse_dex_liquidity({"pairs":[{"chainId":"solana",
                 "pairAddress":a,"liquidity":{"usd":0}}]},a)==0
+            assert parse_onchain_mint_risk({"data":{"parsed":{"type":"mint","info":{
+                "mintAuthority":None,"freezeAuthority":None}}}})["risk_notice"] is False
+            assert parse_onchain_mint_risk({"data":{"parsed":{"type":"mint","info":{
+                "mintAuthority":"owner","freezeAuthority":None}}}})["risk_notice"] is True
+            assert parse_onchain_mint_risk(None)["available"] is False
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (8 source/pool/quantity checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (11 source/pool/quantity/mint checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
