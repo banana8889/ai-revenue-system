@@ -3377,5 +3377,49 @@ with open('evidence/onchain_lp_early_warning_study.json','w',encoding='utf-8') a
     json.dump(lp_study,resultfile,indent=2,allow_nan=False)
 print('LP_CONTROL_FORWARD_VALIDATION',json.dumps(lp_study,allow_nan=False))
 
+# Falsifiable order-flow precursor: pre-registered 12%/12% reserve pressure
+# within 120s, recorded at notification time. Only LATER >=30s confirmed
+# two-vault drains may count as lead-time evidence.
+precursor_events=[e for e in events if e.get('kind')=='onchain_preemptive_sell_pressure']
+forward_precursor_matches=[]
+for trigger in precursor_events:
+    try:
+        trigger_at=d.datetime.fromisoformat(trigger['at'])
+    except (TypeError,ValueError,KeyError):
+        continue
+    later=[]
+    for drain in lp_drain_events:
+        if drain.get('pool')!=trigger.get('pool'):
+            continue
+        try:
+            seconds=(d.datetime.fromisoformat(drain['at'])-trigger_at).total_seconds()
+        except (KeyError,TypeError,ValueError):
+            continue
+        if seconds>=30:
+            later.append((seconds,drain))
+    if later:
+        lead,drain=min(later,key=lambda a:a[0])
+        forward_precursor_matches.append({
+            'pool':trigger.get('pool'),
+            'trigger_at':trigger['at'],'drain_at':drain['at'],
+            'lead_seconds':round(lead,3),
+            'trigger_threshold_fixed_before_observation':True,
+            'drain_recorded_by':drain.get('kind'),
+            'not_an_executed_exit':True})
+precursor_report={
+    'as_of':now.isoformat(),
+    'precommitted_definition':'Watched mint reserve grows >=12% and counterasset reserve falls >=12% over <=120 seconds, after >=2 independent account notification slots',
+    'precursor_observations_in_this_run':len(precursor_events),
+    'observed_subsequent_verified_2_vault_drains_at_least_30s_later':len(forward_precursor_matches),
+    'matched_evidence':forward_precursor_matches[:40],
+    'unmatched_outcomes_are_unknown_due_to_incomplete_followup':True,
+    'no_sensitivity_precision_or_profitability_claim':True,
+    'not_all_dexes_covered':True,
+    'no_executed_trades':True}
+with open('evidence/onchain_rug_precursor_forward_test.json','w',encoding='utf-8') as precursorfile:
+    json.dump(precursor_report,precursorfile,indent=2,allow_nan=False)
+print('ONCHAIN_PRE_RUG_FORWARD_TEST',json.dumps(precursor_report,allow_nan=False))
+
+
 
 
