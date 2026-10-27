@@ -8,6 +8,7 @@ def run_embedded_liquidity_sensor():
     STATE=Path("evidence/state.json")
     EVENTS=Path("evidence/liquidity_ws_events.jsonl")
     HEALTH=Path("evidence/liquidity_ws_health.json")
+    LIVE_FEED=Path("evidence/liquidity_live_candidates.jsonl")
     WS_URL=os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com")
     USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
@@ -96,7 +97,8 @@ def run_embedded_liquidity_sensor():
             priority=(0 if item.get("entry") and not item.get("exit") else 1,0 if latest>=10000 else 1,age,-latest)
             selected.append((priority,pool,{"pool":pool,"mint":mint,"qty":qty,"initial":initial,"last":latest,"seen":0.,"last_check":0.,"risk":None}))
         selected.sort(key=lambda item:item[0])
-        return [item[2] for item in selected[:MAX_POOLS]]
+        # Keep capacity for fresh pools discovered during this run.
+        return [item[2] for item in selected[:max(1,MAX_POOLS//2)]]
 
     async def inspect(item):
         nonlocal last_quote,last_liquidity_request,source_cooldown_until
@@ -157,10 +159,30 @@ def run_embedded_liquidity_sensor():
         stats["quote_checks"]+=1
         emit("urgent_sell_quote",**details,**result,amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
 
+    def feed_candidate(raw):
+        pool=raw.get("pool","")
+        mint=raw.get("mint","")
+        try:
+            qty=int(raw.get("qty") or 0)
+        except (ValueError,TypeError):
+            return None
+        if not (isinstance(pool,str) and 32<=len(pool)<=44 and set(pool)<=ALPHABET
+                and isinstance(mint,str) and 32<=len(mint)<=44 and set(mint)<=ALPHABET
+                and qty>0):
+            return None
+        liquidity=number(raw.get("liquidity_usd"))
+        if liquidity<=0:
+            return None
+        return {"pool":pool,"mint":mint,"qty":qty,"initial":liquidity,"last":liquidity,
+                "seen":0.,"last_check":0.,"risk":None}
+
     async def observe(ws,items,deadline):
         queue=asyncio.Queue(maxsize=64)
         subscriptions={}
         seen={}
+        last_feed_scan=0.
+        feed_offset=0
+        subscribed_pools={item["pool"] for item in items}
         for idx,item in enumerate(items,1):
             await ws.send(json.dumps({"jsonrpc":"2.0","id":idx,"method":"logsSubscribe","params":[{"mentions":[item["pool"]]},{"commitment":"confirmed"}]}))
         async def worker():
@@ -177,11 +199,35 @@ def run_embedded_liquidity_sensor():
         last_health=0.
         try:
             while time.monotonic()<deadline:
+                if time.monotonic()-last_feed_scan>=2 and len(items)<MAX_POOLS:
+                    last_feed_scan=time.monotonic()
+                    try:
+                        with LIVE_FEED.open("r",encoding="utf-8") as feed:
+                            feed.seek(feed_offset)
+                            while len(items)<MAX_POOLS:
+                                line=feed.readline()
+                                if not line:
+                                    break
+                                try:
+                                    new=feed_candidate(json.loads(line))
+                                except (ValueError,TypeError):
+                                    continue
+                                if new is None or new["pool"] in subscribed_pools:
+                                    continue
+                                idx=len(items)+1
+                                items.append(new)
+                                subscribed_pools.add(new["pool"])
+                                await ws.send(json.dumps({"jsonrpc":"2.0","id":idx,"method":"logsSubscribe",
+                                    "params":[{"mentions":[new["pool"]]},{"commitment":"confirmed"}]}))
+                                emit("ws_dynamic_candidate",pool=new["pool"],mint=new["mint"],slot=idx)
+                            feed_offset=feed.tell()
+                    except FileNotFoundError:
+                        pass
                 if time.monotonic()-last_health>=60:
                     health(bool(subscriptions))
                     last_health=time.monotonic()
                 try:
-                    msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=15))
+                    msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=3))
                 except asyncio.TimeoutError:
                     continue
                 if msg.get("id") is not None:
@@ -217,9 +263,7 @@ def run_embedded_liquidity_sensor():
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
         if not items:
-            emit("ws_error",reason="no_active_two_sided_quoted_pools_in_checkpoint")
-            health(False)
-            return
+            emit("ws_started_without_previous_pools",awaiting_fresh_candidates=True)
         emit("ws_started",pools=[x["pool"] for x in items],read_only=True,orders=0,trades=0)
         deadline=time.monotonic()+DURATION
         pause=3
@@ -1327,6 +1371,16 @@ for cycle in range(CYCLES_PER_RUN):
                                                            'reason':proposal.get('reason'),'ok':bool(proposal.get('ok'))}
                             if proposal.get('ok'):
                                 shadow['entry_quote']=proposal
+                                # Same-run stream for the embedded WebSocket sensor.
+                                # Quote-only research: no signature and no purchase.
+                                raw_qty=int(proposal.get('token_raw') or 0)
+                                if raw_qty>0:
+                                    with open('evidence/liquidity_live_candidates.jsonl','a',encoding='utf-8') as feed:
+                                        feed.write(json.dumps({'pool':p,
+                                            'mint':token_id.removeprefix('solana_'),
+                                            'qty':raw_qty,'liquidity_usd':x['liq'],
+                                            'signal_at':shadow['at'],
+                                            'no_capital_allocated':True},separators=(',',':'))+'\n')
                                 shadow_quote_entries_this_run+=1
                                 # Prioritize the critical first rapid sell
                                 # quotation BEFORE expensive $25/$100 size probes.
