@@ -72,7 +72,10 @@ def candidates():
         shadow=item.get("shadow") or {}
         entry=shadow.get("entry_quote") or item.get("entry_quote") or {}
         mint=(item.get("token_id") or "").removeprefix("solana_")
-        qty=int(entry.get("token_raw") or 0)
+        try:
+            qty=int(entry.get("token_raw") or 0)
+        except (ValueError,TypeError):
+            continue
         if not (32<=len(pool)<=44 and set(pool)<=ALPHABET and 32<=len(mint)<=44 and set(mint)<=ALPHABET and qty>0):
             continue
         if shadow.get("expired") and not (item.get("entry") and not item.get("exit")):
@@ -85,7 +88,6 @@ def candidates():
             age=(now-dt.datetime.fromisoformat(item["last_liquidity_seen_at"])).total_seconds()
         except (KeyError,ValueError,TypeError):
             age=1e9
-        risk=latest/initial if latest else 0.
         priority=(0 if item.get("entry") and not item.get("exit") else 1,0 if latest>=10000 else 1,age,-latest)
         selected.append((priority,pool,{"pool":pool,"mint":mint,"qty":qty,"initial":initial,"last":latest,"seen":0.,"last_check":0.,"risk":None}))
     selected.sort(key=lambda item:item[0])
@@ -99,7 +101,7 @@ async def inspect(item):
     item["last_check"]=now
     try:
         reserve=await asyncio.to_thread(pool_liquidity,item["pool"])
-    except (OSError,ValueError,TypeError) as error:
+    except Exception as error:
         stats["errors"]+=1
         emit("source_error",pool=item["pool"],source="geckoterminal",error=type(error).__name__)
         return
@@ -114,12 +116,13 @@ async def inspect(item):
     danger=reserve<10000 or entry_drop>=0.5 or fast_drop>=0.25
     warning=danger or fast_drop>=0.10
     level="critical" if danger else "warning" if warning else "normal"
-    if item["risk"]==level and (not danger or now-item.get("last_alert",0)<40):
+    if item["risk"]==level and not (danger and reserve<=item.get("last_alert_reserve",0)*0.75 and now-item.get("last_alert",0)>=15):
         return
     item["risk"]=level
     if not warning:
         return
     item["last_alert"]=now
+    item["last_alert_reserve"]=reserve
     details={"pool":item["pool"],"mint":item["mint"],"initial_reserve_usd":round(initial,2),"observed_reserve_usd":round(reserve,2),"drop_from_entry_pct":round(entry_drop*100,2),"last_60s_drop_pct":round(fast_drop*100,2),"source":"geckoterminal_after_solana_logs","quote_only":True,"no_executed_sale":True}
     if danger:
         stats["critical"]+=1
@@ -147,6 +150,9 @@ async def observe(ws,items,deadline):
             item=await queue.get()
             try:
                 await inspect(item)
+            except Exception as error:
+                stats["errors"]+=1
+                emit("ws_error",reason="event_worker_error",detail=type(error).__name__)
             finally:
                 queue.task_done()
     task=asyncio.create_task(worker())
