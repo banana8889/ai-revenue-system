@@ -1452,6 +1452,14 @@ for cycle in range(CYCLES_PER_RUN):
                     entry_token_ids.add(token_id)
                     s['entry_quote']=preflight
                     s['entry_liquidity_usd']=x['liq']
+                    # Route-qualified signal: attach WS liquidity watch now,
+                    # not after a 10-cycle checkpoint or future workflow.
+                    raw_qty=int(preflight.get('token_raw') or 0)
+                    if raw_qty>0:
+                        with open('evidence/liquidity_live_candidates.jsonl','a',encoding='utf-8') as feed:
+                            feed.write(json.dumps({'pool':p,'mint':mint,'qty':raw_qty,
+                                'liquidity_usd':x['liq'],'signal_at':entry_at.isoformat(),
+                                'no_capital_allocated':True},separators=(',',':'))+'\n')
                     out({'kind':'signal','at':entry_at.isoformat(),'pool':p,'token_id':token_id,'pool_price_at_sample':v,'jupiter_quote_only':preflight,'note':'prospective study, no order/fill; sample price may differ from route quote'})
             elif s['entry'] is not None and not s.get('exit') and not s.get('quote_study_censored_at') and t>s['entry'][0]:
                 if s.get('entry_quote'):
