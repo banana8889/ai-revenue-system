@@ -21,6 +21,7 @@ def run_embedded_liquidity_sensor():
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
+    quote_lock=asyncio.Lock()
 
     def stamp():
         return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -433,17 +434,20 @@ def run_embedded_liquidity_sensor():
 
     async def urgent_quote_only(item,reason,details=None):
         nonlocal last_quote
-        delay=max(0.,2.4-(time.monotonic()-last_quote))
-        if delay:
-            await asyncio.sleep(delay)
-        last_quote=time.monotonic()
-        result=await asyncio.to_thread(quote,item["mint"],item["qty"])
-        stats["quote_checks"]+=1
-        fields=dict(details or {})
-        fields.setdefault("pool",item["pool"])
-        fields.setdefault("mint",item["mint"])
-        emit("urgent_sell_quote",trigger=reason,**fields,**result,
-             amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
+        # Serialize urgent quote requests independently of the slower reserve
+        # worker so WS reserve emergencies cannot starve behind Gecko requests.
+        async with quote_lock:
+            delay=max(0.,2.4-(time.monotonic()-last_quote))
+            if delay:
+                await asyncio.sleep(delay)
+            last_quote=time.monotonic()
+            result=await asyncio.to_thread(quote,item["mint"],item["qty"])
+            stats["quote_checks"]+=1
+            fields=dict(details or {})
+            fields.setdefault("pool",item["pool"])
+            fields.setdefault("mint",item["mint"])
+            emit("urgent_sell_quote",trigger=reason,**fields,**result,
+                 amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
 
     def ws_vault_balance(value,expected_mint,expected_owner):
         parsed=((value or {}).get("data") or {}).get("parsed") or {}
@@ -489,6 +493,7 @@ def run_embedded_liquidity_sensor():
         vault_streamed=set()
         vault_last_pair={}
         vault_pair_updates={}
+        urgent_ws_tasks=set()
         next_vault_id=1000
         old_streamed=False
         last_feed_scan=0.
@@ -536,6 +541,8 @@ def run_embedded_liquidity_sensor():
                     if pool in vault_last_pair:
                         continue
                     vault_last_pair[pool]=(int(proof["base_raw"]),int(proof["quote_raw"]))
+                    if isinstance(proof.get("slot"),int):
+                        item["last_vault_ws_slot"]=proof["slot"]
                     vault_pair_updates[pool]={}
                     for side in ("base","quote"):
                         next_vault_id+=1
@@ -637,8 +644,21 @@ def run_embedded_liquidity_sensor():
                              new_base_raw=str(current[0]),new_quote_raw=str(current[1]),
                              confirmed_vault_accounts=True,read_only=True,
                              no_fill_executed=True)
-                        if not queue.full():
-                            queue.put_nowait(("vault_alarm",item))
+                        if len(urgent_ws_tasks)<3:
+                            async def quote_vault_alarm(watched):
+                                try:
+                                    await urgent_quote_only(
+                                        watched,reason="same_slot_pumpswap_vault_ws_joint_drop")
+                                except Exception as error:
+                                    stats["errors"]+=1
+                                    emit("ws_error",reason="urgent_vault_quote_error",
+                                         detail=type(error).__name__)
+                            task=asyncio.create_task(quote_vault_alarm(item))
+                            urgent_ws_tasks.add(task)
+                            task.add_done_callback(urgent_ws_tasks.discard)
+                        else:
+                            emit("ws_error",reason="urgent_vault_quote_task_capacity_exceeded",
+                                 pool=pool)
                     continue
                 if msg.get("method")!="logsNotification":
                     continue
@@ -666,6 +686,10 @@ def run_embedded_liquidity_sensor():
                 if not queue.full():
                     queue.put_nowait(item)
         finally:
+            for pending in urgent_ws_tasks:
+                pending.cancel()
+            if urgent_ws_tasks:
+                await asyncio.gather(*urgent_ws_tasks,return_exceptions=True)
             task.cancel()
             try:
                 await task
