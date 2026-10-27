@@ -1,7 +1,7 @@
 import sys
 
 def run_embedded_liquidity_sensor():
-    import asyncio,datetime as dt,json,os,time,urllib.error,urllib.parse,urllib.request
+    import asyncio,base64,datetime as dt,json,os,time,urllib.error,urllib.parse,urllib.request
     from pathlib import Path
     import websockets
 
@@ -13,8 +13,11 @@ def run_embedded_liquidity_sensor():
     USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
-    ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0}
+    B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    ALPHABET=set(B58)
+    PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+    PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -26,7 +29,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -181,6 +184,134 @@ def run_embedded_liquidity_sensor():
         emit("liquidity_"+level,**details)
         if warning:
             await urgent_quote_only(item,reason="reserve_warning" if not danger else "reserve_critical",details=details)
+
+    def rpc_read(method,params):
+        endpoint=os.getenv("SOLANA_HTTP_RPC_URL","https://api.mainnet-beta.solana.com")
+        payload=json.dumps({"jsonrpc":"2.0","id":1,"method":method,
+                            "params":params}).encode("utf-8")
+        req=urllib.request.Request(endpoint,data=payload,
+            headers={"Accept":"application/json","Content-Type":"application/json",
+                     "User-Agent":"CryptoHunterLiquidityWatch/1.1"})
+        with urllib.request.urlopen(req,timeout=8) as response:
+            out=json.load(response)
+        if out.get("error"):
+            raise RuntimeError("solana_rpc_error_"+str((out["error"] or {}).get("code")))
+        return out.get("result")
+
+    def encode_pubkey(raw):
+        if not isinstance(raw,(bytes,bytearray)) or len(raw)!=32:
+            raise ValueError("invalid_pubkey_bytes")
+        n=int.from_bytes(raw,"big")
+        digits=""
+        while n:
+            n,r=divmod(n,58)
+            digits=B58[r]+digits
+        return "1"*(32-len(raw.lstrip(b"\\0")))+(digits or "")
+
+    def parse_pumpswap_pool(account,mint):
+        # PumpSwap anchor discriminator and immutable field offsets 8..203.
+        # Reject every unknown owner, discriminator, mint or short layout.
+        if not isinstance(account,dict) or account.get("owner")!=PUMP_PROGRAM:
+            return None
+        data=account.get("data") or []
+        if not (isinstance(data,list) and len(data)==2 and data[1]=="base64"):
+            return None
+        try:
+            blob=base64.b64decode(data[0],validate=True)
+        except (ValueError,TypeError):
+            return None
+        if len(blob)<203 or blob[:8]!=PUMP_POOL_DISCRIMINATOR:
+            return None
+        keys={"base_mint":encode_pubkey(blob[43:75]),
+              "quote_mint":encode_pubkey(blob[75:107]),
+              "base_vault":encode_pubkey(blob[139:171]),
+              "quote_vault":encode_pubkey(blob[171:203])}
+        if mint not in (keys["base_mint"],keys["quote_mint"]):
+            return None
+        return keys
+
+    def parse_pumpswap_vault_amounts(accounts,pool,layout):
+        values=(accounts or {}).get("value") or []
+        if not isinstance(values,list) or len(values)!=2:
+            return None
+        amounts=[]
+        for i,account in enumerate(values):
+            if not isinstance(account,dict):
+                return None
+            parsed=((account.get("data") or {}).get("parsed") or {})
+            info=parsed.get("info") or {}
+            expected=layout["base_mint"] if i==0 else layout["quote_mint"]
+            if (parsed.get("type")!="account" or info.get("mint")!=expected
+                    or info.get("owner")!=pool):
+                return None
+            raw=((info.get("tokenAmount") or {}).get("amount"))
+            try:
+                amount=int(raw)
+            except (TypeError,ValueError):
+                return None
+            if amount<0:
+                return None
+            amounts.append(amount)
+        return amounts
+
+    def read_pumpswap_vaults(pool,mint):
+        account=rpc_read("getAccountInfo",[pool,{"encoding":"base64",
+                                                "commitment":"confirmed"}])
+        layout=parse_pumpswap_pool((account or {}).get("value"),mint)
+        if layout is None:
+            return {"verified_pumpswap_layout":False,
+                    "reason":"not_matching_pumpswap_pool"}
+        pair=rpc_read("getMultipleAccounts",
+            [[layout["base_vault"],layout["quote_vault"]],
+             {"encoding":"jsonParsed","commitment":"confirmed"}])
+        amounts=parse_pumpswap_vault_amounts(pair,pool,layout)
+        if amounts is None:
+            return {"verified_pumpswap_layout":False,
+                    "reason":"vault_account_mint_or_owner_mismatch"}
+        return {"verified_pumpswap_layout":True,
+                "base_mint":layout["base_mint"],"quote_mint":layout["quote_mint"],
+                "base_vault":layout["base_vault"],"quote_vault":layout["quote_vault"],
+                "base_raw":str(amounts[0]),"quote_raw":str(amounts[1]),
+                "slot":(pair or {}).get("context",{}).get("slot"),
+                "raw_token_reserves_not_USD_or_effective_quote":True}
+
+    async def inspect_pumpswap_vaults(item):
+        if stats["pump_vault_queries"]>=16:
+            return
+        if time.monotonic()-item.get("last_vault_probe_at",0)<25:
+            return
+        item["last_vault_probe_at"]=time.monotonic()
+        if item.get("verified_not_pumpswap"):
+            return
+        stats["pump_vault_queries"]+=1
+        try:
+            result=await asyncio.to_thread(read_pumpswap_vaults,item["pool"],item["mint"])
+        except Exception as error:
+            stats["pump_vault_errors"]+=1
+            emit("onchain_pumpswap_vaults",pool=item["pool"],mint=item["mint"],
+                 verified_pumpswap_layout=False,reason=type(error).__name__)
+            return
+        if not result.get("verified_pumpswap_layout"):
+            if result.get("reason")=="not_matching_pumpswap_pool":
+                item["verified_not_pumpswap"]=True
+            return
+        stats["pump_vault_confirmed"]+=1
+        current=(int(result["base_raw"]),int(result["quote_raw"]))
+        previous=item.get("last_vault_raw")
+        item["last_vault_raw"]=current
+        emit("onchain_pumpswap_vaults",pool=item["pool"],mint=item["mint"],**result)
+        # A swap normally moves vault balances in opposite directions.
+        # Both vaults dropping together warrants an urgent sell quotation.
+        if (previous and all(x>0 for x in previous)
+                and current[0]*100<=previous[0]*80
+                and current[1]*100<=previous[1]*80):
+            stats["pump_vault_joint_drops"]+=1
+            emit("onchain_vault_joint_drop",pool=item["pool"],mint=item["mint"],
+                 previous_base_raw=str(previous[0]),current_base_raw=str(current[0]),
+                 previous_quote_raw=str(previous[1]),current_quote_raw=str(current[1]),
+                 verified_pumpswap_accounts=True,
+                 observation_not_proof_of_user_fill=True)
+            await urgent_quote_only(item,reason="confirmed_joint_pumpswap_vault_balance_drop")
 
     def read_onchain_transaction(signature,watch_mint):
         # Read-only onchain transaction metadata, never a swap, order, or
@@ -348,6 +479,7 @@ def run_embedded_liquidity_sensor():
                         await urgent_quote_only(item,reason="unverified_lp_withdrawal_log")
                         await verify_lp_hint_onchain(item,signature)
                     await inspect(item)
+                    await inspect_pumpswap_vaults(item)
                     await inspect_onchain_mint_risk(item)
                 except Exception as error:
                     stats["errors"]+=1
@@ -448,13 +580,37 @@ def run_embedded_liquidity_sensor():
             assert parse_onchain_mint_risk({"data":{"parsed":{"type":"mint","info":{
                 "mintAuthority":"owner","freezeAuthority":None}}}})["risk_notice"] is True
             assert parse_onchain_mint_risk(None)["available"] is False
+            fake=bytearray(245)
+            fake[:8]=PUMP_POOL_DISCRIMINATOR
+            for off,val in ((43,11),(75,12),(139,13),(171,14)):
+                fake[off:off+32]=bytes([val])*32
+            base_mint=encode_pubkey(bytes([11])*32)
+            quote_mint=encode_pubkey(bytes([12])*32)
+            parsed_pool=parse_pumpswap_pool(
+                {"owner":PUMP_PROGRAM,"data":[base64.b64encode(fake).decode(),"base64"]},
+                base_mint)
+            assert parsed_pool["base_mint"]==base_mint
+            assert parsed_pool["quote_mint"]==quote_mint
+            assert parse_pumpswap_pool({"owner":"wrong",
+                "data":[base64.b64encode(fake).decode(),"base64"]},base_mint) is None
+            fake[:8]=b"invalid!"
+            assert parse_pumpswap_pool({"owner":PUMP_PROGRAM,
+                "data":[base64.b64encode(fake).decode(),"base64"]},base_mint) is None
+            fake[:8]=PUMP_POOL_DISCRIMINATOR
+            def mock_vault(mint,amount):
+                return {"data":{"parsed":{"type":"account","info":{
+                    "owner":a,"mint":mint,"tokenAmount":{"amount":str(amount)}}}}}
+            pair={"value":[mock_vault(base_mint,100),mock_vault(quote_mint,200)]}
+            assert parse_pumpswap_vault_amounts(pair,a,parsed_pool)==[100,200]
+            pair["value"][1]["data"]["parsed"]["info"]["owner"]="wrong"
+            assert parse_pumpswap_vault_amounts(pair,a,parsed_pool) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (11 source/pool/quantity/mint checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (16 source/pool/mint/PumpSwap vault checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -2626,7 +2782,7 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
