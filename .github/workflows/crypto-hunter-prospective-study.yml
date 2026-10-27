@@ -38,6 +38,7 @@ jobs:
             evidence/state.json
             evidence/prospective_cohort_ledger.json
             evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
@@ -115,6 +116,7 @@ jobs:
             evidence/state.json
             evidence/prospective_cohort_ledger.json
             evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
           key: crypto-prospective-state-${{ github.run_id }}
       - name: Preserve independent evidence and receipt
         if: always()
