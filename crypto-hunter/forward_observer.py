@@ -206,7 +206,7 @@ def run_embedded_liquidity_sensor():
         while n:
             n,r=divmod(n,58)
             digits=B58[r]+digits
-        return "1"*(32-len(raw.lstrip(b"\\0")))+(digits or "")
+        return "1"*(32-len(raw.lstrip(bytes([0]))))+(digits or "")
 
     def parse_pumpswap_pool(account,mint):
         # PumpSwap anchor discriminator and immutable field offsets 8..203.
@@ -584,6 +584,7 @@ def run_embedded_liquidity_sensor():
             fake[:8]=PUMP_POOL_DISCRIMINATOR
             for off,val in ((43,11),(75,12),(139,13),(171,14)):
                 fake[off:off+32]=bytes([val])*32
+            assert encode_pubkey(bytes(32))=="1"*32
             base_mint=encode_pubkey(bytes([11])*32)
             quote_mint=encode_pubkey(bytes([12])*32)
             parsed_pool=parse_pumpswap_pool(
