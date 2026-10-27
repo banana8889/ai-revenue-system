@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -31,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_preemptive_sell_pressure","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -407,6 +407,7 @@ def run_embedded_liquidity_sensor():
         except Exception as error:
             detail={"available":False,"reason":type(error).__name__}
         if detail.get("available"):
+            item["lp_control_first_observed"]=detail.get("structural_risk_tier")
             stats["lp_control_confirmed"]+=1
             if detail.get("structural_risk_flags"):
                 stats["lp_control_high_risk"]+=1
@@ -625,6 +626,20 @@ def run_embedded_liquidity_sensor():
             return None
         return amount if amount>=0 else None
 
+    def early_sell_pressure(before,now,watched_index):
+        # A net sale of the watched mint INTO the pool grows its reserves
+        # and consumes the counter-asset, independent of base/quote orientation.
+        # 12%/12% is a pre-registered observational alarm, not calibrated odds.
+        if not (isinstance(watched_index,int) and watched_index in (0,1)):
+            return False
+        if not before or len(before)!=2 or len(now)!=2:
+            return False
+        other=1-watched_index
+        return (before[watched_index]>0 and before[other]>0
+                and now[watched_index]*100>=before[watched_index]*112
+                and now[other]*100<=before[other]*88
+                and now[other]>0)
+
     def vault_joint_drop(previous,current):
         return (previous is not None and len(previous)==len(current)==2
                 and all(x>0 for x in previous)
@@ -657,6 +672,7 @@ def run_embedded_liquidity_sensor():
         vault_streamed=set()
         vault_last_pair={}
         vault_pair_updates={}
+        vault_history={}
         urgent_ws_tasks=set()
         next_vault_id=1000
         old_streamed=False
@@ -705,6 +721,10 @@ def run_embedded_liquidity_sensor():
                     if pool in vault_last_pair:
                         continue
                     vault_last_pair[pool]=(int(proof["base_raw"]),int(proof["quote_raw"]))
+                    vault_history[pool]=[(time.monotonic(),vault_last_pair[pool])]
+                    item["watched_vault_index"]=(
+                        0 if item["mint"]==proof["base_mint"] else
+                        1 if item["mint"]==proof["quote_mint"] else None)
                     if isinstance(proof.get("slot"),int):
                         item["last_vault_ws_slot"]=proof["slot"]
                     vault_pair_updates[pool]={}
@@ -801,6 +821,41 @@ def run_embedded_liquidity_sensor():
                         continue
                     item["last_vault_ws_slot"]=slot
                     vault_last_pair[pool]=current
+                    history=vault_history.setdefault(pool,[])
+                    now_s=time.monotonic()
+                    history.append((now_s,current))
+                    history[:]=[(ts,balances) for ts,balances in history
+                                if now_s-ts<=120]
+                    if (len(history)>=3 and not item.get("sell_pressure_alarm_sent")
+                            and early_sell_pressure(history[0][1],current,
+                                                    item.get("watched_vault_index"))):
+                        item["sell_pressure_alarm_sent"]=True
+                        stats["pre_rug_sell_pressure_events"]+=1
+                        first_ts,starting=history[0]
+                        emit("onchain_preemptive_sell_pressure",
+                             pool=pool,mint=item["mint"],slot=slot,
+                             window_seconds=round(now_s-first_ts,3),
+                             watched_vault_index=item["watched_vault_index"],
+                             initial_watched_raw=str(starting[item["watched_vault_index"]]),
+                             current_watched_raw=str(current[item["watched_vault_index"]]),
+                             initial_counter_raw=str(starting[1-item["watched_vault_index"]]),
+                             current_counter_raw=str(current[1-item["watched_vault_index"]]),
+                             observed_lp_structural_tier=item.get("lp_control_first_observed"),
+                             policy="observed12pct_watched_inflow_and_12pct_counter_outflow_in_120s",
+                             hypothetical_early_only_no_guarantee=True,
+                             not_an_executed_trade=True)
+                        if len(urgent_ws_tasks)<3:
+                            async def sell_pressure_quote(watched):
+                                try:
+                                    await urgent_quote_only(
+                                        watched,reason="early_sell_pressure_vault_observation")
+                                except Exception as error:
+                                    stats["errors"]+=1
+                                    emit("ws_error",reason="early_sell_pressure_quote_failed",
+                                         detail=type(error).__name__)
+                            task=asyncio.create_task(sell_pressure_quote(item))
+                            urgent_ws_tasks.add(task)
+                            task.add_done_callback(urgent_ws_tasks.discard)
                     if vault_joint_drop(previous,current):
                         stats["vault_ws_joint_drops"]+=1
                         emit("onchain_vault_ws_joint_drop",pool=pool,mint=item["mint"],
@@ -983,6 +1038,10 @@ def run_embedded_liquidity_sensor():
             assert partial["available"] and partial["structural_risk_tier"]=="elevated"
             assert partial["creator_direct_lp_fraction"] is None
             assert lp_control_risk_from_balances(1000,None,None,None)["available"] is False
+            assert early_sell_pressure((100,200),(114,175),0) is True
+            assert early_sell_pressure((100,200),(85,228),1) is True
+            assert early_sell_pressure((100,200),(114,210),0) is False
+            assert early_sell_pressure((100,200),(114,175),None) is False
             assert vault_joint_drop((100,200),(79,159)) is True
             assert vault_joint_drop((100,200),(80,160)) is True
             assert vault_joint_drop((100,200),(70,210)) is False
@@ -998,7 +1057,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (24 source/pool/LP-concentration/vault-WS checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (28 source/pool/LP-control/forward-pressure checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -3176,7 +3235,7 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown','pre_rug_sell_pressure_events')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
