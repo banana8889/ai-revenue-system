@@ -17,7 +17,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -29,7 +29,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -312,6 +312,7 @@ def run_embedded_liquidity_sensor():
                  verified_pumpswap_accounts=True,
                  observation_not_proof_of_user_fill=True)
             await urgent_quote_only(item,reason="confirmed_joint_pumpswap_vault_balance_drop")
+        return result
 
     def read_onchain_transaction(signature,watch_mint):
         # Read-only onchain transaction metadata, never a swap, order, or
@@ -444,6 +445,23 @@ def run_embedded_liquidity_sensor():
         emit("urgent_sell_quote",trigger=reason,**fields,**result,
              amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
 
+    def ws_vault_balance(value,expected_mint,expected_owner):
+        parsed=((value or {}).get("data") or {}).get("parsed") or {}
+        info=parsed.get("info") or {}
+        if (parsed.get("type")!="account" or info.get("mint")!=expected_mint
+                or info.get("owner")!=expected_owner):
+            return None
+        try:
+            amount=int(((info.get("tokenAmount") or {}).get("amount")))
+        except (TypeError,ValueError):
+            return None
+        return amount if amount>=0 else None
+
+    def vault_joint_drop(previous,current):
+        return (previous is not None and len(previous)==len(current)==2
+                and all(x>0 for x in previous)
+                and all(n>=0 and n*100<=p*80 for p,n in zip(previous,current)))
+
     def feed_candidate(raw):
         pool=raw.get("pool","")
         mint=raw.get("mint","")
@@ -459,27 +477,49 @@ def run_embedded_liquidity_sensor():
         if liquidity<=0:
             return None
         return {"pool":pool,"mint":mint,"qty":qty,"initial":liquidity,"last":liquidity,
-                "seen":0.,"last_check":0.,"risk":None}
+                "seen":0.,"last_check":0.,"risk":None,"fresh":True}
 
     async def observe(ws,items,deadline):
         queue=asyncio.Queue(maxsize=64)
         subscriptions={}
         seen={}
+        vault_pending=asyncio.Queue(maxsize=10)
+        pending_vault_requests={}
+        vault_subscriptions={}
+        vault_streamed=set()
+        vault_last_pair={}
+        vault_pair_updates={}
+        next_vault_id=1000
+        old_streamed=False
         last_feed_scan=0.
         feed_offset=0
         subscribed_pools={item["pool"] for item in items}
         for idx,item in enumerate(items,1):
             await ws.send(json.dumps({"jsonrpc":"2.0","id":idx,"method":"logsSubscribe","params":[{"mentions":[item["pool"]]},{"commitment":"confirmed"}]}))
         async def worker():
+            nonlocal old_streamed
             while True:
-                item=await queue.get()
+                task_entry=await queue.get()
+                is_vault_alarm=isinstance(task_entry,tuple) and task_entry[0]=="vault_alarm"
+                item=task_entry[1] if is_vault_alarm else task_entry
                 try:
+                    if is_vault_alarm:
+                        await urgent_quote_only(item,reason="same_slot_pumpswap_vault_ws_joint_drop")
+                        continue
                     signature=item.pop("early_lp_signature",None)
                     if signature:
                         await urgent_quote_only(item,reason="unverified_lp_withdrawal_log")
                         await verify_lp_hint_onchain(item,signature)
                     await inspect(item)
-                    await inspect_pumpswap_vaults(item)
+                    proof=await inspect_pumpswap_vaults(item)
+                    if (proof and proof.get("verified_pumpswap_layout")
+                            and item["pool"] not in vault_streamed
+                            and (item.get("fresh") or not old_streamed)
+                            and not vault_pending.full()):
+                        if not item.get("fresh"):
+                            old_streamed=True
+                        vault_streamed.add(item["pool"])
+                        vault_pending.put_nowait((item,proof))
                     await inspect_onchain_mint_risk(item)
                 except Exception as error:
                     stats["errors"]+=1
@@ -490,6 +530,24 @@ def run_embedded_liquidity_sensor():
         last_health=0.
         try:
             while time.monotonic()<deadline:
+                while not vault_pending.empty() and len(vault_last_pair)<3:
+                    item,proof=vault_pending.get_nowait()
+                    pool=item["pool"]
+                    if pool in vault_last_pair:
+                        continue
+                    vault_last_pair[pool]=(int(proof["base_raw"]),int(proof["quote_raw"]))
+                    vault_pair_updates[pool]={}
+                    for side in ("base","quote"):
+                        next_vault_id+=1
+                        vault_addr=proof[side+"_vault"]
+                        pending_vault_requests[next_vault_id]=(item,side,proof[side+"_mint"])
+                        await ws.send(json.dumps({"jsonrpc":"2.0","id":next_vault_id,
+                            "method":"accountSubscribe","params":[vault_addr,
+                                {"encoding":"jsonParsed","commitment":"confirmed"}]}))
+                    emit("ws_vault_subscribed",pool=pool,mint=item["mint"],
+                         base_vault=proof["base_vault"],quote_vault=proof["quote_vault"],
+                         rpc_baseline_slot=proof.get("slot"),
+                         active_vault_pairs=len(vault_last_pair))
                 if time.monotonic()-last_feed_scan>=2 and len(items)<MAX_POOLS:
                     last_feed_scan=time.monotonic()
                     try:
@@ -523,6 +581,16 @@ def run_embedded_liquidity_sensor():
                     continue
                 if msg.get("id") is not None:
                     idx=msg.get("id")
+                    if idx in pending_vault_requests:
+                        item,side,mint=pending_vault_requests.pop(idx)
+                        if isinstance(msg.get("result"),int):
+                            vault_subscriptions[msg["result"]]=(item,side,mint)
+                            stats["vault_ws_subscriptions"]=len(vault_subscriptions)
+                        elif msg.get("error"):
+                            stats["errors"]+=1
+                            emit("subscription_error",id=idx,reason="vault_account_subscribe",
+                                 error=str(msg["error"])[:120])
+                        continue
                     if msg.get("result") is not None and isinstance(idx,int) and 1<=idx<=len(items):
                         subscriptions[msg["result"]]=items[idx-1]
                         stats["subscriptions"]=len(subscriptions)
@@ -530,6 +598,47 @@ def run_embedded_liquidity_sensor():
                     elif msg.get("error"):
                         stats["errors"]+=1
                         emit("subscription_error",id=idx,error=str(msg["error"])[:120])
+                    continue
+                if msg.get("method")=="accountNotification":
+                    params=msg.get("params") or {}
+                    match=vault_subscriptions.get(params.get("subscription"))
+                    if match is None:
+                        continue
+                    item,side,mint=match
+                    payload=params.get("result") or {}
+                    slot=(payload.get("context") or {}).get("slot")
+                    if not isinstance(slot,int):
+                        continue
+                    amount=ws_vault_balance(payload.get("value"),mint,item["pool"])
+                    if amount is None:
+                        continue
+                    stats["vault_ws_events"]+=1
+                    pool=item["pool"]
+                    pending=vault_pair_updates.setdefault(pool,{})
+                    if len(pending)>12:
+                        for old in sorted(pending)[:-8]:
+                            del pending[old]
+                    marks=pending.setdefault(slot,{})
+                    marks[side]=amount
+                    if "base" not in marks or "quote" not in marks:
+                        continue
+                    current=(marks["base"],marks["quote"])
+                    previous=vault_last_pair.get(pool)
+                    last_slot=item.get("last_vault_ws_slot",0)
+                    if slot<=last_slot:
+                        continue
+                    item["last_vault_ws_slot"]=slot
+                    vault_last_pair[pool]=current
+                    if vault_joint_drop(previous,current):
+                        stats["vault_ws_joint_drops"]+=1
+                        emit("onchain_vault_ws_joint_drop",pool=pool,mint=item["mint"],
+                             slot=slot,previous_base_raw=str(previous[0]),
+                             previous_quote_raw=str(previous[1]),
+                             new_base_raw=str(current[0]),new_quote_raw=str(current[1]),
+                             confirmed_vault_accounts=True,read_only=True,
+                             no_fill_executed=True)
+                        if not queue.full():
+                            queue.put_nowait(("vault_alarm",item))
                     continue
                 if msg.get("method")!="logsNotification":
                     continue
@@ -620,13 +729,22 @@ def run_embedded_liquidity_sensor():
             assert parse_pumpswap_vault_amounts(pair,a,parsed_pool)==[100,200]
             pair["value"][1]["data"]["parsed"]["info"]["owner"]="wrong"
             assert parse_pumpswap_vault_amounts(pair,a,parsed_pool) is None
+            assert vault_joint_drop((100,200),(79,159)) is True
+            assert vault_joint_drop((100,200),(80,160)) is True
+            assert vault_joint_drop((100,200),(70,210)) is False
+            assert ws_vault_balance({"data":{"parsed":{"type":"account",
+                "info":{"mint":base_mint,"owner":a,
+                        "tokenAmount":{"amount":"42"}}}}},base_mint,a)==42
+            assert ws_vault_balance({"data":{"parsed":{"type":"account",
+                "info":{"mint":base_mint,"owner":"wrong",
+                        "tokenAmount":{"amount":"42"}}}}},base_mint,a) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (16 source/pool/mint/PumpSwap vault checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (21 source/pool/mint/PumpSwap/vault-WS checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -2799,7 +2917,7 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
