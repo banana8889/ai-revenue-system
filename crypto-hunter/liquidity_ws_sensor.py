@@ -12,6 +12,8 @@ DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
 ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0}
 last_quote=0.0
+last_liquidity_request=0.0
+source_cooldown_until=0.0
 
 def stamp():
     return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -94,13 +96,26 @@ def candidates():
     return [item[2] for item in selected[:MAX_POOLS]]
 
 async def inspect(item):
-    global last_quote
+    global last_quote,last_liquidity_request,source_cooldown_until
     now=time.monotonic()
-    if now-item["last_check"]<5:
+    if now-item["last_check"]<45 or now<source_cooldown_until:
         return
+    wait=max(0.,20.-(now-last_liquidity_request))
+    if wait:
+        await asyncio.sleep(wait)
+    now=time.monotonic()
+    if now<source_cooldown_until:
+        return
+    last_liquidity_request=now
     item["last_check"]=now
     try:
         reserve=await asyncio.to_thread(pool_liquidity,item["pool"])
+    except urllib.error.HTTPError as error:
+        stats["errors"]+=1
+        if error.code in (429,500,502,503,504):
+            source_cooldown_until=time.monotonic()+(90 if error.code==429 else 30)
+        emit("source_error",pool=item["pool"],source="geckoterminal",http_status=error.code,cooldown_seconds=round(max(0.,source_cooldown_until-time.monotonic()),2))
+        return
     except Exception as error:
         stats["errors"]+=1
         emit("source_error",pool=item["pool"],source="geckoterminal",error=type(error).__name__)
@@ -183,7 +198,7 @@ async def observe(ws,items,deadline):
             if item is None or value.get("err") is not None:
                 continue
             stats["events"]+=1
-            if time.monotonic()-seen.get(item["pool"],0)<5:
+            if time.monotonic()-seen.get(item["pool"],0)<30:
                 continue
             seen[item["pool"]]=time.monotonic()
             if not queue.full():
