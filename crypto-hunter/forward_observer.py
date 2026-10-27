@@ -150,8 +150,14 @@ def run_embedded_liquidity_sensor():
         previous_seen=item["seen"]
         item["last"]=reserve
         item["seen"]=time.monotonic()
-        initial=item["initial"]
-        entry_drop=max(0.,1-reserve/initial)
+        # Initial checkpoint reserves came from GeckoTerminal. Never compare
+        # DexScreener reserves to that baseline as proof of a liquidity drain.
+        # Establish a per-provider baseline on the first observation.
+        baselines=item.setdefault("provider_baselines",{})
+        if provider not in baselines:
+            baselines[provider]=item["initial"] if provider=="geckoterminal" else reserve
+        initial=baselines[provider]
+        entry_drop=max(0.,1-reserve/initial) if initial>0 else 0.
         fast_drop=max(0.,1-reserve/previous) if previous>0 and previous_seen and item["seen"]-previous_seen<=60 and item.get("last_provider")==provider else 0.
         item["last_provider"]=provider
         danger=reserve<10000 or entry_drop>=0.5 or fast_drop>=0.25
@@ -309,13 +315,17 @@ def run_embedded_liquidity_sensor():
             assert parse_dex_liquidity(mock,a)==12345.67
             assert parse_dex_liquidity(mock,"3"*32) is None
             assert parse_dex_liquidity({"pairs":[]},a) is None
+            assert parse_dex_liquidity({"pairs":[{"chainId":"ethereum",
+                "pairAddress":a,"liquidity":{"usd":30000}}]},a) is None
+            assert parse_dex_liquidity({"pairs":[{"chainId":"solana",
+                "pairAddress":a,"liquidity":{"usd":0}}]},a)==0
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (6 source/pool/quantity checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (8 source/pool/quantity checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
