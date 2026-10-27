@@ -673,6 +673,43 @@ def run_embedded_liquidity_sensor():
                 pass
 
     async def main():
+        if "--pumpswap-ws-live-proof" in sys.argv:
+            pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
+            mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
+            proof=await asyncio.to_thread(read_pumpswap_vaults,pool,mint)
+            if not proof.get("verified_pumpswap_layout"):
+                raise RuntimeError("cannot_validate_pumpswap_for_ws_probe")
+            ack=set()
+            events=0
+            async with websockets.connect(WS_URL,open_timeout=10,
+                                         ping_interval=20,ping_timeout=20) as ws:
+                for i,side in enumerate(("base","quote"),1):
+                    await ws.send(json.dumps({"jsonrpc":"2.0","id":i,
+                        "method":"accountSubscribe","params":[proof[side+"_vault"],
+                            {"encoding":"jsonParsed","commitment":"confirmed"}]}))
+                until=time.monotonic()+25
+                while time.monotonic()<until:
+                    try:
+                        msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=4))
+                    except asyncio.TimeoutError:
+                        if len(ack)==2:
+                            break
+                        continue
+                    if msg.get("id") in (1,2) and isinstance(msg.get("result"),int):
+                        ack.add(msg["id"])
+                    if msg.get("method")=="accountNotification":
+                        events+=1
+                    if len(ack)==2 and events:
+                        break
+            receipt={"at":stamp(),"pool":pool,"subscription_acks":len(ack),
+                     "account_change_events":events,
+                     "both_verified_vault_accounts":bool(proof.get("verified_pumpswap_layout")),
+                     "stream_verified":len(ack)==2,"real_trades":0}
+            print("PUMPSWAP_VAULT_WS_LIVE_PROOF",
+                  json.dumps(receipt,allow_nan=False),flush=True)
+            if len(ack)!=2:
+                raise SystemExit(1)
+            return
         if "--pumpswap-live-proof" in sys.argv:
             pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
             mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
@@ -772,7 +809,7 @@ def run_embedded_liquidity_sensor():
     asyncio.run(main())
 
 if ('--liquidity-sensor' in sys.argv or '--liquidity-selftest' in sys.argv
-        or '--pumpswap-live-proof' in sys.argv):
+        or '--pumpswap-live-proof' in sys.argv or '--pumpswap-ws-live-proof' in sys.argv):
     run_embedded_liquidity_sensor()
     raise SystemExit(0)
 
