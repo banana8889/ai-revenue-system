@@ -2542,9 +2542,45 @@ for pool,item in st.items():
         'not_currently_executable':True,'orders':0,'trades':0})
 priority.sort(key=lambda row:(row['recent_liquid_sell_quote_observed'],
     row['score_heuristic_not_probability']),reverse=True)
+# Merge only THIS RUN'S on-chain authority evidence from the embedded WS
+# worker. Unknown or stale mint authority is not evidence of safety.
+mint_audits={}
+try:
+    with open('evidence/liquidity_ws_events.jsonl',encoding='utf-8') as risk_file:
+        for line in risk_file:
+            try:
+                event=json.loads(line)
+                if event.get('kind')!='onchain_mint_risk':
+                    continue
+                key=event.get('mint')
+                if isinstance(key,str):
+                    mint_audits[key]=event
+            except (ValueError,TypeError):
+                continue
+except OSError:
+    pass
+for candidate in priority:
+    mint=(candidate.get('token_id') or '').removeprefix('solana_')
+    audit=mint_audits.get(mint) or {}
+    try:
+        age_seconds=(now-d.datetime.fromisoformat(audit['at'])).total_seconds()
+    except (ValueError,TypeError,KeyError):
+        age_seconds=float('inf')
+    fresh_audit=bool(audit.get('available') and 0<=age_seconds<=300)
+    authority_risk=bool(audit.get('risk_notice')) if fresh_audit else None
+    candidate['onchain_mint_audit_available']=fresh_audit
+    candidate['onchain_mint_authority_risk']=authority_risk
+    candidate['mint_safety_assessment']='flagged' if authority_risk else (
+        'no_listed_authority_flags' if fresh_audit else 'unknown_or_stale')
+    candidate['mint_risk_review_passed']=fresh_audit and not authority_risk
+    candidate['eligible_for_unattended_capital']=False
+
 priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; never retrospective peak',
     'ranking_not_win_probability':True,'fresh_quote_is_not_a_fill':True,
     'tracked_eligible':len(priority),
+    'onchain_mint_audits_fresh':sum(x['onchain_mint_audit_available'] for x in priority),
+    'onchain_mint_authority_flags':sum(x['onchain_mint_authority_risk'] is True for x in priority),
+    'mint_risk_review_pass_count':sum(x['mint_risk_review_passed'] for x in priority),
     'recent_liquid_quote_candidates':sum(p['recent_liquid_sell_quote_observed'] for p in priority),
     'recent_quote_but_liquidity_failed':sum(p['fresh_sell_quote_within_15m'] and
         p['current_liquidity_risk_reason'] in
