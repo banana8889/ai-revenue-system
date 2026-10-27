@@ -2944,7 +2944,11 @@ gates={
     'live_liquidity_checks_observed':int(sensor_health.get('checks') or 0)>0,
     'liquid_buy_and_sell_quotes_fresh':priority_report['recent_liquid_quote_candidates']>0,
     'positive_quote_edge_on_observed_exits':quoted_edge,
-    'direct_onchain_vault_reserve_tracking_verified':False,
+    'direct_onchain_vault_reserve_tracking_verified':(
+        int(sensor_health.get('pump_vault_confirmed') or 0)>0),
+    'direct_pumpswap_vault_websocket_subscriptions_verified':(
+        int(sensor_health.get('vault_ws_subscriptions') or 0)>=2),
+    'other_dex_onchain_vault_coverage_verified':False,
     'real_filled_entry_and_exit_returns_verified':False,
     'secure_wallet_signing_and_send_verified':False}
 readiness={
@@ -2959,8 +2963,78 @@ readiness={
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
     'real_orders':0,'real_trades':0,
+    'onchain_coverage':'Verified PumpSwap pools only, not all Solana DEX pools',
     'guardrail':'An executable quote is not a fill; authorization and a secret do not imply profitable execution'}
 with open('evidence/live_trade_readiness.json','w',encoding='utf-8') as readiness_file:
     json.dump(readiness,readiness_file,indent=2,allow_nan=False)
 print('CRYPTO_LIVE_READINESS',json.dumps(readiness,allow_nan=False))
+
+# Predeclared operational evidence: latency from first risk observation to
+# the next matching read-only exit quote. It is NOT a filled exit or an
+# estimate of lead time before the unobserved actual reserve withdrawal.
+alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
+             'onchain_vault_joint_drop':'confirmed_joint_pumpswap_vault_balance_drop',
+             'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
+             'liquidity_critical':'reserve_critical',
+             'liquidity_warning':'reserve_warning'}
+events=[]
+try:
+    with open('evidence/liquidity_ws_events.jsonl',encoding='utf-8') as sensor_log:
+        for line in sensor_log:
+            try:
+                event=json.loads(line)
+                if event.get('kind') in (*alert_types.keys(),'urgent_sell_quote'):
+                    events.append(event)
+            except (ValueError,TypeError):
+                continue
+except OSError:
+    pass
+risk_alerts=[x for x in events if x.get('kind') in alert_types]
+risk_quotes=[x for x in events if x.get('kind')=='urgent_sell_quote']
+matching_quotes=[]
+for alert in risk_alerts:
+    try:
+        at=d.datetime.fromisoformat(alert['at'])
+    except (KeyError,TypeError,ValueError):
+        continue
+    possibilities=[]
+    for quote in risk_quotes:
+        if (quote.get('pool')!=alert.get('pool') or
+                quote.get('trigger')!=alert_types[alert['kind']]):
+            continue
+        try:
+            secs=(d.datetime.fromisoformat(quote['at'])-at).total_seconds()
+        except (KeyError,TypeError,ValueError):
+            continue
+        if 0<=secs<=60:
+            possibilities.append((secs,quote))
+    if possibilities:
+        secs,quote=min(possibilities,key=lambda pair:pair[0])
+        matching_quotes.append({'trigger_kind':alert['kind'],
+            'pool':alert.get('pool'),'alert_at':alert['at'],
+            'quote_at':quote['at'],'quote_latency_seconds':round(secs,3),
+            'quote_available':bool(quote.get('available')),
+            'quote_output_usdc':quote.get('usdc'),
+            'not_an_executed_trade':True})
+latencies=[x['quote_latency_seconds'] for x in matching_quotes]
+alert_latency_report={
+    'as_of':now.isoformat(),
+    'observation_window':'current GitHub job only',
+    'sensor_risk_alerts_total':len(risk_alerts),
+    'risk_alerts_by_type':{k:sum(x.get('kind')==k for x in risk_alerts)
+                           for k in alert_types},
+    'matched_readonly_quotes_within_60s':len(matching_quotes),
+    'matched_quotes_with_positive_output':sum(
+        x['quote_available'] and x['quote_output_usdc'] is not None
+        and x['quote_output_usdc']>0 for x in matching_quotes),
+    'median_alert_to_quote_seconds':round(statistics.median(latencies),3)
+        if latencies else None,
+    'paired_evidence':matching_quotes[:50],
+    'wallet_fill_count':0,
+    'lead_time_before_collapse_proven':False,
+    'no_profitability_claim':True}
+with open('evidence/liquidity_alert_latency.json','w',encoding='utf-8') as evidence:
+    json.dump(alert_latency_report,evidence,indent=2,allow_nan=False)
+print('LIQUIDITY_ALERT_LATENCY',json.dumps(alert_latency_report,allow_nan=False))
+
 
