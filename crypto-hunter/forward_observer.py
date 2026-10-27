@@ -14,7 +14,7 @@ def run_embedded_liquidity_sensor():
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
     ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -26,11 +26,14 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
-        row={"at":stamp(),"connected":connected,**stats,"orders":0,"trades":0,"automatic_exit_enabled":False}
+        row={"at":stamp(),"connected":connected,**stats,
+             "ever_subscribed":stats["max_subscriptions"]>0,
+             "ever_received_events":stats["events"]>0,
+             "orders":0,"trades":0,"automatic_exit_enabled":False}
         HEALTH.write_text(json.dumps(row,indent=2),encoding="utf-8")
         emit("ws_heartbeat",**row)
 
@@ -179,6 +182,72 @@ def run_embedded_liquidity_sensor():
         if warning:
             await urgent_quote_only(item,reason="reserve_warning" if not danger else "reserve_critical",details=details)
 
+    def read_onchain_transaction(signature,watch_mint):
+        # Read-only onchain transaction metadata, never a swap, order, or
+        # implied proof that the changed token account is a pool vault.
+        body=json.dumps({"jsonrpc":"2.0","id":1,"method":"getTransaction",
+            "params":[signature,{"encoding":"jsonParsed","commitment":"confirmed",
+                                  "maxSupportedTransactionVersion":0}]}).encode("utf-8")
+        url=os.getenv("SOLANA_HTTP_RPC_URL","https://api.mainnet-beta.solana.com")
+        req=urllib.request.Request(url,data=body,
+            headers={"Accept":"application/json","Content-Type":"application/json",
+                     "User-Agent":"CryptoHunterLiquidityWatch/1.1"})
+        with urllib.request.urlopen(req,timeout=8) as r:
+            response=json.load(r)
+        tx=response.get("result")
+        if not isinstance(tx,dict) or not isinstance(tx.get("meta"),dict):
+            return {"available":False,"reason":"transaction_unavailable_or_unconfirmed"}
+        meta=tx["meta"]
+        pre={(x.get("accountIndex"),x.get("mint")):x
+             for x in meta.get("preTokenBalances") or []
+             if isinstance(x,dict)}
+        post={(x.get("accountIndex"),x.get("mint")):x
+              for x in meta.get("postTokenBalances") or []
+              if isinstance(x,dict)}
+        keys=((tx.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+        changes=[]
+        for key in pre.keys()|post.keys():
+            if key[1]!=watch_mint:
+                continue
+            before=pre.get(key) or {}
+            after=post.get(key) or {}
+            try:
+                a=int(((before.get("uiTokenAmount") or {}).get("amount")) or 0)
+                b=int(((after.get("uiTokenAmount") or {}).get("amount")) or 0)
+            except (ValueError,TypeError):
+                continue
+            if a==b:
+                continue
+            idx=key[0]
+            account_key=keys[idx] if isinstance(idx,int) and 0<=idx<len(keys) else None
+            account=(account_key.get("pubkey") if isinstance(account_key,dict) else
+                     account_key if isinstance(account_key,str) else None)
+            changes.append({"token_account":account,"mint":watch_mint,
+                            "raw_delta":str(b-a),
+                            "owner_before":before.get("owner"),
+                            "owner_after":after.get("owner")})
+        return {"available":True,"slot":tx.get("slot"),
+                "matched_token_accounts_changed":len(changes),
+                "changes":changes[:12],
+                "not_validated_pool_vaults":True,
+                "tx_successful":meta.get("err") is None}
+
+    async def verify_lp_hint_onchain(item,signature):
+        if not isinstance(signature,str) or not (70<=len(signature)<=100 and set(signature)<=ALPHABET):
+            return
+        if stats["tx_rpc_checks"]>=10:
+            return
+        stats["tx_rpc_checks"]+=1
+        try:
+            result=await asyncio.to_thread(read_onchain_transaction,signature,item["mint"])
+            stats["onchain_token_balance_changes"]+=result.get("matched_token_accounts_changed",0)
+            emit("onchain_token_balance_evidence",pool=item["pool"],mint=item["mint"],
+                 signature=signature,**result)
+        except Exception as error:
+            stats["tx_rpc_errors"]+=1
+            emit("onchain_token_balance_error",pool=item["pool"],
+                 reason=type(error).__name__)
+
     async def urgent_quote_only(item,reason,details=None):
         nonlocal last_quote
         delay=max(0.,2.4-(time.monotonic()-last_quote))
@@ -223,8 +292,10 @@ def run_embedded_liquidity_sensor():
             while True:
                 item=await queue.get()
                 try:
-                    if item.pop("early_lp_hint",False):
+                    signature=item.pop("early_lp_signature",None)
+                    if signature:
                         await urgent_quote_only(item,reason="unverified_lp_withdrawal_log")
+                        await verify_lp_hint_onchain(item,signature)
                     await inspect(item)
                 except Exception as error:
                     stats["errors"]+=1
@@ -271,6 +342,7 @@ def run_embedded_liquidity_sensor():
                     if msg.get("result") is not None and isinstance(idx,int) and 1<=idx<=len(items):
                         subscriptions[msg["result"]]=items[idx-1]
                         stats["subscriptions"]=len(subscriptions)
+                        stats["max_subscriptions"]=max(stats["max_subscriptions"],len(subscriptions))
                     elif msg.get("error"):
                         stats["errors"]+=1
                         emit("subscription_error",id=idx,error=str(msg["error"])[:120])
@@ -294,7 +366,7 @@ def run_embedded_liquidity_sensor():
                     stats["lp_instruction_hints"]+=1
                     emit("lp_withdrawal_log_hint",pool=item["pool"],mint=item["mint"],
                          signature=value.get("signature"),verified_reserve_change=False)
-                    item["early_lp_hint"]=True
+                    item["early_lp_signature"]=value.get("signature")
                 if not lp_hint and time.monotonic()-seen.get(item["pool"],0)<30:
                     continue
                 seen[item["pool"]]=time.monotonic()
@@ -2445,7 +2517,9 @@ quoted_edge=(quoted['later_exit_quote_observed']>=100 and
              quoted['winners_quote_gt_1x']>quoted['losers_quote_lt_1x'])
 gates={
     'live_market_samples_available':sample_available,
-    'live_ws_subscriptions_observed':int(sensor_health.get('subscriptions') or 0)>0,
+    'live_ws_subscriptions_observed':(
+        int(sensor_health.get('max_subscriptions') or 0)>0 and
+        int(sensor_health.get('events') or 0)>0),
     'live_liquidity_checks_observed':int(sensor_health.get('checks') or 0)>0,
     'liquid_buy_and_sell_quotes_fresh':priority_report['recent_liquid_quote_candidates']>0,
     'positive_quote_edge_on_observed_exits':quoted_edge,
@@ -2458,7 +2532,7 @@ readiness={
     'gates':gates,
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
-        ('at','connected','subscriptions','events','checks','errors','dex_checks',
+        ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
          'gecko_fallback_checks','lp_instruction_hints')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
