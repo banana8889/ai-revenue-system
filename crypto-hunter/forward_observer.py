@@ -14,7 +14,7 @@ def run_embedded_liquidity_sensor():
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
     ALPHABET=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -26,7 +26,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -60,12 +60,33 @@ def run_embedded_liquidity_sensor():
         except (OSError,ValueError,TypeError,KeyError) as error:
             return {"available":False,"error":type(error).__name__}
 
+    def parse_dex_liquidity(data,pool):
+        # The pair address MUST match; never substitute another pool of the mint.
+        for pair in (data.get("pairs") or []):
+            if not isinstance(pair,dict) or pair.get("chainId")!="solana" or pair.get("pairAddress")!=pool:
+                continue
+            raw=(pair.get("liquidity") or {}).get("usd")
+            if raw is not None:
+                return number(raw)
+        return None
+
     def pool_liquidity(pool):
+        # Separate public data provider: the observer already heavily uses
+        # GeckoTerminal, so use DexScreener first and Gecko only as fallback.
+        try:
+            data=get_json("https://api.dexscreener.com/latest/dex/pairs/solana/"+pool)
+            reserve=parse_dex_liquidity(data,pool)
+            if reserve is not None:
+                return reserve,"dexscreener"
+        except (OSError,ValueError,TypeError):
+            pass
+        if time.monotonic()<source_cooldown_until:
+            raise RuntimeError("dex_unavailable_gecko_cooldown")
         data=get_json("https://api.geckoterminal.com/api/v2/networks/solana/pools/"+pool)
         raw=((data.get("data") or {}).get("attributes") or {}).get("reserve_in_usd")
         if raw is None:
-            raise ValueError("reserve_missing")
-        return number(raw)
+            raise ValueError("both_liquidity_sources_missing")
+        return number(raw),"geckoterminal"
 
     def candidates():
         try:
@@ -103,18 +124,16 @@ def run_embedded_liquidity_sensor():
     async def inspect(item):
         nonlocal last_quote,last_liquidity_request,source_cooldown_until
         now=time.monotonic()
-        if now-item["last_check"]<45 or now<source_cooldown_until:
+        if now-item["last_check"]<12:
             return
-        wait=max(0.,20.-(now-last_liquidity_request))
+        wait=max(0.,3.2-(now-last_liquidity_request))
         if wait:
             await asyncio.sleep(wait)
         now=time.monotonic()
-        if now<source_cooldown_until:
-            return
         last_liquidity_request=now
         item["last_check"]=now
         try:
-            reserve=await asyncio.to_thread(pool_liquidity,item["pool"])
+            reserve,provider=await asyncio.to_thread(pool_liquidity,item["pool"])
         except urllib.error.HTTPError as error:
             stats["errors"]+=1
             if error.code in (429,500,502,503,504):
@@ -126,13 +145,15 @@ def run_embedded_liquidity_sensor():
             emit("source_error",pool=item["pool"],source="geckoterminal",error=type(error).__name__)
             return
         stats["checks"]+=1
+        stats["dex_checks" if provider=="dexscreener" else "gecko_fallback_checks"]+=1
         previous=item["last"]
         previous_seen=item["seen"]
         item["last"]=reserve
         item["seen"]=time.monotonic()
         initial=item["initial"]
         entry_drop=max(0.,1-reserve/initial)
-        fast_drop=max(0.,1-reserve/previous) if previous>0 and previous_seen and item["seen"]-previous_seen<=60 else 0.
+        fast_drop=max(0.,1-reserve/previous) if previous>0 and previous_seen and item["seen"]-previous_seen<=60 and item.get("last_provider")==provider else 0.
+        item["last_provider"]=provider
         danger=reserve<10000 or entry_drop>=0.5 or fast_drop>=0.25
         warning=danger or fast_drop>=0.10
         level="critical" if danger else "warning" if warning else "normal"
@@ -143,7 +164,7 @@ def run_embedded_liquidity_sensor():
             return
         item["last_alert"]=now
         item["last_alert_reserve"]=reserve
-        details={"pool":item["pool"],"mint":item["mint"],"initial_reserve_usd":round(initial,2),"observed_reserve_usd":round(reserve,2),"drop_from_entry_pct":round(entry_drop*100,2),"last_60s_drop_pct":round(fast_drop*100,2),"source":"geckoterminal_after_solana_logs","quote_only":True,"no_executed_sale":True}
+        details={"pool":item["pool"],"mint":item["mint"],"initial_reserve_usd":round(initial,2),"observed_reserve_usd":round(reserve,2),"drop_from_entry_pct":round(entry_drop*100,2),"last_60s_drop_pct":round(fast_drop*100,2),"source":provider+"_after_solana_logs","quote_only":True,"no_executed_sale":True}
         if danger:
             stats["critical"]+=1
         else:
@@ -260,6 +281,21 @@ def run_embedded_liquidity_sensor():
                 pass
 
     async def main():
+        if "--liquidity-selftest" in sys.argv:
+            a="1"*32
+            mock={"pairs":[{"chainId":"solana","pairAddress":"2"*32,"liquidity":{"usd":9000}},
+                           {"chainId":"solana","pairAddress":a,"liquidity":{"usd":12345.67}}]}
+            assert parse_dex_liquidity(mock,a)==12345.67
+            assert parse_dex_liquidity(mock,"3"*32) is None
+            assert parse_dex_liquidity({"pairs":[]},a) is None
+            assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
+                                   "liquidity_usd":15000})["initial"]==15000
+            assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
+                                   "liquidity_usd":15000}) is None
+            assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
+                                   "liquidity_usd":15000}) is None
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (6 source/pool/quantity checks)",flush=True)
+            return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
         if not items:
@@ -285,7 +321,7 @@ def run_embedded_liquidity_sensor():
 
     asyncio.run(main())
 
-if '--liquidity-sensor' in sys.argv:
+if '--liquidity-sensor' in sys.argv or '--liquidity-selftest' in sys.argv:
     run_embedded_liquidity_sensor()
     raise SystemExit(0)
 
