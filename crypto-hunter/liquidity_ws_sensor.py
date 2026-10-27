@@ -22,7 +22,7 @@ def emit(kind,**fields):
     row={"kind":kind,"at":stamp(),**fields}
     with EVENTS.open("a",encoding="utf-8") as f:
         f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-    if kind in ("liquidity_warning","liquidity_critical","ws_error","ws_connected","ws_heartbeat"):
+    if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","ws_error","ws_connected","ws_heartbeat"):
         print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
 def health(connected):
@@ -233,6 +233,7 @@ async def main():
             health(False)
             await asyncio.sleep(min(pause,max(0.,deadline-time.monotonic())))
             pause=min(pause*2,60)
+    stats["subscriptions"]=0
     health(False)
 
 if __name__=="__main__":
