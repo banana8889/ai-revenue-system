@@ -2414,3 +2414,41 @@ priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; n
 with open('evidence/live_candidate_priority.json','w') as f:
     json.dump(priority_report,f,indent=2,allow_nan=False)
 print('LIVE_CANDIDATE_PRIORITY',json.dumps(priority_report,allow_nan=False))
+
+# Evidence-backed readiness gate: failed prerequisites must never be
+# interpreted as an instruction to sign or fund any trade.
+try:
+    with open('evidence/liquidity_ws_health.json',encoding='utf-8') as sensor_file:
+        sensor_health=json.load(sensor_file)
+except (OSError,ValueError,TypeError):
+    sensor_health={}
+quoted=historical_backtest['paper_exit_quote_subpopulation']
+quoted_edge=(quoted['later_exit_quote_observed']>=100 and
+             quoted['gross_quote_pl_usdc_conditional_on_later_quote']>0 and
+             quoted['winners_quote_gt_1x']>quoted['losers_quote_lt_1x'])
+gates={
+    'live_market_samples_available':any(z.get('kind')=='sample' and z.get('pool_count',0)>0 for z in rows),
+    'live_ws_subscriptions_observed':int(sensor_health.get('subscriptions') or 0)>0,
+    'live_liquidity_checks_observed':int(sensor_health.get('checks') or 0)>0,
+    'liquid_buy_and_sell_quotes_fresh':priority_report['recent_liquid_quote_candidates']>0,
+    'positive_quote_edge_on_observed_exits':quoted_edge,
+    'direct_onchain_vault_reserve_tracking_verified':False,
+    'real_filled_entry_and_exit_returns_verified':False,
+    'secure_wallet_signing_and_send_verified':False}
+readiness={
+    'as_of':now.isoformat(),
+    'status':'NOT_READY_FOR_LIVE_CAPITAL' if not all(gates.values()) else 'REVIEW_REQUIRED',
+    'gates':gates,
+    'failed_gates':[name for name,passed in gates.items() if not passed],
+    'live_sensor_snapshot':{k:sensor_health.get(k) for k in
+        ('at','connected','subscriptions','events','checks','errors','dex_checks',
+         'gecko_fallback_checks','lp_instruction_hints')},
+    'observed_quote_economics':{k:quoted.get(k) for k in
+        ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
+         'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
+    'real_orders':0,'real_trades':0,
+    'guardrail':'An executable quote is not a fill; authorization and a secret do not imply profitable execution'}
+with open('evidence/live_trade_readiness.json','w',encoding='utf-8') as readiness_file:
+    json.dump(readiness,readiness_file,indent=2,allow_nan=False)
+print('CRYPTO_LIVE_READINESS',json.dumps(readiness,allow_nan=False))
+
