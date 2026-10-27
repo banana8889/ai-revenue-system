@@ -46,6 +46,7 @@ jobs:
           mkdir -p evidence
           python3 -m py_compile crypto-hunter/forward_observer.py
           if python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'; then
+            python3 -u crypto-hunter/forward_observer.py --liquidity-selftest
             python3 -u crypto-hunter/forward_observer.py --liquidity-sensor &
             liquidity_ws_pid=$!
             trap 'kill "$liquidity_ws_pid" 2>/dev/null || true; wait "$liquidity_ws_pid" 2>/dev/null || true' EXIT
