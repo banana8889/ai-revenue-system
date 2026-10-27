@@ -181,9 +181,11 @@ def run_embedded_liquidity_sensor():
         last_quote=time.monotonic()
         result=await asyncio.to_thread(quote,item["mint"],item["qty"])
         stats["quote_checks"]+=1
-        emit("urgent_sell_quote",pool=item["pool"],mint=item["mint"],
-             trigger=reason,**(details or {}),**result,amount_raw=item["qty"],
-             quote_only=True,requires_wallet_and_confirmed_fill=True)
+        fields=dict(details or {})
+        fields.setdefault("pool",item["pool"])
+        fields.setdefault("mint",item["mint"])
+        emit("urgent_sell_quote",trigger=reason,**fields,**result,
+             amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
 
     def feed_candidate(raw):
         pool=raw.get("pool","")
