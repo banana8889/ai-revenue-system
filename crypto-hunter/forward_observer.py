@@ -823,6 +823,11 @@ def run_embedded_liquidity_sensor():
                 "slot_skew":skew,"atomic_same_slot":skew==0,
                 "non_atomic_cross_slot_observation":skew>0}
 
+    def both_vaults_refreshed(latest,previous_slots):
+        return all(side in latest and
+                   latest[side][0]>previous_slots.get(side,0)
+                   for side in ("base","quote"))
+
     def early_sell_pressure(before,now,watched_index):
         # A net sale of the watched mint INTO the pool grows its reserves
         # and consumes the counter-asset, independent of base/quote orientation.
@@ -1124,8 +1129,7 @@ def run_embedded_liquidity_sensor():
                     # the preceding pair. Never reuse one stale quote vault
                     # with a new base notification to invent an apparent swap.
                     previous_pair_slots=item.get("last_paired_account_slots") or {}
-                    if any(pending[name][0]<=previous_pair_slots.get(name,0)
-                           for name in ("base","quote")):
+                    if not both_vaults_refreshed(pending,previous_pair_slots):
                         continue
                     current=paired["current"]
                     previous=vault_last_pair.get(pool)
@@ -1529,6 +1533,14 @@ def run_embedded_liquidity_sensor():
             assert pair_recent_vault_updates(observed,"quote",108,150,100)[
                 "atomic_same_slot"] is True
             assert pair_recent_vault_updates({},"base",99,100,100) is None
+            assert both_vaults_refreshed(
+                {"base":(108,100),"quote":(108,200)},
+                {"base":105,"quote":106}) is True
+            assert both_vaults_refreshed(
+                {"base":(108,100),"quote":(106,200)},
+                {"base":105,"quote":106}) is False
+            assert both_vaults_refreshed(
+                {"base":(108,100)},{"base":105,"quote":106}) is False
             assert early_sell_pressure((100,200),(114,175),0) is True
             assert early_sell_pressure((100,200),(85,228),1) is True
             assert early_sell_pressure((100,200),(114,210),0) is False
@@ -1548,7 +1560,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (40 source/pool/LP-owner/cross-slot pairing checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (43 source/pool/LP-owner/cross-slot freshness checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
