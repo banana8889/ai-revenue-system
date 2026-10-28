@@ -1095,13 +1095,36 @@ def run_embedded_liquidity_sensor():
 
     async def main():
         if "--creator-lp-ws-live-proof" in sys.argv:
-            samples=(
+            # Use the newest timestamped FIRST-OBSERVED risk snapshots from
+            # durable research state; old test addresses may have since
+            # burned/transferred LP. No private key or transaction.
+            candidates=[]
+            try:
+                with LP_PROSPECTIVE.open("r",encoding="utf-8") as records:
+                    for line in records:
+                        try:
+                            row=json.loads(line)
+                            if (row.get("available") and
+                                int(row.get("creator_direct_lp_raw") or 0)>0
+                                and row.get("pool") and row.get("mint")):
+                                candidates.append((row["sample_completed_at"],
+                                                   row["pool"],row["mint"]))
+                        except (ValueError,TypeError,KeyError):
+                            continue
+            except OSError:
+                pass
+            candidates.sort(reverse=True)
+            fallback=[
                 ("Gom42WgFrT7sXRYnhSGuZaR91Uxmt4BZMgc2JSdfMW8b",
                  "7AVC9kUy9RWAL9TAQAa9bd2Hc1AZLYBH3Y5ZmudaACC"),
                 ("FprgYs7j6A8GmBAWJMUFVqfGe7pZ6p68CFdPp6vcgvTo",
-                 "APeJi5ZEjBZXqGxQ1DKWuJjsHtsBtbV7oj1Ukfn6qPGa"),
-                ("BrpvpZZp2pncFjzQXojifm9QtvQL6iKvmPcku27KDGeN",
-                 "Gw6iwL6dWRvpEqwGeqDQPy8s6fwqUnci46LB4zXjwv7K"))
+                 "APeJi5ZEjBZXqGxQ1DKWuJjsHtsBtbV7oj1Ukfn6qPGa")]
+            samples=[]
+            seen=set()
+            for pool,mint in ([(x[1],x[2]) for x in candidates]+fallback):
+                if pool not in seen and len(samples)<16:
+                    samples.append((pool,mint))
+                    seen.add(pool)
             errors=[]
             for pool,mint in samples:
                 try:
@@ -1111,7 +1134,10 @@ def run_embedded_liquidity_sensor():
                     lp=await asyncio.to_thread(read_lp_control,proof)
                     creators=lp.get("creator_lp_token_accounts") or []
                     if not creators:
-                        errors.append("no_current_direct_creator_lp_for_"+pool[:8])
+                        errors.append("no_current_direct_creator_lp_for_"+pool[:8]+
+                            "_"+str((lp.get("read_endpoint_health") or {}).get(
+                                "getTokenAccountsByOwner"))+"_issued="+str(
+                                lp.get("current_lp_mint_supply_raw")))
                         continue
                     address=creators[0]["pubkey"]
                     ack=None
@@ -1140,8 +1166,9 @@ def run_embedded_liquidity_sensor():
                 except Exception as error:
                     errors.append(type(error).__name__+"_"+pool[:8])
             print("CREATOR_LP_ACCOUNT_WS_MAINNET_PROOF",
-                  json.dumps({"network_confirmed":False,"reasons":errors,
-                              "no_claim_of_success":True,"real_trades":0}))
+                  json.dumps({"network_confirmed":False,"candidates_checked":len(samples),
+                              "reasons":errors,"no_claim_of_success":True,
+                              "real_trades":0}))
             raise SystemExit(1)
         if "--pumpswap-lp-live-proof" in sys.argv:
             pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
