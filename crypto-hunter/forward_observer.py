@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -31,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -540,6 +540,63 @@ def run_embedded_liquidity_sensor():
                          "lp_sample_completed_at":snapshot["sample_completed_at"],
                          "risk_is_not_certain_future_drain":True})
 
+    def read_pool_creator_token_holdings(proof,watch_mint):
+        # Observe the pool-creator public key, NOT an inferred developer.
+        # Migrated PumpSwap pools may have burned LP while the creator or
+        # related wallets still hold the tradeable token.
+        if watch_mint!=proof["base_mint"]:
+            return {"available":False,"reason":"watch_mint_not_pool_base"}
+        creator=proof["pool_creator"]
+        total=rpc_read("getTokenSupply",[watch_mint,
+                                        {"commitment":"confirmed"}])
+        data=(total or {}).get("value") or {}
+        supply=int(data["amount"])
+        holders=rpc_read("getTokenAccountsByOwner",[
+            creator,{"mint":watch_mint},
+            {"encoding":"jsonParsed","commitment":"confirmed"}])
+        accounts=(holders or {}).get("value")
+        if supply<=0 or not isinstance(accounts,list):
+            return {"available":False,"reason":"missing_supply_or_owner_accounts"}
+        verified=creator_lp_token_accounts(accounts,watch_mint,creator)
+        owned=sum(int(a["amount_raw"]) for a in verified)
+        if owned>supply:
+            return {"available":False,"reason":"owner_total_exceeds_current_mint_supply"}
+        return {"available":True,"pool_creator_address":creator,
+                "watched_tradeable_mint":watch_mint,
+                "creator_direct_token_raw":str(owned),
+                "mint_supply_raw":str(supply),
+                "creator_direct_supply_fraction":round(owned/supply,6),
+                "creator_token_accounts_for_ws":verified[:2],
+                "token_control_flag_ge_2pct":owned*100>=supply*2,
+                "owner_rpc_slot":(holders or {}).get("context",{}).get("slot"),
+                "mint_supply_rpc_slot":(total or {}).get("context",{}).get("slot"),
+                "pool_creator_is_not_verified_token_developer":True,
+                "other_wallets_and_related_accounts_unknown":True,
+                "no_trade_or_execution":True}
+
+    async def inspect_pool_creator_token(item,proof):
+        if (not proof or not proof.get("verified_pumpswap_layout")
+                or item.get("creator_token_checked")
+                or stats["creator_token_probes"]>=4):
+            return
+        item["creator_token_checked"]=True
+        stats["creator_token_probes"]+=1
+        try:
+            detail=await asyncio.to_thread(read_pool_creator_token_holdings,
+                                           proof,item["mint"])
+        except Exception as error:
+            detail={"available":False,"reason":type(error).__name__}
+        if detail.get("available"):
+            stats["creator_token_confirmed"]+=1
+            item["creator_token_monitor_accounts"]=detail["creator_token_accounts_for_ws"]
+            item["creator_token_owner"]=detail["pool_creator_address"]
+            item["creator_token_baseline_slot"]=detail.get("owner_rpc_slot")
+            item["creator_token_mint"]=item["mint"]
+        emit("onchain_pool_creator_token_snapshot",
+             pool=item["pool"],mint=item["mint"],
+             observed_at=stamp(),first_observed_without_future_outcome=True,
+             **detail)
+
     async def inspect_pumpswap_vaults(item):
         if stats["pump_vault_queries"]>=16:
             return
@@ -797,6 +854,7 @@ def run_embedded_liquidity_sensor():
                         await verify_lp_hint_onchain(item,signature)
                     await inspect(item)
                     proof=await inspect_pumpswap_vaults(item)
+                    await inspect_pool_creator_token(item,proof)
                     if (proof and proof.get("verified_pumpswap_layout")
                             and item["pool"] not in vault_streamed
                             and (item.get("fresh") or not old_streamed)
