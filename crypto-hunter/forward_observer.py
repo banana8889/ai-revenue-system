@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -31,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -369,6 +369,36 @@ def run_embedded_liquidity_sensor():
                 "not_probability_or_advance_knowledge":True,
                 "creator_related_wallets_not_inferred":True}
 
+    def creator_lp_token_accounts(accounts,lp_mint,creator):
+        # Directly registered owner only; transfers to other wallets remain
+        # unlinked. Never infer beneficial ownership from token movement.
+        if not isinstance(accounts,list):
+            return []
+        result=[]
+        for account in accounts:
+            if not isinstance(account,dict):
+                continue
+            pubkey=account.get("pubkey")
+            info=(((account.get("account") or {}).get("data") or {}).get("parsed") or {}).get("info") or {}
+            if (not isinstance(pubkey,str) or not 32<=len(pubkey)<=44
+                    or not set(pubkey)<=ALPHABET
+                    or info.get("mint")!=lp_mint or info.get("owner")!=creator):
+                continue
+            try:
+                qty=int(((info.get("tokenAmount") or {}).get("amount")))
+            except (ValueError,TypeError):
+                continue
+            if qty>0:
+                result.append({"pubkey":pubkey,"amount_raw":str(qty)})
+        return sorted(result,key=lambda x:int(x["amount_raw"]),reverse=True)
+
+    def lp_balance_decline(previous,current):
+        # Fixed 10% fall, minimum one token; can represent transfer or burn.
+        # This is not an advance warning if vaults drain in the SAME slot.
+        return (isinstance(previous,int) and isinstance(current,int)
+                and previous>0 and current>=0
+                and current*100<=previous*90)
+
     def read_lp_control(proof):
         lp=proof["lp_mint"]
         creator=proof["pool_creator"]
@@ -389,6 +419,7 @@ def run_embedded_liquidity_sensor():
         mint_supply=value.get("amount")
         top_result=None
         creator_response=None
+        watched_creator_accounts=[]
         if mint_supply is not None:
             try:
                 no_supply=int(mint_supply)==0
@@ -418,6 +449,8 @@ def run_embedded_liquidity_sensor():
                         if info.get("mint")!=lp or info.get("owner")!=creator:
                             continue
                         own_amount+=int(((info.get("tokenAmount") or {}).get("amount")) or 0)
+                    watched_creator_accounts=creator_lp_token_accounts(
+                        own_accounts,lp,creator)[:2]
         else:
             top_amount=None
             own_amount=None
@@ -429,6 +462,8 @@ def run_embedded_liquidity_sensor():
                 "creator_direct_lp_raw":str(own_amount) if own_amount is not None else None,
                 "largest_lp_token_account_raw":str(top_amount) if top_amount is not None else None,
                 "read_endpoint_health":endpoint_health,
+                "creator_lp_token_accounts":watched_creator_accounts,
+                "creator_lp_token_accounts_only_directly_held":True,
                 "owner_scope":"direct creator public key only, not related wallets",
                 "pool_state_slot":proof.get("slot"),
                 "supply_slot":(supply_result or {}).get("context",{}).get("slot"),
@@ -448,6 +483,10 @@ def run_embedded_liquidity_sensor():
             detail={"available":False,"reason":type(error).__name__}
         if detail.get("available"):
             item["lp_control_first_observed"]=detail.get("structural_risk_tier")
+            item["creator_lp_monitor_accounts"]=detail.get("creator_lp_token_accounts") or []
+            item["creator_lp_mint"]=detail.get("lp_mint")
+            item["creator_lp_owner"]=detail.get("pool_creator")
+            item["creator_lp_baseline_slot"]=detail.get("supply_slot")
             stats["lp_control_confirmed"]+=1
             if detail.get("structural_risk_flags"):
                 stats["lp_control_high_risk"]+=1
@@ -1103,6 +1142,15 @@ def run_embedded_liquidity_sensor():
             assert partial["available"] and partial["structural_risk_tier"]=="elevated"
             assert partial["creator_direct_lp_fraction"] is None
             assert lp_control_risk_from_balances(1000,None,None,None)["available"] is False
+            assert creator_lp_token_accounts([
+                {"pubkey":a,"account":{"data":{"parsed":{"info":{
+                    "mint":base_mint,"owner":quote_mint,"tokenAmount":{"amount":"400"}}}}}},
+                {"pubkey":"invalid","account":{"data":{"parsed":{"info":{
+                    "mint":base_mint,"owner":quote_mint,"tokenAmount":{"amount":"500"}}}}}}
+                ],base_mint,quote_mint)==[{"pubkey":a,"amount_raw":"400"}]
+            assert lp_balance_decline(100,90) is True
+            assert lp_balance_decline(100,91) is False
+            assert lp_balance_decline(0,0) is False
             assert early_sell_pressure((100,200),(114,175),0) is True
             assert early_sell_pressure((100,200),(85,228),1) is True
             assert early_sell_pressure((100,200),(114,210),0) is False
@@ -1122,7 +1170,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (28 source/pool/LP-control/forward-pressure checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (32 source/pool/LP-owner/forward-pressure checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
