@@ -55,6 +55,13 @@ jobs:
           key: crypto-pumpfun-first30-features-${{ github.run_id }}
           restore-keys: |
             crypto-pumpfun-first30-features-
+      - name: Restore future five-minute outcomes (only confirmed, complete cohorts)
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/pumpfun_first30_to_5m_outcomes.jsonl
+          key: crypto-pumpfun-fwd5m-${{ github.run_id }}
+          restore-keys: |
+            crypto-pumpfun-fwd5m-
       - name: Snapshot expanded cache before legacy recovery
         shell: bash
         run: |
@@ -301,6 +308,12 @@ jobs:
             evidence/onchain_lp_control_prospective.jsonl
             evidence/onchain_risk_outcomes_ledger.jsonl
           key: crypto-prospective-state-${{ github.run_id }}
+      - name: Persist true post-30s five-minute bonding-curve outcomes
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/pumpfun_first30_to_5m_outcomes.jsonl
+          key: crypto-pumpfun-fwd5m-${{ github.run_id }}
       - name: Save real first-30s Pump.fun trade-flow features
         if: always()
         uses: actions/cache/save@v4
