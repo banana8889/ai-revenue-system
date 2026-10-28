@@ -1378,7 +1378,7 @@ def run_embedded_liquidity_sensor():
             # Use the newest timestamped FIRST-OBSERVED risk snapshots from
             # durable research state; old test addresses may have since
             # burned/transferred LP. No private key or transaction.
-            candidates=[]
+            lp_proof_candidates=[]
             try:
                 with LP_PROSPECTIVE.open("r",encoding="utf-8") as records:
                     for line in records:
@@ -1387,13 +1387,13 @@ def run_embedded_liquidity_sensor():
                             if (row.get("available") and
                                 int(row.get("creator_direct_lp_raw") or 0)>0
                                 and row.get("pool") and row.get("mint")):
-                                candidates.append((row["sample_completed_at"],
+                                lp_proof_candidates.append((row["sample_completed_at"],
                                                    row["pool"],row["mint"]))
                         except (ValueError,TypeError,KeyError):
                             continue
             except OSError:
                 pass
-            candidates.sort(reverse=True)
+            lp_proof_candidates.sort(reverse=True)
             fallback=[
                 ("Gom42WgFrT7sXRYnhSGuZaR91Uxmt4BZMgc2JSdfMW8b",
                  "7AVC9kUy9RWAL9TAQAa9bd2Hc1AZLYBH3Y5ZmudaACC"),
@@ -1401,7 +1401,7 @@ def run_embedded_liquidity_sensor():
                  "APeJi5ZEjBZXqGxQ1DKWuJjsHtsBtbV7oj1Ukfn6qPGa")]
             samples=[]
             seen=set()
-            for pool,mint in ([(x[1],x[2]) for x in candidates]+fallback):
+            for pool,mint in ([(x[1],x[2]) for x in lp_proof_candidates]+fallback):
                 if pool not in seen and len(samples)<16:
                     samples.append((pool,mint))
                     seen.add(pool)
