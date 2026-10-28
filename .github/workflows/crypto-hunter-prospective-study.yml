@@ -148,8 +148,13 @@ jobs:
             python3 -u crypto-hunter/forward_observer.py --liquidity-selftest
             python3 -u crypto-hunter/forward_observer.py --liquidity-sensor &
             liquidity_ws_pid=$!
-            trap 'kill "$liquidity_ws_pid" 2>/dev/null || true; wait "$liquidity_ws_pid" 2>/dev/null || true' EXIT
+            # Genuine confirmed Pump.fun create instructions, BEFORE a DEX
+            # new-pool index lists the token. No wallet, orders, or fills.
+            python3 -u crypto-hunter/forward_observer.py --pumpfun-early-sensor &
+            early_launch_pid=$!
+            trap 'kill "$liquidity_ws_pid" "$early_launch_pid" 2>/dev/null || true; wait "$liquidity_ws_pid" "$early_launch_pid" 2>/dev/null || true' EXIT
             echo "LIQUIDITY_WS_PROCESS_STARTED=$liquidity_ws_pid"
+            echo "PUMPFUN_EARLY_MAINNET_PROCESS_STARTED=$early_launch_pid"
           else
             echo "LIQUIDITY_WS_UNAVAILABLE=DEPENDENCY_INSTALL_FAILED"
           fi
