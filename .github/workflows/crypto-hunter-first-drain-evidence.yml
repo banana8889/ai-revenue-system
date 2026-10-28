@@ -1,0 +1,39 @@
+name: Crypto Hunter Real First-Drain Evidence Audit
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-first-drain-evidence.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore actual forward-only mainnet observations
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+            evidence/onchain_risk_outcomes_ledger.jsonl
+          key: crypto-first-drain-readonly-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Compile complete one-file Crypto Hunter
+        run: python3 -m py_compile crypto-hunter/forward_observer.py
+      - name: Audit earliest confirmed drain on retained real observations
+        run: python3 -u crypto-hunter/forward_observer.py --audit-precursor-evidence
+      - name: Preserve read-only audit source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-drain-audit-input-${{ github.run_id }}
+          path: evidence/onchain_risk_outcomes_ledger.jsonl
+          if-no-files-found: warn
+          retention-days: 14

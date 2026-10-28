@@ -1,5 +1,80 @@
 import sys
 
+def first_confirmed_drain_after(pool,trigger_at,evidence,horizon_seconds=None):
+    """First recorded confirmed dual-vault drain; never skip a near-immediate one.
+    Times are RPC receipt times, not authoritative transaction start times.
+    """
+    import datetime as _dt
+    try:
+        t0=_dt.datetime.fromisoformat(trigger_at)
+    except (ValueError,TypeError):
+        return None
+    candidates=[]
+    for ev in evidence:
+        if ev.get('pool')!=pool or not (
+            ev.get('kind')=='onchain_vault_joint_drop'
+            or (ev.get('kind')=='onchain_vault_rpc_confirmation'
+                and ev.get('outcome')=='confirmed')):
+            continue
+        try:
+            seconds=(_dt.datetime.fromisoformat(ev['at'])-t0).total_seconds()
+        except (KeyError,ValueError,TypeError):
+            continue
+        if seconds>=0 and (horizon_seconds is None
+                            or seconds<=horizon_seconds):
+            candidates.append((seconds,ev))
+    return min(candidates,key=lambda z:z[0]) if candidates else None
+
+def audit_first_drain_from_real_ledger(path):
+    import json
+    from pathlib import Path
+    file=Path(path)
+    if not file.is_file() or not file.stat().st_size:
+        raise SystemExit('AUDIT_FAIL=no_real_persisted_event_ledger')
+    records=[]
+    with file.open(encoding='utf-8') as fh:
+        for line in fh:
+            if line.strip():
+                records.append(json.loads(line))
+    first={}
+    precursor_kinds={
+        'onchain_preemptive_sell_pressure',
+        'onchain_lp_creator_balance_drop',
+        'onchain_pool_creator_token_balance_drop'}
+    for ev in records:
+        k=(ev.get('pool'),ev.get('kind'))
+        if k[0] and k[1] in precursor_kinds and ev.get('at'):
+            if k not in first or ev['at']<first[k]['at']:
+                first[k]=ev
+    confirmed=[]
+    immediate=[]
+    for (pool,kind),ev in first.items():
+        hit=first_confirmed_drain_after(pool,ev['at'],records,600)
+        if hit is None:continue
+        seconds,drain=hit
+        row={'pool':pool,'kind':kind,'first_confirmed_delay_seconds':round(seconds,3),
+             'first_confirmed_at':drain['at'],'not_physical_start_time':True}
+        (confirmed if seconds>=30 else immediate).append(row)
+        # Strong invariant: there cannot be an earlier verified drain which
+        # the report skipped to manufacture an apparent lead time.
+        assert all(not (e.get('pool')==pool and e.get('at') and
+            e.get('kind')=='onchain_vault_rpc_confirmation'
+            and e.get('outcome')=='confirmed'
+            and ev['at']<=e['at']<drain['at']) for e in records)
+    report={'real_persisted_events':len(records),
+            'first_trigger_groups':len(first),
+            'first_drain_over_30_seconds':len(confirmed),
+            'first_drain_under_30_seconds':len(immediate),
+            'confirmed_cases':confirmed[:15],'too_late_cases':immediate[:15],
+            'physical_drain_start_not_proven':True,
+            'quote_fills_or_profit_not_implied':True}
+    print('CRYPTO_REAL_FIRST_DRAIN_AUDIT',json.dumps(report,allow_nan=False),flush=True)
+    return report
+
+if '--audit-precursor-evidence' in sys.argv:
+    audit_first_drain_from_real_ledger('evidence/onchain_risk_outcomes_ledger.jsonl')
+    raise SystemExit(0)
+
 def run_embedded_liquidity_sensor():
     import asyncio,base64,datetime as dt,hashlib,json,os,time,urllib.error,urllib.parse,urllib.request
     from pathlib import Path
@@ -4168,10 +4243,12 @@ for pool,baseline in lp_ledger.items():
             lag=(d.datetime.fromisoformat(ev['at'])-frozen_at).total_seconds()
         except (KeyError,TypeError,ValueError):
             continue
-        if lag>=30:
+        if lag>=0:
             matched.append((lag,ev))
     if matched:
         lag,first=min(matched,key=lambda x:x[0])
+        if lag<30:
+            continue
         lp_labels.append({'pool':pool,'lp_measured_at':baseline['sample_completed_at'],
             'risk_at_measurement':baseline.get('structural_risk_tier'),
             'first_onchain_joint_drain_at':first['at'],
@@ -4292,32 +4369,28 @@ precursor_kinds={'onchain_preemptive_sell_pressure',
                  'onchain_pool_creator_token_balance_drop'}
 precursor_events=[e for e in onchain_evidence
                   if e.get('kind') in precursor_kinds]
+# FIRST verifiable drain after each trigger; never skip an immediate drain
+# to cherry-pick a later recurrence 30+ seconds after the trigger.
+# These are RPC-confirmation timestamps, NOT proven physical drain start.
 forward_precursor_matches=[]
+too_late_precursor_matches=[]
 for trigger in precursor_events:
-    try:
-        trigger_at=d.datetime.fromisoformat(trigger['at'])
-    except (TypeError,ValueError,KeyError):
+    earliest=first_confirmed_drain_after(
+        trigger.get('pool'),trigger.get('at'),lp_drain_events)
+    if earliest is None:
         continue
-    later=[]
-    for drain in lp_drain_events:
-        if drain.get('pool')!=trigger.get('pool'):
-            continue
-        try:
-            seconds=(d.datetime.fromisoformat(drain['at'])-trigger_at).total_seconds()
-        except (KeyError,TypeError,ValueError):
-            continue
-        if seconds>=30:
-            later.append((seconds,drain))
-    if later:
-        lead,drain=min(later,key=lambda a:a[0])
-        forward_precursor_matches.append({
-            'pool':trigger.get('pool'),
-            'trigger_at':trigger['at'],'drain_at':drain['at'],
-            'trigger_kind':trigger.get('kind'),
-            'lead_seconds':round(lead,3),
-            'trigger_threshold_fixed_before_observation':True,
-            'drain_recorded_by':drain.get('kind'),
-            'not_an_executed_exit':True})
+    lead,drain=earliest
+    row={'pool':trigger.get('pool'),'trigger_at':trigger['at'],
+         'drain_at':drain['at'],'trigger_kind':trigger.get('kind'),
+         'first_confirmation_delay_seconds':round(lead,3),
+         'trigger_threshold_fixed_before_observation':True,
+         'drain_recorded_by':drain.get('kind'),
+         'confirmed_time_not_exact_chain_drain_time':True,
+         'not_an_executed_exit':True}
+    if lead>=30:
+        forward_precursor_matches.append(row)
+    else:
+        too_late_precursor_matches.append(row)
 precursor_report={
     'as_of':now.isoformat(),
     'precommitted_definition':{
@@ -4336,7 +4409,11 @@ precursor_report={
         k:sum(x['trigger_kind']==k for x in forward_precursor_matches)
         for k in sorted(precursor_kinds)},
     'observed_subsequent_verified_2_vault_drains_at_least_30s_later':len(forward_precursor_matches),
+    'first_confirmed_drains_too_late_under_30s':len(too_late_precursor_matches),
+    'first_confirmation_only_no_later_event_cherry_pick':True,
+    'confirmation_time_does_not_prove_physical_drain_start':True,
     'matched_evidence':forward_precursor_matches[:40],
+    'too_late_evidence':too_late_precursor_matches[:40],
     'unmatched_outcomes_are_unknown_due_to_incomplete_followup':True,
     'no_sensitivity_precision_or_profitability_claim':True,
     'not_all_dexes_covered':True,
@@ -4385,9 +4462,9 @@ for (pool,kind),ev in sorted(first_alerts.items()):
     except (KeyError,TypeError,ValueError):
         continue
     t1=t0+d.timedelta(minutes=10)
-    candidates=[(t,e) for t,e in drains_by_pool.get(pool,[])
-                if t0<=t<=t1]
-    first_drain=min(candidates,key=lambda z:z[0]) if candidates else None
+    earliest=first_confirmed_drain_after(pool,ev['at'],lp_drain_events,600)
+    first_drain=((t0+d.timedelta(seconds=earliest[0]),earliest[1])
+                 if earliest is not None else None)
     post=[t for t,_ in pairs_by_pool.get(pool,[]) if t0<=t<=t1]
     post.sort()
     full_window=(
