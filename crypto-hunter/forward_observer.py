@@ -357,7 +357,23 @@ def run_embedded_liquidity_sensor():
             flags.append("creator_direct_lp_balance_ge_20pct")
         if largest_frac is not None and largest_frac>=0.5:
             flags.append("largest_account_lp_balance_ge_50pct")
+        directly_concentrated=(creator_frac is not None and creator_frac>=0.2
+                               or largest_frac is not None and largest_frac>=0.5)
+        # High outstanding LP supply is only broad redeemability exposure.
+        # It must not be conflated with known direct control by one holder.
+        control_category=("verified_concentrated_direct_holder"
+                          if directly_concentrated else
+                          "outstanding_supply_only_holder_unknown"
+                          if outstanding>=0.8 and (creator is None or largest is None)
+                          else "outstanding_supply_only_no_large_direct_holder"
+                          if outstanding>=0.8 else
+                          "holder_coverage_incomplete"
+                          if creator is None or largest is None else
+                          "no_large_direct_holder_observed_not_safe")
         return {"available":True,"holder_detail_complete":creator is not None and largest is not None,
+                "direct_large_holder_risk_observed":bool(directly_concentrated),
+                "outstanding_supply_only_flag":outstanding>=0.8 and not directly_concentrated,
+                "lp_control_evidence_category":control_category,
                 "outstanding_lp_supply_fraction":round(outstanding,6),
                 "creator_direct_lp_fraction":round(creator_frac,6) if creator_frac is not None else None,
                 "largest_token_account_lp_fraction":round(largest_frac,6) if largest_frac is not None else None,
@@ -1380,6 +1396,12 @@ def run_embedded_liquidity_sensor():
                 {"pubkey":"invalid","account":{"data":{"parsed":{"info":{
                     "mint":base_mint,"owner":quote_mint,"tokenAmount":{"amount":"500"}}}}}}
                 ],base_mint,quote_mint)==[{"pubkey":a,"amount_raw":"400"}]
+            assert lp_control_risk_from_balances(1000,900,250,600)[
+                "direct_large_holder_risk_observed"] is True
+            assert lp_control_risk_from_balances(1000,900,0,100)[
+                "lp_control_evidence_category"]=="outstanding_supply_only_no_large_direct_holder"
+            assert lp_control_risk_from_balances(1000,900,None,None)[
+                "lp_control_evidence_category"]=="outstanding_supply_only_holder_unknown"
             assert lp_balance_decline(100,90) is True
             assert lp_balance_decline(100,91) is False
             assert lp_balance_decline(0,0) is False
@@ -3800,6 +3822,23 @@ lp_study={
         z.get('structural_risk_tier')=='elevated' for z in lp_ledger.values()),
     'incomplete_structural_risk_at_first_snapshot':sum(
         z.get('structural_risk_tier')=='incomplete' for z in lp_ledger.values()),
+    'verified_large_direct_holder_control':sum(
+        z.get('direct_large_holder_risk_observed') is True for z in lp_ledger.values()),
+    'high_outstanding_supply_without_verified_concentrated_holder':sum(
+        z.get('outstanding_supply_only_flag') is True for z in lp_ledger.values()),
+    'unknown_direct_holder_status':sum(
+        not z.get('holder_detail_complete') for z in lp_ledger.values()),
+    'structural_categories':{
+        category:sum(z.get('lp_control_evidence_category')==category
+                     for z in lp_ledger.values())
+        for category in (
+            'verified_concentrated_direct_holder',
+            'outstanding_supply_only_holder_unknown',
+            'outstanding_supply_only_no_large_direct_holder',
+            'holder_coverage_incomplete',
+            'no_large_direct_holder_observed_not_safe')},
+    'historical_rows_without_classification_left_unclassified':sum(
+        'lp_control_evidence_category' not in z for z in lp_ledger.values()),
     'subsequent_verified_joint_drain_observed_after_30s':len(lp_labels),
     'cross_run_event_ledger_used':True,
     'matched_future_drain_evidence':lp_labels[:30],
