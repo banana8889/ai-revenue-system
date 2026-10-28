@@ -916,9 +916,23 @@ def run_embedded_liquidity_sensor():
                         await ws.send(json.dumps({"jsonrpc":"2.0","id":next_vault_id,
                             "method":"accountSubscribe","params":[lp_address,
                                 {"encoding":"jsonParsed","commitment":"confirmed"}]}))
+                    for account in (item.get("creator_token_monitor_accounts") or [])[:1]:
+                        holder_address=account.get("pubkey")
+                        if not (holder_address and item.get("creator_token_mint")
+                                and item.get("creator_token_owner")):
+                            continue
+                        next_vault_id+=1
+                        pending_vault_requests[next_vault_id]=(
+                            item,"creator_token",item["creator_token_mint"])
+                        item["creator_token_ws_initial_raw"]=int(account["amount_raw"])
+                        item["creator_token_ws_account"]=holder_address
+                        await ws.send(json.dumps({"jsonrpc":"2.0","id":next_vault_id,
+                            "method":"accountSubscribe","params":[holder_address,
+                                {"encoding":"jsonParsed","commitment":"confirmed"}]}))
                     emit("ws_vault_subscribed",pool=pool,mint=item["mint"],
                          base_vault=proof["base_vault"],quote_vault=proof["quote_vault"],
                          creator_lp_account=item.get("creator_lp_ws_account"),
+                         pool_creator_token_account=item.get("creator_token_ws_account"),
                          rpc_baseline_slot=proof.get("slot"),
                          active_vault_pairs=len(vault_last_pair))
                 if time.monotonic()-last_feed_scan>=2 and len(items)<MAX_POOLS:
@@ -968,6 +982,8 @@ def run_embedded_liquidity_sensor():
                             vault_subscriptions[msg["result"]]=(item,side,mint)
                             if side=="creator_lp":
                                 stats["creator_lp_ws_subscriptions"]+=1
+                            elif side=="creator_token":
+                                stats["creator_token_ws_subscriptions"]+=1
                             else:
                                 stats["vault_ws_subscriptions"]=sum(
                                     1 for _,kind,_ in vault_subscriptions.values()
@@ -998,42 +1014,53 @@ def run_embedded_liquidity_sensor():
                     slot=(payload.get("context") or {}).get("slot")
                     if not isinstance(slot,int):
                         continue
-                    expected_owner=(item.get("creator_lp_owner")
-                                    if side=="creator_lp" else item["pool"])
+                    expected_owner=(item.get("creator_lp_owner") if side=="creator_lp"
+                                    else item.get("creator_token_owner")
+                                    if side=="creator_token" else item["pool"])
                     amount=ws_vault_balance(payload.get("value"),mint,expected_owner)
                     if amount is None:
                         continue
-                    if side=="creator_lp":
-                        if slot<=int(item.get("creator_lp_baseline_slot") or 0):
+                    if side in ("creator_lp","creator_token"):
+                        base_key=side
+                        if slot<=int(item.get(base_key+"_baseline_slot") or 0):
                             continue
-                        previous=item.get("creator_lp_ws_initial_raw")
-                        stats["creator_lp_ws_events"]+=1
-                        item["creator_lp_baseline_slot"]=slot
-                        item["creator_lp_ws_initial_raw"]=amount
+                        previous=item.get(base_key+"_ws_initial_raw")
+                        stats[base_key+"_ws_events"]+=1
+                        item[base_key+"_baseline_slot"]=slot
+                        item[base_key+"_ws_initial_raw"]=amount
                         if (lp_balance_decline(previous,amount)
-                                and not item.get("creator_lp_early_alarm_sent")):
-                            item["creator_lp_early_alarm_sent"]=True
-                            stats["creator_lp_early_decreases"]+=1
-                            emit("onchain_lp_creator_balance_drop",
-                                 pool=item["pool"],mint=item["mint"],
-                                 lp_mint=mint,creator=item["creator_lp_owner"],
-                                 lp_token_account=item.get("creator_lp_ws_account"),
-                                 slot=slot,previous_lp_raw=str(previous),
-                                 new_lp_raw=str(amount),
-                                 drop_threshold="ge_10_percent_direct_creator_lp_balance",
-                                 transfer_or_burn_not_proven=True,
-                                 advance_warning_not_proven=True,
-                                 real_trades=0)
+                                and not item.get(base_key+"_early_alarm_sent")):
+                            item[base_key+"_early_alarm_sent"]=True
+                            event_kind=("onchain_lp_creator_balance_drop"
+                                if side=="creator_lp"
+                                else "onchain_pool_creator_token_balance_drop")
+                            quote_trigger=("observed_creator_lp_balance_decrease"
+                                if side=="creator_lp"
+                                else "observed_pool_creator_token_balance_decrease")
+                            stats[(base_key+"_early_decreases") if side=="creator_lp"
+                                  else "creator_token_decreases"]+=1
+                            fields={"pool":item["pool"],"mint":item["mint"],
+                                "creator":expected_owner,"slot":slot,
+                                "token_account":item.get(base_key+"_ws_account"),
+                                "tracked_asset":"liquidity_lp_token" if side=="creator_lp"
+                                     else "tradeable_pool_base_token",
+                                "previous_raw":str(previous),"new_raw":str(amount),
+                                "drop_threshold":"ge_10_percent_direct_owner_balance",
+                                "transfer_or_sale_or_burn_not_proven":True,
+                                "pool_creator_is_not_verified_token_developer":True,
+                                "advance_warning_not_proven":True,
+                                "real_trades":0}
+                            emit(event_kind,**fields)
                             if len(urgent_ws_tasks)<3:
-                                async def check_creator_lp_exit(watched):
+                                async def check_owner_exit(watched,reason):
                                     try:
-                                        await urgent_quote_only(
-                                            watched,reason="observed_creator_lp_balance_decrease")
+                                        await urgent_quote_only(watched,reason=reason)
                                     except Exception as error:
                                         stats["errors"]+=1
-                                        emit("ws_error",reason="creator_lp_quote_failed",
+                                        emit("ws_error",reason="creator_account_quote_failed",
                                              detail=type(error).__name__)
-                                emergency=asyncio.create_task(check_creator_lp_exit(item))
+                                emergency=asyncio.create_task(
+                                    check_owner_exit(item,quote_trigger))
                                 urgent_ws_tasks.add(emergency)
                                 emergency.add_done_callback(urgent_ws_tasks.discard)
                         continue
@@ -3596,7 +3623,9 @@ readiness={
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
          'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown','pre_rug_sell_pressure_events','candidate_preflight_queued',
-         'creator_lp_ws_subscriptions','creator_lp_ws_events','creator_lp_early_decreases')},
+         'creator_lp_ws_subscriptions','creator_lp_ws_events','creator_lp_early_decreases',
+         'creator_token_probes','creator_token_confirmed','creator_token_ws_subscriptions',
+         'creator_token_ws_events','creator_token_decreases')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
