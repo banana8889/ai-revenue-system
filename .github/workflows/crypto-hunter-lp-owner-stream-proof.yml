@@ -16,6 +16,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Restore currently observed LP control snapshots
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+            evidence/onchain_risk_outcomes_ledger.jsonl
+          key: crypto-proof-owner-lp-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
       - name: Compile embedded sensor and install websocket support
         run: |
           python3 -m py_compile crypto-hunter/forward_observer.py
