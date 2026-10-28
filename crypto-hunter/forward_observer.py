@@ -220,6 +220,7 @@ def run_pumpfun_first_seconds_stream():
         stats["forward5m_complete"]=0
         stats["forward5m_censored"]=0
         stats["forward5m_post30_trade_events"]=0
+        stats["stale_provider_reconnects"]=0
         FUTURE=Path("evidence/pumpfun_first30_to_5m_outcomes.jsonl")
         FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
         def snapshot(mint,state,complete,why):
@@ -376,12 +377,17 @@ def run_pumpfun_first_seconds_stream():
                             {"mentions":[PUMP_PROGRAM]},
                             {"commitment":"confirmed"}]}))
                     acknowledged=False
+                    stale_create_streak=0
+                    latest_fresh_create_at=time.monotonic()
                     while time.monotonic()<until:
                         finalize_expired()
                         finalize_forward_outcomes()
                         try:
                             msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=2))
                         except asyncio.TimeoutError:
+                            if time.monotonic()-latest_fresh_create_at>35:
+                                stats["stale_provider_reconnects"]+=1
+                                raise asyncio.TimeoutError("pumpfun_confirmed_log_feed_no_fresh_creates")
                             continue
                         if msg.get("id")==91:
                             acknowledged=isinstance(msg.get("result"),int)
@@ -424,6 +430,15 @@ def run_pumpfun_first_seconds_stream():
                                 stats["create_events_decoded"]+=1
                                 lag=time.time()-observed["created_at_unix"]
                                 under30=0<=lag<=30
+                                if under30:
+                                    stale_create_streak=0
+                                    latest_fresh_create_at=time.monotonic()
+                                else:
+                                    stale_create_streak+=1
+                                    if stale_create_streak>=4:
+                                        stats["stale_provider_reconnects"]+=1
+                                        raise asyncio.TimeoutError(
+                                            "pumpfun_confirmed_logs_arriving_30s_plus_late")
                                 stats["mint_verified"]+=1
                                 stats["latency_within_30s"]+=int(under30)
                                 event("pumpfun_early_verified",
@@ -529,7 +544,8 @@ def run_pumpfun_first_seconds_stream():
                     state["stream_gap"]=True
                 for state in forward_outcomes.values():
                     state["stream_gap"]=True
-                event("ws_reconnect",reason=type(error).__name__)
+                event("ws_reconnect",reason=type(error).__name__,
+                      detail=str(error)[:120])
                 await asyncio.sleep(min(2,max(0.,until-time.monotonic())))
         finalize_expired()
         finalize_forward_outcomes(at_end=True)
