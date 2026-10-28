@@ -154,6 +154,32 @@ jobs:
             echo "LIQUIDITY_WS_UNAVAILABLE=DEPENDENCY_INSTALL_FAILED"
           fi
           python3 crypto-hunter/forward_observer.py
+          if [ -z "${liquidity_ws_pid:-}" ] || ! kill -0 "$liquidity_ws_pid" 2>/dev/null; then
+            echo "FAIL: live mainnet liquidity websocket process exited"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import datetime as dt,json,pathlib,sys
+          f=pathlib.Path('evidence/liquidity_ws_health.json')
+          if not f.is_file():
+              raise SystemExit('FAIL: missing live liquidity websocket heartbeat')
+          h=json.loads(f.read_text(encoding='utf-8'))
+          at=dt.datetime.fromisoformat(h['at'])
+          age=(dt.datetime.now(dt.timezone.utc)-at).total_seconds()
+          receipt={'heartbeat_age_seconds':round(age,1),
+                   'connected':h.get('connected'),
+                   'max_subscriptions':h.get('max_subscriptions'),
+                   'events':h.get('events'),
+                   'checks':h.get('checks'),
+                   'vault_ws_subscriptions':h.get('max_vault_ws_subscriptions'),
+                   'rpc_checks':h.get('vault_rpc_confirmation_checks'),
+                   'trades':h.get('trades')}
+          print('MAINNET_LIQUIDITY_SENSOR_HEALTH',json.dumps(receipt,allow_nan=False))
+          if not (0<=age<=130 and h.get('connected') is True
+                  and int(h.get('max_subscriptions') or 0)>0
+                  and h.get('orders')==h.get('trades')==0):
+              raise SystemExit('FAIL: real mainnet liquidity sensor not proven live')
+          PY
           python3 - <<'PY'
           import json,os,sys
           state='evidence/state.json'

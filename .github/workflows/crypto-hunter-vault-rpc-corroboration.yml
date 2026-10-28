@@ -21,5 +21,19 @@ jobs:
         run: python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'
       - name: Verify stale, out-of-order and non-atomic notification guards
         run: python3 -u crypto-hunter/forward_observer.py --liquidity-selftest
+      - name: Check actual mainnet sensor startup does not crash
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -u crypto-hunter/forward_observer.py --liquidity-sensor > /tmp/crypto-live-startup.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat /tmp/crypto-live-startup.log
+            exit 1
+          fi
+          grep -q '"kind":"ws_started"' evidence/liquidity_ws_events.jsonl
+          echo "MAINNET_SENSOR_STARTED_WITHOUT_EXCEPTION=true"
       - name: Verify actual PumpSwap mainnet RPC two-vault snapshot
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-live-proof
