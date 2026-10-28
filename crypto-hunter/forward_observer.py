@@ -432,12 +432,6 @@ def run_embedded_liquidity_sensor():
                 endpoint_health["getTokenLargestAccounts"]="deduced_zero_from_mint_supply"
                 endpoint_health["getTokenAccountsByOwner"]="deduced_zero_from_mint_supply"
             else:
-                top_result=query("getTokenLargestAccounts",[
-                    lp,{"commitment":"confirmed"}])
-                top_values=(top_result or {}).get("value") if top_result else None
-                top_amount=(max((int(x.get("amount") or 0) for x in top_values
-                                if isinstance(x,dict)),default=0)
-                            if isinstance(top_values,list) else None)
                 creator_response=query("getTokenAccountsByOwner",[
                     creator,{"mint":lp},{"encoding":"jsonParsed","commitment":"confirmed"}])
                 own_accounts=(creator_response or {}).get("value") if creator_response else None
@@ -449,8 +443,25 @@ def run_embedded_liquidity_sensor():
                         if info.get("mint")!=lp or info.get("owner")!=creator:
                             continue
                         own_amount+=int(((info.get("tokenAmount") or {}).get("amount")) or 0)
-                    watched_creator_accounts=creator_lp_token_accounts(
-                        own_accounts,lp,creator)[:2]
+                    valid_accounts=creator_lp_token_accounts(own_accounts,lp,creator)
+                    watched_creator_accounts=valid_accounts[:2]
+                else:
+                    valid_accounts=[]
+                # If the creator's verified token accounts sum to the ENTIRE
+                # mint supply, the biggest LP account is already known.
+                # Avoid a redundant getTokenLargestAccounts public-RPC call.
+                if (own_amount is not None and own_amount==int(mint_supply)
+                        and sum(int(x["amount_raw"]) for x in valid_accounts)==own_amount):
+                    top_amount=max((int(x["amount_raw"]) for x in valid_accounts),
+                                   default=0)
+                    endpoint_health["getTokenLargestAccounts"]="proven_from_full_owner_supply"
+                else:
+                    top_result=query("getTokenLargestAccounts",[
+                        lp,{"commitment":"confirmed"}])
+                    top_values=(top_result or {}).get("value") if top_result else None
+                    top_amount=(max((int(x.get("amount") or 0) for x in top_values
+                                    if isinstance(x,dict)),default=0)
+                                if isinstance(top_values,list) else None)
         else:
             top_amount=None
             own_amount=None
