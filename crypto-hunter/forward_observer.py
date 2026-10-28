@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -31,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_vault_cross_slot_joint_drop_suspected","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_vault_cross_slot_joint_drop_suspected","onchain_vault_ws_joint_drop_suspected","onchain_vault_rpc_confirmation","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -820,7 +820,8 @@ def run_embedded_liquidity_sensor():
         if skew>max_skew:
             return None
         return {"current":(ba,qa),"pair_slot":max(bs,qs),
-                "slot_skew":skew,"atomic_same_slot":skew==0,
+                "slot_skew":skew,"same_slot_ws_observation":skew==0,
+                "atomic_same_slot":False,"not_an_atomic_snapshot":True,
                 "non_atomic_cross_slot_observation":skew>0}
 
     def both_vaults_refreshed(latest,previous_slots):
@@ -846,6 +847,27 @@ def run_embedded_liquidity_sensor():
         return (previous is not None and len(previous)==len(current)==2
                 and all(x>0 for x in previous)
                 and all(n>=0 and n*100<=p*80 for p,n in zip(previous,current)))
+
+    def rpc_joint_drop_status(baseline,snapshot,trigger_slot):
+        # getMultipleAccounts is a single consistent RPC bank snapshot.
+        # Two accountNotifications, even at the same slot, are NOT atomic.
+        if not (isinstance(baseline,dict) and isinstance(snapshot,dict)
+                and snapshot.get("verified_pumpswap_layout")):
+            return "unknown"
+        try:
+            if (any(snapshot[k]!=baseline[k] for k in
+                    ("base_vault","quote_vault","base_mint","quote_mint"))
+                    or not isinstance(trigger_slot,int)):
+                return "unknown"
+            before=(int(baseline["base_raw"]),int(baseline["quote_raw"]))
+            after=(int(snapshot["base_raw"]),int(snapshot["quote_raw"]))
+            prior_slot=int(baseline["slot"])
+            fresh_slot=int(snapshot["slot"])
+        except (ValueError,TypeError,KeyError):
+            return "unknown"
+        if fresh_slot<=prior_slot or fresh_slot<trigger_slot:
+            return "stale"
+        return "confirmed" if vault_joint_drop(before,after) else "not_confirmed"
 
     def feed_candidate(raw):
         pool=raw.get("pool","")
@@ -931,6 +953,7 @@ def run_embedded_liquidity_sensor():
                     if pool in vault_last_pair:
                         continue
                     vault_last_pair[pool]=(int(proof["base_raw"]),int(proof["quote_raw"]))
+                    item["rpc_vault_proof"]=proof
                     vault_history[pool]=[(time.monotonic(),vault_last_pair[pool])]
                     item["watched_vault_index"]=(
                         0 if item["mint"]==proof["base_mint"] else
@@ -1143,7 +1166,7 @@ def run_embedded_liquidity_sensor():
                         name:pending[name][0] for name in ("base","quote")}
                     item["last_paired_atomic"]=paired["atomic_same_slot"]
                     vault_last_pair[pool]=current
-                    if paired["atomic_same_slot"]:
+                    if paired["same_slot_ws_observation"]:
                         stats["vault_pairs_same_slot"]+=1
                     else:
                         stats["vault_pairs_bounded_skew"]+=1
@@ -1212,42 +1235,85 @@ def run_embedded_liquidity_sensor():
                             urgent_ws_tasks.add(task)
                             task.add_done_callback(urgent_ws_tasks.discard)
                     if vault_joint_drop(previous,current):
-                        # A confirmed comparison requires BOTH current and
-                        # previous paired reserve snapshots from atomic slots.
-                        verified_atomic_compare=(
-                            paired["atomic_same_slot"] and previous_pair_atomic)
-                        if verified_atomic_compare:
-                            stats["vault_ws_joint_drops"]+=1
-                            drain_kind="onchain_vault_ws_joint_drop"
-                        else:
-                            stats["vault_cross_slot_joint_drop_suspected"]+=1
-                            drain_kind="onchain_vault_cross_slot_joint_drop_suspected"
-                        emit(drain_kind,pool=pool,mint=item["mint"],
-                             slot=pair_slot,vault_pair_slot_skew=paired["slot_skew"],
-                             same_slot_confirmation=verified_atomic_compare,
-                             current_pair_atomic=paired["atomic_same_slot"],
+                        # WS notifications are only leads, including SAME-SLOT
+                        # notifications. Confirm raw balances by a fresh RPC
+                        # getMultipleAccounts snapshot before claiming proof.
+                        stats["vault_cross_slot_joint_drop_suspected"]+=1
+                        emit("onchain_vault_ws_joint_drop_suspected",
+                             pool=pool,mint=item["mint"],slot=pair_slot,
+                             vault_pair_slot_skew=paired["slot_skew"],
+                             same_slot_ws_observation=paired["same_slot_ws_observation"],
+                             same_slot_confirmation=False,
+                             current_pair_atomic=False,
                              previous_pair_atomic=previous_pair_atomic,
                              previous_base_raw=str(previous[0]),
                              previous_quote_raw=str(previous[1]),
                              new_base_raw=str(current[0]),new_quote_raw=str(current[1]),
                              verified_vault_owners=True,
-                             not_proof_of_atomic_joint_withdrawal=not verified_atomic_compare,
+                             not_proof_of_atomic_joint_withdrawal=True,
+                             requires_rpc_corroboration=True,
                              read_only=True,no_fill_executed=True)
                         if len(urgent_ws_tasks)<3:
                             async def quote_vault_alarm(watched):
                                 try:
                                     await urgent_quote_only(
-                                        watched,reason="same_slot_pumpswap_vault_ws_joint_drop")
+                                        watched,reason="ws_pumpswap_joint_drop_suspected")
                                 except Exception as error:
                                     stats["errors"]+=1
                                     emit("ws_error",reason="urgent_vault_quote_error",
                                          detail=type(error).__name__)
-                            task=asyncio.create_task(quote_vault_alarm(item))
-                            urgent_ws_tasks.add(task)
-                            task.add_done_callback(urgent_ws_tasks.discard)
+                            pending_quote=asyncio.create_task(quote_vault_alarm(item))
+                            urgent_ws_tasks.add(pending_quote)
+                            pending_quote.add_done_callback(urgent_ws_tasks.discard)
                         else:
                             emit("ws_error",reason="urgent_vault_quote_task_capacity_exceeded",
                                  pool=pool)
+                        if (stats["vault_rpc_confirmation_checks"]<8
+                                and len(urgent_ws_tasks)<3
+                                and time.monotonic()-item.get("last_ws_rpc_check_at",-1e9)>=25):
+                            item["last_ws_rpc_check_at"]=time.monotonic()
+                            stats["vault_rpc_confirmation_checks"]+=1
+                            async def corroborate_ws_alarm(watched,trigger_slot):
+                                baseline=watched.get("rpc_vault_proof")
+                                try:
+                                    proof=await asyncio.to_thread(
+                                        read_pumpswap_vaults,watched["pool"],watched["mint"])
+                                    decision=rpc_joint_drop_status(
+                                        baseline,proof,trigger_slot)
+                                    if decision in ("confirmed","not_confirmed"):
+                                        watched["rpc_vault_proof"]=proof
+                                    if decision=="confirmed":
+                                        stats["vault_rpc_joint_drops_confirmed"]+=1
+                                        stats["vault_ws_joint_drops"]+=1
+                                    elif decision=="not_confirmed":
+                                        stats["vault_rpc_joint_drops_not_confirmed"]+=1
+                                    else:
+                                        stats["vault_rpc_joint_drops_unknown"]+=1
+                                    emit("onchain_vault_rpc_confirmation",
+                                         pool=watched["pool"],mint=watched["mint"],
+                                         outcome=decision,ws_trigger_slot=trigger_slot,
+                                         prior_rpc_slot=(baseline or {}).get("slot"),
+                                         confirming_rpc_slot=proof.get("slot"),
+                                         prior_base_raw=(baseline or {}).get("base_raw"),
+                                         prior_quote_raw=(baseline or {}).get("quote_raw"),
+                                         confirming_base_raw=proof.get("base_raw"),
+                                         confirming_quote_raw=proof.get("quote_raw"),
+                                         consistent_bank_snapshots=decision in
+                                             ("confirmed","not_confirmed"),
+                                         not_proof_of_single_withdrawal_transaction=True,
+                                         not_proof_of_executable_exit=True,
+                                         orders=0,trades=0)
+                                except Exception as error:
+                                    stats["errors"]+=1
+                                    stats["vault_rpc_joint_drops_unknown"]+=1
+                                    emit("onchain_vault_rpc_confirmation",
+                                         pool=watched["pool"],mint=watched["mint"],
+                                         outcome="unknown",error=type(error).__name__,
+                                         orders=0,trades=0)
+                            validation=asyncio.create_task(
+                                corroborate_ws_alarm(item,pair_slot))
+                            urgent_ws_tasks.add(validation)
+                            validation.add_done_callback(urgent_ws_tasks.discard)
                     continue
                 if msg.get("method")!="logsNotification":
                     continue
@@ -1531,7 +1597,9 @@ def run_embedded_liquidity_sensor():
             assert pair_recent_vault_updates(observed,"quote",104,201,100) is not None
             assert pair_recent_vault_updates(observed,"base",108,90,100) is None
             assert pair_recent_vault_updates(observed,"quote",108,150,100)[
-                "atomic_same_slot"] is True
+                "same_slot_ws_observation"] is True
+            assert pair_recent_vault_updates(observed,"quote",109,150,100)[
+                "atomic_same_slot"] is False
             assert pair_recent_vault_updates({},"base",99,100,100) is None
             assert both_vaults_refreshed(
                 {"base":(108,100),"quote":(108,200)},
@@ -1541,6 +1609,20 @@ def run_embedded_liquidity_sensor():
                 {"base":105,"quote":106}) is False
             assert both_vaults_refreshed(
                 {"base":(108,100)},{"base":105,"quote":106}) is False
+            rpc_base={"verified_pumpswap_layout":True,
+                      "base_mint":base_mint,"quote_mint":quote_mint,
+                      "base_vault":a,"quote_vault":"2"*32,
+                      "slot":100,"base_raw":"100","quote_raw":"200"}
+            rpc_after={**rpc_base,"slot":108,"base_raw":"75","quote_raw":"140"}
+            assert rpc_joint_drop_status(rpc_base,rpc_after,105)=="confirmed"
+            assert rpc_joint_drop_status(rpc_base,
+                {**rpc_after,"quote_raw":"205"},105)=="not_confirmed"
+            assert rpc_joint_drop_status(rpc_base,
+                {**rpc_after,"slot":104},105)=="stale"
+            assert rpc_joint_drop_status(rpc_base,
+                {**rpc_after,"base_vault":"3"*32},105)=="unknown"
+            assert rpc_joint_drop_status(rpc_base,
+                {"verified_pumpswap_layout":False},105)=="unknown"
             assert early_sell_pressure((100,200),(114,175),0) is True
             assert early_sell_pressure((100,200),(85,228),1) is True
             assert early_sell_pressure((100,200),(114,210),0) is False
@@ -1560,7 +1642,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (43 source/pool/LP-owner/cross-slot freshness checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (50 source/pool/LP-owner/freshness/RPC-corrob checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -3787,7 +3869,9 @@ readiness={
          'creator_token_ws_events','creator_token_decreases',
          'vault_pairs_same_slot','vault_pairs_bounded_skew',
          'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected',
-         'vault_pair_telemetry_rows')},
+         'vault_pair_telemetry_rows','vault_rpc_confirmation_checks',
+         'vault_rpc_joint_drops_confirmed','vault_rpc_joint_drops_not_confirmed',
+         'vault_rpc_joint_drops_unknown')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
@@ -3804,6 +3888,7 @@ print('CRYPTO_LIVE_READINESS',json.dumps(readiness,allow_nan=False))
 alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
              'onchain_vault_joint_drop':'confirmed_joint_pumpswap_vault_balance_drop',
              'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
+             'onchain_vault_ws_joint_drop_suspected':'ws_pumpswap_joint_drop_suspected',
              'onchain_preemptive_sell_pressure':'early_sell_pressure_vault_observation',
              'onchain_lp_creator_balance_drop':'observed_creator_lp_balance_decrease',
              'onchain_pool_creator_token_balance_drop':'observed_pool_creator_token_balance_decrease',
@@ -3815,7 +3900,9 @@ try:
         for line in sensor_log:
             try:
                 event=json.loads(line)
-                if event.get('kind') in (*alert_types.keys(),'urgent_sell_quote'):
+                if event.get('kind') in (*alert_types.keys(),'urgent_sell_quote',
+                                          'onchain_vault_pair_observation',
+                                          'onchain_vault_rpc_confirmation'):
                     events.append(event)
             except (ValueError,TypeError):
                 continue
@@ -3832,6 +3919,8 @@ persistent_kinds={'onchain_preemptive_sell_pressure',
                   'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
                   'onchain_vault_pair_observation',
                   'onchain_vault_cross_slot_joint_drop_suspected',
+                  'onchain_vault_ws_joint_drop_suspected',
+                  'onchain_vault_rpc_confirmation',
                   'urgent_sell_quote'}
 onchain_evidence_by_id={}
 try:
@@ -3871,6 +3960,12 @@ print('ONCHAIN_FORWARD_EVENT_LEDGER',json.dumps({
     'vault_pair_atomic_sample_count':sum(
         z.get('kind')=='onchain_vault_pair_observation' and
         z.get('current_pair_atomic') is True for z in onchain_evidence),
+    'confirmed_rpc_joint_drops':sum(
+        z.get('kind')=='onchain_vault_rpc_confirmation' and
+        z.get('outcome')=='confirmed' for z in onchain_evidence),
+    'unverified_ws_joint_drop_hints':sum(
+        z.get('kind')=='onchain_vault_ws_joint_drop_suspected'
+        for z in onchain_evidence),
     'vault_pair_cross_slot_sample_count':sum(
         z.get('kind')=='onchain_vault_pair_observation' and
         z.get('current_pair_atomic') is False for z in onchain_evidence),
@@ -3942,8 +4037,9 @@ try:
 except OSError:
     pass
 lp_drain_events=[event for event in onchain_evidence
-                 if event.get('kind') in (
-                     'onchain_vault_joint_drop','onchain_vault_ws_joint_drop')]
+                 if (event.get('kind')=='onchain_vault_joint_drop' or
+                     (event.get('kind')=='onchain_vault_rpc_confirmation'
+                      and event.get('outcome')=='confirmed'))]
 lp_labels=[]
 for pool,baseline in lp_ledger.items():
     try:
@@ -3970,7 +4066,7 @@ for pool,baseline in lp_ledger.items():
             'read_only_event_not_realized_exit':True})
 lp_study={
     'as_of':now.isoformat(),
-    'method':'Frozen first onchain LP ownership evidence; later same-pool joint vault decrease >=20% on both legs',
+    'method':'Frozen first onchain LP ownership evidence; later same-pool RPC-confirmed dual-vault decrease >=20% on both legs',
     'first_verified_lp_snapshots':len(lp_ledger),
     'elevated_structural_risk_at_first_snapshot':sum(
         z.get('structural_risk_tier')=='elevated' for z in lp_ledger.values()),

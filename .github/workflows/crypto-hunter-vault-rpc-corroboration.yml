@@ -1,0 +1,25 @@
+name: Crypto Hunter Vault RPC Corroboration
+on:
+  pull_request:
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-vault-rpc-corroboration.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify-atomicity-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile canonical one-file observer
+        run: python3 -m py_compile crypto-hunter/forward_observer.py
+      - name: Install public-chain stream dependency
+        run: python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'
+      - name: Verify stale, out-of-order and non-atomic notification guards
+        run: python3 -u crypto-hunter/forward_observer.py --liquidity-selftest
+      - name: Verify actual PumpSwap mainnet RPC two-vault snapshot
+        run: python3 -u crypto-hunter/forward_observer.py --pumpswap-live-proof
