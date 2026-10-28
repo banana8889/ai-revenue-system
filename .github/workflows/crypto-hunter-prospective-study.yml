@@ -100,11 +100,15 @@ jobs:
               seen=set()
               out=[]
               for row in older+newer:
-                  key=json.dumps(row,sort_keys=True,separators=(',',':'),allow_nan=False)
+                  # The canonical writer archives each completed cohort ONCE
+                  # per pool. Do not double-count differing versions of a
+                  # single pool across cache generations.
+                  key=(str(row.get('pool')) if isinstance(row,dict) and row.get('pool')
+                       else json.dumps(row,sort_keys=True,separators=(',',':'),allow_nan=False))
                   if key not in seen:
                       out.append(row);seen.add(key)
               if out:
-                  (root/filename).write_text(json.dumps(out,separators=(',',':')),encoding='utf-8')
+                  (root/filename).write_text(json.dumps(out[-1000:],separators=(',',':')),encoding='utf-8')
           filename='onchain_lp_control_prospective.jsonl'
           found={}
           for path in (root/filename,new/filename):
@@ -128,6 +132,10 @@ jobs:
           filename='onchain_risk_outcomes_ledger.jsonl'
           if (new/filename).is_file():
               (root/filename).write_bytes((new/filename).read_bytes())
+          # Fail closed instead of allowing a smaller fresh checkpoint to
+          # displace an available older checkpoint silently.
+          if len(state)<max(len(old_state),len(fresh_state)):
+              raise SystemExit('STATE_RECONCILIATION_LOST_POOL_RECORDS')
           print('CRYPTO_STATE_RECONCILIATION',json.dumps({
               'legacy_tracked':len(old_state),'expanded_tracked':len(fresh_state),
               'recovered_tracked':len(state),'retained_first_lp_snapshots':len(found),
