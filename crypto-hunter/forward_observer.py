@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -31,7 +31,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_vault_cross_slot_joint_drop_suspected","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -802,6 +802,27 @@ def run_embedded_liquidity_sensor():
             return None
         return amount if amount>=0 else None
 
+    def pair_recent_vault_updates(latest,side,slot,amount,min_slot,max_skew=3):
+        # Cross-account observations are NOT atomic unless both have same
+        # Solana context slot. Reject outdated/replayed notifications; accept
+        # close-but-different slots only as explicitly non-atomic observations.
+        if side not in ("base","quote") or not isinstance(slot,int) or slot<=min_slot:
+            return None
+        old=latest.get(side)
+        if old and slot<=old[0]:
+            return None
+        latest[side]=(slot,amount)
+        if "base" not in latest or "quote" not in latest:
+            return None
+        bs,ba=latest["base"]
+        qs,qa=latest["quote"]
+        skew=abs(bs-qs)
+        if skew>max_skew:
+            return None
+        return {"current":(ba,qa),"pair_slot":max(bs,qs),
+                "slot_skew":skew,"atomic_same_slot":skew==0,
+                "non_atomic_cross_slot_observation":skew>0}
+
     def early_sell_pressure(before,now,watched_index):
         # A net sale of the watched mint INTO the pool grows its reserves
         # and consumes the counter-asset, independent of base/quote orientation.
@@ -911,6 +932,7 @@ def run_embedded_liquidity_sensor():
                         1 if item["mint"]==proof["quote_mint"] else None)
                     if isinstance(proof.get("slot"),int):
                         item["last_vault_ws_slot"]=proof["slot"]
+                        item["rpc_vault_baseline_slot"]=proof["slot"]
                     vault_pair_updates[pool]={}
                     for side in ("base","quote"):
                         next_vault_id+=1
@@ -1086,20 +1108,26 @@ def run_embedded_liquidity_sensor():
                     stats["vault_ws_events"]+=1
                     pool=item["pool"]
                     pending=vault_pair_updates.setdefault(pool,{})
-                    if len(pending)>12:
-                        for old in sorted(pending)[:-8]:
-                            del pending[old]
-                    marks=pending.setdefault(slot,{})
-                    marks[side]=amount
-                    if "base" not in marks or "quote" not in marks:
+                    paired=pair_recent_vault_updates(
+                        pending,side,slot,amount,
+                        int(item.get("rpc_vault_baseline_slot") or 0),max_skew=3)
+                    if paired is None:
+                        if (len(pending)==2 and
+                                abs(pending["base"][0]-pending["quote"][0])>3):
+                            stats["vault_pair_skew_rejections"]+=1
                         continue
-                    current=(marks["base"],marks["quote"])
+                    current=paired["current"]
                     previous=vault_last_pair.get(pool)
-                    last_slot=item.get("last_vault_ws_slot",0)
-                    if slot<=last_slot:
+                    pair_slot=paired["pair_slot"]
+                    last_slot=int(item.get("last_vault_ws_slot") or 0)
+                    if pair_slot<=last_slot:
                         continue
-                    item["last_vault_ws_slot"]=slot
+                    item["last_vault_ws_slot"]=pair_slot
                     vault_last_pair[pool]=current
+                    if paired["atomic_same_slot"]:
+                        stats["vault_pairs_same_slot"]+=1
+                    else:
+                        stats["vault_pairs_bounded_skew"]+=1
                     history=vault_history.setdefault(pool,[])
                     now_s=time.monotonic()
                     history.append((now_s,current))
@@ -1112,7 +1140,9 @@ def run_embedded_liquidity_sensor():
                         stats["pre_rug_sell_pressure_events"]+=1
                         first_ts,starting=history[0]
                         emit("onchain_preemptive_sell_pressure",
-                             pool=pool,mint=item["mint"],slot=slot,
+                             pool=pool,mint=item["mint"],slot=pair_slot,
+                             vault_pair_slot_skew=paired["slot_skew"],
+                             non_atomic_observation=not paired["atomic_same_slot"],
                              window_seconds=round(now_s-first_ts,3),
                              watched_vault_index=item["watched_vault_index"],
                              initial_watched_raw=str(starting[item["watched_vault_index"]]),
@@ -1136,13 +1166,21 @@ def run_embedded_liquidity_sensor():
                             urgent_ws_tasks.add(task)
                             task.add_done_callback(urgent_ws_tasks.discard)
                     if vault_joint_drop(previous,current):
-                        stats["vault_ws_joint_drops"]+=1
-                        emit("onchain_vault_ws_joint_drop",pool=pool,mint=item["mint"],
-                             slot=slot,previous_base_raw=str(previous[0]),
+                        if paired["atomic_same_slot"]:
+                            stats["vault_ws_joint_drops"]+=1
+                            drain_kind="onchain_vault_ws_joint_drop"
+                        else:
+                            stats["vault_cross_slot_joint_drop_suspected"]+=1
+                            drain_kind="onchain_vault_cross_slot_joint_drop_suspected"
+                        emit(drain_kind,pool=pool,mint=item["mint"],
+                             slot=pair_slot,vault_pair_slot_skew=paired["slot_skew"],
+                             same_slot_confirmation=paired["atomic_same_slot"],
+                             previous_base_raw=str(previous[0]),
                              previous_quote_raw=str(previous[1]),
                              new_base_raw=str(current[0]),new_quote_raw=str(current[1]),
-                             confirmed_vault_accounts=True,read_only=True,
-                             no_fill_executed=True)
+                             verified_vault_owners=True,
+                             not_proof_of_atomic_joint_withdrawal=not paired["atomic_same_slot"],
+                             read_only=True,no_fill_executed=True)
                         if len(urgent_ws_tasks)<3:
                             async def quote_vault_alarm(watched):
                                 try:
@@ -1432,6 +1470,17 @@ def run_embedded_liquidity_sensor():
             assert lp_balance_decline(100,90) is True
             assert lp_balance_decline(100,91) is False
             assert lp_balance_decline(0,0) is False
+            observed={}
+            assert pair_recent_vault_updates(observed,"base",101,100,100) is None
+            near=pair_recent_vault_updates(observed,"quote",103,200,100)
+            assert near["current"]==(100,200) and near["slot_skew"]==2
+            assert near["non_atomic_cross_slot_observation"] is True
+            assert pair_recent_vault_updates(observed,"base",99,150,100) is None
+            assert pair_recent_vault_updates(observed,"quote",104,201,100) is not None
+            assert pair_recent_vault_updates(observed,"base",108,90,100) is None
+            assert pair_recent_vault_updates(observed,"quote",108,150,100)[
+                "atomic_same_slot"] is True
+            assert pair_recent_vault_updates({},"base",99,100,100) is None
             assert early_sell_pressure((100,200),(114,175),0) is True
             assert early_sell_pressure((100,200),(85,228),1) is True
             assert early_sell_pressure((100,200),(114,210),0) is False
@@ -1451,7 +1500,7 @@ def run_embedded_liquidity_sensor():
                                    "liquidity_usd":15000}) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":0,
                                    "liquidity_usd":15000}) is None
-            print("LIQUIDITY_SENSOR_SELFTEST=PASS (32 source/pool/LP-owner/forward-pressure checks)",flush=True)
+            print("LIQUIDITY_SENSOR_SELFTEST=PASS (40 source/pool/LP-owner/cross-slot pairing checks)",flush=True)
             return
         EVENTS.parent.mkdir(parents=True,exist_ok=True)
         items=candidates()
@@ -3675,7 +3724,9 @@ readiness={
          'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown','pre_rug_sell_pressure_events','candidate_preflight_queued',
          'creator_lp_ws_subscriptions','creator_lp_ws_events','creator_lp_early_decreases',
          'creator_token_probes','creator_token_confirmed','creator_token_ws_subscriptions',
-         'creator_token_ws_events','creator_token_decreases')},
+         'creator_token_ws_events','creator_token_decreases',
+         'vault_pairs_same_slot','vault_pairs_bounded_skew',
+         'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
