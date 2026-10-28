@@ -4,7 +4,7 @@ def run_pumpfun_first_seconds_stream():
     """Real confirmed Pump.fun CREATE events before GeckoTerminal listing.
     Pure observation: never sign, buy, simulate fills, or infer safe liquidity.
     """
-    import asyncio,datetime as dt,json,os,time,urllib.request,urllib.error
+    import asyncio,datetime as dt,hashlib,json,os,time,urllib.request,urllib.error
     from pathlib import Path
     import websockets
     PUMP_PROGRAM="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -40,6 +40,22 @@ def run_pumpfun_first_seconds_stream():
                      "create_transaction_unverified","ws_reconnect"):
             print("PUMPFUN_FIRST_SECONDS",
                   json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
+    def is_pumpfun_create_data(encoded):
+        # Anchor global:create / global:create_v2 are distinct from buy,
+        # sell, migrate and other Pump.fun instructions in a mixed tx.
+        if not isinstance(encoded,str):
+            return False
+        chars="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        value=0
+        for char in encoded:
+            ix=chars.find(char)
+            if ix<0:return False
+            value=value*58+ix
+        raw=value.to_bytes((value.bit_length()+7)//8,"big")
+        raw=b"\\x00"*(len(encoded)-len(encoded.lstrip("1")))+raw
+        expected=(hashlib.sha256(b"global:"+name).digest()[:8]
+                  for name in (b"create",b"create_v2"))
+        return len(raw)>=8 and raw[:8] in expected
     def decode_create_transaction(signature):
         query={"jsonrpc":"2.0","id":19,"method":"getTransaction",
                "params":[signature,{"encoding":"jsonParsed",
@@ -75,7 +91,8 @@ def run_pumpfun_first_seconds_stream():
         for entry in (tx.get("meta") or {}).get("innerInstructions") or []:
             instructions.extend(entry.get("instructions") or [])
         for instruction in instructions:
-            if instruction.get("programId")!=PUMP_PROGRAM:
+            if (instruction.get("programId")!=PUMP_PROGRAM
+                    or not is_pumpfun_create_data(instruction.get("data"))):
                 continue
             accounts=instruction.get("accounts") or []
             if not accounts:continue
