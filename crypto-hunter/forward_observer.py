@@ -3333,6 +3333,7 @@ print('CRYPTO_LIVE_READINESS',json.dumps(readiness,allow_nan=False))
 alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
              'onchain_vault_joint_drop':'confirmed_joint_pumpswap_vault_balance_drop',
              'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
+             'onchain_preemptive_sell_pressure':'early_sell_pressure_vault_observation',
              'liquidity_critical':'reserve_critical',
              'liquidity_warning':'reserve_warning'}
 events=[]
@@ -3347,6 +3348,42 @@ try:
                 continue
 except OSError:
     pass
+# The previous report dropped preemptive sell-pressure events from "events".
+# Persist FIRST-OBSERVED, timestamped risk/drain observations across workflows.
+# This allows forward tests after GitHub's individual 20-minute job ends.
+onchain_outcomes_file='evidence/onchain_risk_outcomes_ledger.jsonl'
+persistent_kinds={'onchain_preemptive_sell_pressure',
+                  'onchain_vault_ws_joint_drop','onchain_vault_joint_drop'}
+onchain_evidence_by_id={}
+try:
+    with open(onchain_outcomes_file,encoding='utf-8') as old_evidence:
+        for line in old_evidence:
+            try:
+                ev=json.loads(line)
+                if ev.get('kind') in persistent_kinds:
+                    key=(ev.get('kind'),ev.get('pool'),ev.get('at'),ev.get('slot'))
+                    onchain_evidence_by_id.setdefault(key,ev)
+            except (ValueError,TypeError):
+                continue
+except OSError:
+    pass
+old_evidence_count=len(onchain_evidence_by_id)
+for ev in events:
+    if ev.get('kind') in persistent_kinds:
+        key=(ev.get('kind'),ev.get('pool'),ev.get('at'),ev.get('slot'))
+        onchain_evidence_by_id.setdefault(key,ev)
+onchain_evidence=list(onchain_evidence_by_id.values())
+onchain_evidence.sort(key=lambda x:(x.get('at') or '',x.get('pool') or ''))
+# Write atomically: no partial event ledger if the GitHub runner is stopped.
+tmp_path=onchain_outcomes_file+'.tmp'
+with open(tmp_path,'w',encoding='utf-8') as eventfile:
+    for ev in onchain_evidence:
+        eventfile.write(json.dumps(ev,allow_nan=False,separators=(',',':'))+'\n')
+os.replace(tmp_path,onchain_outcomes_file)
+print('ONCHAIN_FORWARD_EVENT_LEDGER',json.dumps({
+    'previous_event_count':old_evidence_count,
+    'new_events_this_run':len(onchain_evidence)-old_evidence_count,
+    'retained_events':len(onchain_evidence),'read_only':True},allow_nan=False))
 risk_alerts=[x for x in events if x.get('kind') in alert_types]
 risk_quotes=[x for x in events if x.get('kind')=='urgent_sell_quote']
 matching_quotes=[]
@@ -3413,7 +3450,7 @@ try:
             lp_ledger.setdefault(pool,lp_row)
 except OSError:
     pass
-lp_drain_events=[event for event in events
+lp_drain_events=[event for event in onchain_evidence
                  if event.get('kind') in (
                      'onchain_vault_joint_drop','onchain_vault_ws_joint_drop')]
 lp_labels=[]
@@ -3449,6 +3486,7 @@ lp_study={
     'incomplete_structural_risk_at_first_snapshot':sum(
         z.get('structural_risk_tier')=='incomplete' for z in lp_ledger.values()),
     'subsequent_verified_joint_drain_observed_after_30s':len(lp_labels),
+    'cross_run_event_ledger_used':True,
     'matched_future_drain_evidence':lp_labels[:30],
     'no_outcome_for_unmatched_cohort_is_censored_not_negative':True,
     'provider_outages_possible':True,'unseen_events_between_runs_unknown':True,
@@ -3461,7 +3499,8 @@ print('LP_CONTROL_FORWARD_VALIDATION',json.dumps(lp_study,allow_nan=False))
 # Falsifiable order-flow precursor: pre-registered 12%/12% reserve pressure
 # within 120s, recorded at notification time. Only LATER >=30s confirmed
 # two-vault drains may count as lead-time evidence.
-precursor_events=[e for e in events if e.get('kind')=='onchain_preemptive_sell_pressure']
+precursor_events=[e for e in onchain_evidence
+                  if e.get('kind')=='onchain_preemptive_sell_pressure']
 forward_precursor_matches=[]
 for trigger in precursor_events:
     try:
@@ -3490,7 +3529,9 @@ for trigger in precursor_events:
 precursor_report={
     'as_of':now.isoformat(),
     'precommitted_definition':'Watched mint reserve grows >=12% and counterasset reserve falls >=12% over <=120 seconds, after >=2 independent account notification slots',
-    'precursor_observations_in_this_run':len(precursor_events),
+    'precursor_observations_in_this_run':sum(
+        x.get('kind')=='onchain_preemptive_sell_pressure' for x in events),
+    'precursor_observations_in_retained_ledger':len(precursor_events),
     'observed_subsequent_verified_2_vault_drains_at_least_30s_later':len(forward_precursor_matches),
     'matched_evidence':forward_precursor_matches[:40],
     'unmatched_outcomes_are_unknown_due_to_incomplete_followup':True,
