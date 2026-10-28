@@ -18,7 +18,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -1145,6 +1145,33 @@ def run_embedded_liquidity_sensor():
                         stats["vault_pairs_bounded_skew"]+=1
                     history=vault_history.setdefault(pool,[])
                     now_s=time.monotonic()
+                    # Timestamped data for future pre-registered predictors:
+                    # observe reserves BEFORE future collapse events, rather
+                    # than fitting a story to the collapse after the fact.
+                    # Keep sensor output bounded under API-heavy conditions.
+                    baseline_observed=item.get("last_pair_telemetry_at",0.)
+                    base_move=bool(previous and previous[0]>0 and
+                                   abs(current[0]-previous[0])*100>=previous[0]*5)
+                    quote_move=bool(previous and previous[1]>0 and
+                                    abs(current[1]-previous[1])*100>=previous[1]*5)
+                    if (stats["vault_pair_telemetry_rows"]<500 and
+                            (now_s-baseline_observed>=15 or base_move or quote_move)):
+                        stats["vault_pair_telemetry_rows"]+=1
+                        item["last_pair_telemetry_at"]=now_s
+                        emit("onchain_vault_pair_observation",
+                             pool=pool,mint=item["mint"],
+                             slot=pair_slot,
+                             slot_skew=paired["slot_skew"],
+                             current_pair_atomic=paired["atomic_same_slot"],
+                             previous_pair_atomic=previous_pair_atomic,
+                             new_base_raw=str(current[0]),
+                             new_quote_raw=str(current[1]),
+                             previous_base_raw=str(previous[0]) if previous else None,
+                             previous_quote_raw=str(previous[1]) if previous else None,
+                             tracked_mint_side=item.get("watched_vault_index"),
+                             genuine_vault_accounts_verified=True,
+                             not_a_price_or_filled_exit=True,
+                             prospectively_captured=True)
                     history.append((now_s,current))
                     history[:]=[(ts,balances) for ts,balances in history
                                 if now_s-ts<=120]
@@ -3747,7 +3774,8 @@ readiness={
          'creator_token_probes','creator_token_confirmed','creator_token_ws_subscriptions',
          'creator_token_ws_events','creator_token_decreases',
          'vault_pairs_same_slot','vault_pairs_bounded_skew',
-         'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected')},
+         'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected',
+         'vault_pair_telemetry_rows')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
@@ -3790,6 +3818,8 @@ persistent_kinds={'onchain_preemptive_sell_pressure',
                   'onchain_pool_creator_token_snapshot',
                   'onchain_pool_creator_token_balance_drop',
                   'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
+                  'onchain_vault_pair_observation',
+                  'onchain_vault_cross_slot_joint_drop_suspected',
                   'urgent_sell_quote'}
 onchain_evidence_by_id={}
 try:
@@ -3820,7 +3850,19 @@ os.replace(tmp_path,onchain_outcomes_file)
 print('ONCHAIN_FORWARD_EVENT_LEDGER',json.dumps({
     'previous_event_count':old_evidence_count,
     'new_events_this_run':len(onchain_evidence)-old_evidence_count,
-    'retained_events':len(onchain_evidence),'read_only':True},allow_nan=False))
+    'retained_events':len(onchain_evidence),
+    'vault_pair_samples_retained':sum(
+        z.get('kind')=='onchain_vault_pair_observation' for z in onchain_evidence),
+    'vault_pair_distinct_pools':len({
+        z.get('pool') for z in onchain_evidence
+        if z.get('kind')=='onchain_vault_pair_observation'}),
+    'vault_pair_atomic_sample_count':sum(
+        z.get('kind')=='onchain_vault_pair_observation' and
+        z.get('current_pair_atomic') is True for z in onchain_evidence),
+    'vault_pair_cross_slot_sample_count':sum(
+        z.get('kind')=='onchain_vault_pair_observation' and
+        z.get('current_pair_atomic') is False for z in onchain_evidence),
+    'read_only':True,'observations_not_profit_predictions':True},allow_nan=False))
 risk_alerts=[x for x in events if x.get('kind') in alert_types]
 risk_quotes=[x for x in events if x.get('kind')=='urgent_sell_quote']
 matching_quotes=[]
