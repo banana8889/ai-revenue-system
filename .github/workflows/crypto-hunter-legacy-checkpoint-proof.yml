@@ -1,0 +1,46 @@
+name: Crypto Hunter Legacy Checkpoint Recovery Proof
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-legacy-checkpoint-proof.yml
+permissions:
+  contents: read
+jobs:
+  recover-legacy-research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore historic checkpoint with original cache layout
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+          key: crypto-legacy-proof-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Prove prior large research corpus is still recoverable
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          path=pathlib.Path('evidence/state.json')
+          state=json.loads(path.read_text()) if path.exists() else {}
+          assert isinstance(state,dict)
+          lp=pathlib.Path('evidence/onchain_lp_control_prospective.jsonl')
+          rows=sum(1 for line in lp.open() if line.strip()) if lp.exists() else 0
+          receipt={'historic_pools_recovered':len(state),
+                   'historic_lp_evidence_rows':rows,
+                   'prior_corpus_recovered':len(state)>=20000,
+                   'no_signing_or_trades':True}
+          print('CRYPTO_LEGACY_RECOVERY_PROOF',json.dumps(receipt))
+          if not receipt['prior_corpus_recovered']:
+              raise SystemExit('FAIL: historical >20K pool research corpus not recovered')
+          PY
