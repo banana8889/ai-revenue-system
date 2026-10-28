@@ -3869,7 +3869,9 @@ readiness={
          'creator_token_ws_events','creator_token_decreases',
          'vault_pairs_same_slot','vault_pairs_bounded_skew',
          'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected',
-         'vault_pair_telemetry_rows')},
+         'vault_pair_telemetry_rows','vault_rpc_confirmation_checks',
+         'vault_rpc_joint_drops_confirmed','vault_rpc_joint_drops_not_confirmed',
+         'vault_rpc_joint_drops_unknown')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
@@ -3886,6 +3888,7 @@ print('CRYPTO_LIVE_READINESS',json.dumps(readiness,allow_nan=False))
 alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
              'onchain_vault_joint_drop':'confirmed_joint_pumpswap_vault_balance_drop',
              'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
+             'onchain_vault_ws_joint_drop_suspected':'ws_pumpswap_joint_drop_suspected',
              'onchain_preemptive_sell_pressure':'early_sell_pressure_vault_observation',
              'onchain_lp_creator_balance_drop':'observed_creator_lp_balance_decrease',
              'onchain_pool_creator_token_balance_drop':'observed_pool_creator_token_balance_decrease',
@@ -3897,7 +3900,9 @@ try:
         for line in sensor_log:
             try:
                 event=json.loads(line)
-                if event.get('kind') in (*alert_types.keys(),'urgent_sell_quote'):
+                if event.get('kind') in (*alert_types.keys(),'urgent_sell_quote',
+                                          'onchain_vault_pair_observation',
+                                          'onchain_vault_rpc_confirmation'):
                     events.append(event)
             except (ValueError,TypeError):
                 continue
@@ -3914,6 +3919,8 @@ persistent_kinds={'onchain_preemptive_sell_pressure',
                   'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
                   'onchain_vault_pair_observation',
                   'onchain_vault_cross_slot_joint_drop_suspected',
+                  'onchain_vault_ws_joint_drop_suspected',
+                  'onchain_vault_rpc_confirmation',
                   'urgent_sell_quote'}
 onchain_evidence_by_id={}
 try:
@@ -3953,6 +3960,12 @@ print('ONCHAIN_FORWARD_EVENT_LEDGER',json.dumps({
     'vault_pair_atomic_sample_count':sum(
         z.get('kind')=='onchain_vault_pair_observation' and
         z.get('current_pair_atomic') is True for z in onchain_evidence),
+    'confirmed_rpc_joint_drops':sum(
+        z.get('kind')=='onchain_vault_rpc_confirmation' and
+        z.get('outcome')=='confirmed' for z in onchain_evidence),
+    'unverified_ws_joint_drop_hints':sum(
+        z.get('kind')=='onchain_vault_ws_joint_drop_suspected'
+        for z in onchain_evidence),
     'vault_pair_cross_slot_sample_count':sum(
         z.get('kind')=='onchain_vault_pair_observation' and
         z.get('current_pair_atomic') is False for z in onchain_evidence),
@@ -4024,8 +4037,9 @@ try:
 except OSError:
     pass
 lp_drain_events=[event for event in onchain_evidence
-                 if event.get('kind') in (
-                     'onchain_vault_joint_drop','onchain_vault_ws_joint_drop')]
+                 if (event.get('kind')=='onchain_vault_joint_drop' or
+                     (event.get('kind')=='onchain_vault_rpc_confirmation'
+                      and event.get('outcome')=='confirmed'))]
 lp_labels=[]
 for pool,baseline in lp_ledger.items():
     try:
@@ -4052,7 +4066,7 @@ for pool,baseline in lp_ledger.items():
             'read_only_event_not_realized_exit':True})
 lp_study={
     'as_of':now.isoformat(),
-    'method':'Frozen first onchain LP ownership evidence; later same-pool joint vault decrease >=20% on both legs',
+    'method':'Frozen first onchain LP ownership evidence; later same-pool RPC-confirmed dual-vault decrease >=20% on both legs',
     'first_verified_lp_snapshots':len(lp_ledger),
     'elevated_structural_risk_at_first_snapshot':sum(
         z.get('structural_risk_tier')=='elevated' for z in lp_ledger.values()),
