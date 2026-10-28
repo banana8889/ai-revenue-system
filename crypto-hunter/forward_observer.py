@@ -479,6 +479,16 @@ def run_embedded_liquidity_sensor():
                     f.write(json.dumps(snapshot,allow_nan=False,separators=(",",":"))+"\n")
         emit("onchain_lp_control_snapshot",first_verified_baseline_preserved=True,
              **snapshot)
+        # Price the SAME token quantity at first observed structural risk,
+        # before any later verified drain. No wallet, signature or fill.
+        if (detail.get("available") and
+                detail.get("structural_risk_tier")=="elevated" and
+                not item.get("structural_risk_quote_checked")):
+            item["structural_risk_quote_checked"]=True
+            await urgent_quote_only(item,reason="lp_control_prewithdrawal_review",
+                details={"lp_structural_tier":"elevated",
+                         "lp_sample_completed_at":snapshot["sample_completed_at"],
+                         "risk_is_not_certain_future_drain":True})
 
     async def inspect_pumpswap_vaults(item):
         if stats["pump_vault_queries"]>=16:
@@ -3368,7 +3378,8 @@ except OSError:
 # This allows forward tests after GitHub's individual 20-minute job ends.
 onchain_outcomes_file='evidence/onchain_risk_outcomes_ledger.jsonl'
 persistent_kinds={'onchain_preemptive_sell_pressure',
-                  'onchain_vault_ws_joint_drop','onchain_vault_joint_drop'}
+                  'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
+                  'urgent_sell_quote'}
 onchain_evidence_by_id={}
 try:
     with open(onchain_outcomes_file,encoding='utf-8') as old_evidence:
@@ -3510,6 +3521,76 @@ lp_study={
 with open('evidence/onchain_lp_early_warning_study.json','w',encoding='utf-8') as resultfile:
     json.dump(lp_study,resultfile,indent=2,allow_nan=False)
 print('LP_CONTROL_FORWARD_VALIDATION',json.dumps(lp_study,allow_nan=False))
+
+# Counterfactual liquidity-exit feasibility: record whether an observed
+# quote at FIRST high LP-control risk was better than a quote following
+# an observed later two-vault drain, for EXACT same token raw amount.
+# Treat missing quotes and pool observations as censored, not profits.
+prewithdrawal_quote_pairs=[]
+for matched in lp_labels:
+    pool=matched['pool']
+    baseline=lp_ledger.get(pool) or {}
+    if baseline.get('structural_risk_tier')!='elevated':
+        continue
+    candidates=[]
+    for ev in onchain_evidence:
+        if ev.get('pool')!=pool or ev.get('kind')!='urgent_sell_quote':
+            continue
+        try:
+            seconds=(d.datetime.fromisoformat(ev['at'])-d.datetime.fromisoformat(
+                baseline['sample_completed_at'])).total_seconds()
+        except (KeyError,ValueError,TypeError):
+            continue
+        if (ev.get('trigger')=='lp_control_prewithdrawal_review'
+                and 0<=seconds<=120 and ev.get('available')):
+            candidates.append(ev)
+    if not candidates:
+        continue
+    earliest=min(candidates,key=lambda x:x['at'])
+    try:
+        drain_at=d.datetime.fromisoformat(matched['first_onchain_joint_drain_at'])
+    except (KeyError,ValueError,TypeError):
+        continue
+    later=[]
+    for ev in onchain_evidence:
+        if (ev.get('pool')!=pool or ev.get('kind')!='urgent_sell_quote'
+                or not ev.get('available')
+                or ev.get('amount_raw')!=earliest.get('amount_raw')):
+            continue
+        try:
+            seconds=(d.datetime.fromisoformat(ev['at'])-drain_at).total_seconds()
+        except (KeyError,ValueError,TypeError):
+            continue
+        if 0<=seconds<=120:
+            later.append(ev)
+    if not later:
+        continue
+    first_later=min(later,key=lambda x:x['at'])
+    before=earliest.get('usdc')
+    after=first_later.get('usdc')
+    if not all(isinstance(v,(int,float)) and v>=0 for v in (before,after)):
+        continue
+    prewithdrawal_quote_pairs.append({
+        'pool':pool,'baseline_at':baseline['sample_completed_at'],
+        'early_quote_usdc':before,'later_quote_usdc':after,
+        'estimated_quote_only_value_preserved_usdc':round(before-after,6),
+        'same_token_raw_amount':str(earliest.get('amount_raw')),
+        'joint_drain_at':matched['first_onchain_joint_drain_at'],
+        'no_executed_trades':True,
+        'not_net_profit_accounting':True})
+early_exit_report={
+    'as_of':now.isoformat(),
+    'predeclared_high_lp_risk_snapshot_count':sum(
+        z.get('structural_risk_tier')=='elevated' for z in lp_ledger.values()),
+    'paired_before_and_after_drain_same_size_quotes':len(prewithdrawal_quote_pairs),
+    'quote_only_comparisons':prewithdrawal_quote_pairs[:30],
+    'unobserved_exits_and_missing_later_rugs_censored':True,
+    'potential_rug_prevention_not_proven':True,
+    'no_execution_or_net_profit_proven':True}
+with open('evidence/onchain_lp_early_quote_vs_drain.json','w',encoding='utf-8') as evfile:
+    json.dump(early_exit_report,evfile,indent=2,allow_nan=False)
+print('LP_EARLY_VERSUS_DRAIN_QUOTE',json.dumps(early_exit_report,allow_nan=False))
+
 
 # Falsifiable order-flow precursor: pre-registered 12%/12% reserve pressure
 # within 120s, recorded at notification time. Only LATER >=30s confirmed
