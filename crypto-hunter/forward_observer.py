@@ -1,5 +1,103 @@
 import sys
 
+def decode_pumpfun_anchor_event(encoded):
+    """Read-only strict Borsh prefix from official Pump.fun onchain IDL.
+
+    CreateEvent: discriminator 27,114,169,77,222,235,99,118.
+    TradeEvent: 189,219,127,211,78,230,97,238.
+    Data inside a *confirmed Pump.fun program log*, not a transaction
+    simulation; unknown discriminators and truncated data return None.
+    """
+    import base64,struct
+    try:
+        data=base64.b64decode(encoded,validate=True)
+        if len(data)<9 or len(data)>8192:
+            return None
+        disc=data[:8]
+        is_create=disc==bytes((27,114,169,77,222,235,99,118))
+        is_trade=disc==bytes((189,219,127,211,78,230,97,238))
+        if not (is_create or is_trade):
+            return None
+        pos=8
+        alphabet="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        def take(n):
+            nonlocal pos
+            if n<0 or pos+n>len(data):
+                raise ValueError("truncated_borsh_event")
+            out=data[pos:pos+n]
+            pos+=n
+            return out
+        def integer(n,signed=False):
+            return int.from_bytes(take(n),"little",signed=signed)
+        def string():
+            size=integer(4)
+            if size>2048:
+                raise ValueError("oversized_borsh_string")
+            return take(size).decode("utf-8")
+        def pubkey():
+            raw=take(32)
+            v=int.from_bytes(raw,"big")
+            enc=""
+            while v:
+                v,mod=divmod(v,58)
+                enc=alphabet[mod]+enc
+            return "1"*(len(raw)-len(raw.lstrip(b"\\x00")))+(enc or "")
+        if is_create:
+            name=string()
+            symbol=string()
+            _uri=string()
+            mint=pubkey()
+            curve=pubkey()
+            user=pubkey()
+            creator=pubkey()
+            timestamp=integer(8,True)
+            virtual_token=integer(8)
+            virtual_sol=integer(8)
+            real_token=integer(8)
+            total_supply=integer(8)
+            token_program=pubkey()
+            mayhem=integer(1)
+            cashback=integer(1)
+            if (mayhem not in (0,1) or cashback not in (0,1)
+                    or virtual_token<=0 or total_supply<=0 or
+                    virtual_sol<=0 or not 1600000000<timestamp<2000000000):
+                return None
+            return {"kind":"CreateEvent","mint":mint,
+                    "bonding_curve":curve,"user":user,"creator":creator,
+                    "created_at_unix":timestamp,
+                    "name":name[:128],"symbol":symbol[:32],
+                    "virtual_token_raw":virtual_token,
+                    "virtual_sol_lamports":virtual_sol,
+                    "real_token_raw":real_token,
+                    "total_supply_raw":total_supply,
+                    "token_program":token_program,
+                    "mayhem_mode":bool(mayhem),
+                    "cashback_enabled":bool(cashback),
+                    "onchain_create_event_discriminator_verified":True}
+        mint=pubkey()
+        sol_lamports=integer(8)
+        token_raw=integer(8)
+        bought=integer(1)
+        user=pubkey()
+        ts=integer(8,True)
+        virtual_sol=integer(8)
+        virtual_token=integer(8)
+        real_sol=integer(8)
+        real_token=integer(8)
+        if (bought not in (0,1) or virtual_token<=0 or
+                not 1600000000<ts<2000000000):
+            return None
+        return {"kind":"TradeEvent","mint":mint,"user":user,
+                "timestamp_unix":ts,"is_buy":bool(bought),
+                "sol_lamports_reported":sol_lamports,
+                "token_amount_raw":token_raw,
+                "virtual_sol_lamports":virtual_sol,
+                "virtual_token_raw":virtual_token,
+                "real_sol_lamports":real_sol,"real_token_raw":real_token,
+                "onchain_trade_event_discriminator_verified":True}
+    except (ValueError,UnicodeDecodeError,OverflowError,TypeError,struct.error):
+        return None
+
 def run_pumpfun_first_seconds_stream():
     """Real confirmed Pump.fun CREATE events before GeckoTerminal listing.
     Pure observation: never sign, buy, simulate fills, or infer safe liquidity.
