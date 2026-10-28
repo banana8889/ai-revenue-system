@@ -87,6 +87,7 @@ def run_pumpfun_first_seconds_stream():
         until=time.monotonic()+DURATION
         seen=set()
         rpc_budget=0
+        rpc_window_started=time.monotonic()
         last_rpc=0.
         provider_attempt=0
         while time.monotonic()<until:
@@ -127,13 +128,18 @@ def run_pumpfun_first_seconds_stream():
                             continue
                         seen.add(signature)
                         stats["launch_signatures"]+=1
+                        stats["creator_instructions"]+=1
                         if len(seen)>30000:seen.clear()
                         slot=(params.get("result") or {}).get("context",{}).get("slot")
                         event("pumpfun_create_observed",signature=signature,
                               slot=slot,mint_verified=False,
                               requires_rpc_transaction_proof=True)
-                        # Bound public RPC by shared gateway policies. A
-                        # missed lookup remains unknown, not a false label.
+                        # Bound public RPC to four confirmed creation
+                        # lookups PER MINUTE, not four in the entire
+                        # 25-minute research job. Unchecked remain unknown.
+                        if time.monotonic()-rpc_window_started>=60:
+                            rpc_window_started=time.monotonic()
+                            rpc_budget=0
                         if (rpc_budget>=4 or
                                 time.monotonic()-last_rpc<2):
                             continue
