@@ -207,25 +207,89 @@ def run_pumpfun_first_seconds_stream():
         return {"_missing_reason":"program_create_accounts_not_parsed"}
     async def main():
         until=time.monotonic()+DURATION
-        seen=set()
-        rpc_budget=0
-        rpc_window_started=time.monotonic()
-        last_rpc=0.
+        seen_signatures=set()
+        watched={}
         provider_attempt=0
+        stats["create_events_decoded"]=0
+        stats["trade_events_decoded"]=0
+        stats["watched_first30"]=0
+        stats["first30_complete"]=0
+        stats["first30_censored"]=0
+        stats["first30_trades_matched"]=0
+        FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
+        def snapshot(mint,state,complete,why):
+            if state.get("done"):
+                return
+            state["done"]=True
+            buys=state["buys"]
+            sells=state["sells"]
+            row={"mint":mint,"created_at_unix":state["created_at_unix"],
+                 "first_observed_at":state["first_observed_at"],
+                 "initial_lag_seconds":state["initial_lag_seconds"],
+                 "completion_at":stamp(),
+                 "full_first_30s_observation":bool(complete),
+                 "censored_reason":None if complete else why,
+                 "observed_trades":buys+sells,
+                 "buy_events_first30":buys,
+                 "sell_events_first30":sells,
+                 "distinct_buyers_first30":len(state["buyers"]),
+                 "distinct_sellers_first30":len(state["sellers"]),
+                 "creator_buy_events_first30":state["creator_buys"],
+                 "creator_sell_events_first30":state["creator_sells"],
+                 "buy_sol_lamports_reported_first30":state["buy_lamports"],
+                 "sell_sol_lamports_reported_first30":state["sell_lamports"],
+                 "last_virtual_sol_lamports":state["virtual_sol"],
+                 "last_virtual_token_raw":state["virtual_token"],
+                 "initial_virtual_sol_lamports":state["initial_virtual_sol"],
+                 "initial_virtual_token_raw":state["initial_virtual_token"],
+                 "initial_real_token_raw":state["initial_real_token"],
+                 "initial_supply_raw":state["initial_supply"],
+                 "is_mayhem_mode":state["mayhem"],
+                 "creator":state["creator"],
+                 "observation_not_a_trade":True,
+                 "quote_type_and_token_decimals_not_inferred":True,
+                 "no_execution":True}
+            if complete:
+                stats["first30_complete"]+=1
+                # Durable features for an out-of-time cohort. The first
+                # 30s snapshots are frozen BEFORE any later quoted outcome.
+                with FEATURES.open("a",encoding="utf-8") as output:
+                    output.write(json.dumps(row,separators=(",",":"),
+                                            allow_nan=False)+"\\n")
+                event("pumpfun_first30_features",**row)
+            else:
+                stats["first30_censored"]+=1
+                event("pumpfun_first30_censored",
+                      mint=mint,reason=why,partial_trades=buys+sells,
+                      not_a_negative_label=True)
+        def finalize_expired():
+            expired=[]
+            for mint,state in watched.items():
+                if time.time()-state["created_at_unix"]>=30.5:
+                    snapshot(mint,state,
+                        complete=state["initial_lag_seconds"]<=5 and
+                                 not state["stream_gap"],
+                        why=("late_discovery" if state["initial_lag_seconds"]>5
+                             else "provider_disconnected_during_30s"
+                             if state["stream_gap"] else None))
+                    expired.append(mint)
+            for mint in expired:
+                del watched[mint]
         while time.monotonic()<until:
             ep=ENDPOINTS[provider_attempt%len(ENDPOINTS)]
             provider_attempt+=1
             try:
                 async with websockets.connect(ep,open_timeout=8,
-                        ping_interval=20,ping_timeout=20,max_size=2**20) as ws:
+                        ping_interval=20,ping_timeout=20,max_size=2**21) as ws:
                     await ws.send(json.dumps({"jsonrpc":"2.0","id":91,
                         "method":"logsSubscribe","params":[
                             {"mentions":[PUMP_PROGRAM]},
                             {"commitment":"confirmed"}]}))
                     acknowledged=False
                     while time.monotonic()<until:
+                        finalize_expired()
                         try:
-                            msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=5))
+                            msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=2))
                         except asyncio.TimeoutError:
                             continue
                         if msg.get("id")==91:
@@ -233,82 +297,122 @@ def run_pumpfun_first_seconds_stream():
                             if not acknowledged:
                                 raise ValueError("pumpfun_program_log_subscription_denied")
                             stats["program_subscribed"]=True
-                            event("program_subscribed",
-                                  provider=("primary" if provider_attempt%len(ENDPOINTS)==1
-                                            else "backup"),
-                                  pump_program=PUMP_PROGRAM)
+                            event("program_subscribed",provider=ep,
+                                  pump_program=PUMP_PROGRAM,
+                                  anchor_create_and_trade_direct_decode=True)
                             continue
                         if not acknowledged or msg.get("method")!="logsNotification":
                             continue
-                        params=msg.get("params") or {}
-                        value=(params.get("result") or {}).get("value") or {}
+                        result=(msg.get("params") or {}).get("result") or {}
+                        value=result.get("value") or {}
                         signature=value.get("signature")
                         logs=value.get("logs") or []
-                        if (not signature or signature in seen or value.get("err")
-                            or not any("Program log: Instruction: Create" in z
-                                       for z in logs)):
+                        if (not signature or signature in seen_signatures
+                                or value.get("err")):
                             continue
-                        seen.add(signature)
-                        stats["launch_signatures"]+=1
-                        stats["creator_instructions"]+=1
-                        if len(seen)>30000:seen.clear()
-                        slot=(params.get("result") or {}).get("context",{}).get("slot")
-                        event("pumpfun_create_observed",signature=signature,
-                              slot=slot,mint_verified=False,
-                              requires_rpc_transaction_proof=True)
-                        # Bound public RPC to four confirmed creation
-                        # lookups PER MINUTE, not four in the entire
-                        # 25-minute research job. Unchecked remain unknown.
-                        if time.monotonic()-rpc_window_started>=60:
-                            rpc_window_started=time.monotonic()
-                            rpc_budget=0
-                        if (rpc_budget>=4 or
-                                time.monotonic()-last_rpc<2):
-                            continue
-                        rpc_budget+=1
-                        last_rpc=time.monotonic()
-                        stats["rpc_attempts"]+=1
-                        try:
-                            decoded=await asyncio.to_thread(
-                                decode_create_transaction,signature)
-                            if not decoded or not decoded.get("mint"):
-                                stats["rpc_unavailable"]+=1
-                                event("create_transaction_unverified",
-                                      signature=signature,
-                                      reason=(decoded or {}).get(
-                                          "_missing_reason","rpc_missing"))
-                                continue
-                            block=decoded.get("block_time")
-                            lag=(time.time()-block if isinstance(block,(int,float))
-                                 else None)
-                            on_time=lag is not None and 0<=lag<=30
-                            stats["mint_verified"]+=1
-                            stats["latency_within_30s"]+=int(on_time)
-                            event("pumpfun_early_verified",signature=signature,
-                                  mint=decoded["mint"],slot=decoded["slot"],
-                                  block_time_unix=block,
-                                  detection_lag_seconds=(round(lag,3)
-                                      if lag is not None else None),
-                                  detected_within_first_30s=on_time,
-                                  launch_eligible_for_live_study=True,
-                                  owner_or_liquidity_safety_not_inferred=True,
-                                  not_an_executable_buy=True)
-                        except (OSError,ValueError,urllib.error.HTTPError,
-                                TimeoutError) as error:
-                            stats["rpc_unavailable"]+=1
-                            event("create_transaction_unverified",
-                                  signature=signature,reason=type(error).__name__)
+                        seen_signatures.add(signature)
+                        if len(seen_signatures)>50000:
+                            # Drop old signatures, never erase cohort state.
+                            seen_signatures.clear()
+                            seen_signatures.add(signature)
+                        slot=(result.get("context") or {}).get("slot")
+                        decoded=[]
+                        for line in logs:
+                            if isinstance(line,str) and line.startswith("Program data: "):
+                                data=decode_pumpfun_anchor_event(line[14:].strip())
+                                if data:
+                                    decoded.append(data)
+                        for observed in decoded:
+                            kind=observed["kind"]
+                            mint=observed["mint"]
+                            if kind=="CreateEvent":
+                                if mint in watched:
+                                    continue
+                                stats["launch_signatures"]+=1
+                                stats["creator_instructions"]+=1
+                                stats["create_events_decoded"]+=1
+                                lag=time.time()-observed["created_at_unix"]
+                                under30=0<=lag<=30
+                                stats["mint_verified"]+=1
+                                stats["latency_within_30s"]+=int(under30)
+                                event("pumpfun_early_verified",
+                                    signature=signature,mint=mint,slot=slot,
+                                    block_time_unix=observed["created_at_unix"],
+                                    event_timestamp_not_rpc_blocktime=True,
+                                    detection_lag_seconds=round(lag,3),
+                                    detected_within_first_30s=under30,
+                                    launch_eligible_for_live_study=True,
+                                    verification_source="onchain_anchor_create_event",
+                                    creator=observed["creator"],
+                                    user=observed["user"],
+                                    bonding_curve=observed["bonding_curve"],
+                                    symbol=observed["symbol"],
+                                    initial_virtual_sol_lamports=observed["virtual_sol_lamports"],
+                                    initial_virtual_token_raw=observed["virtual_token_raw"],
+                                    initial_real_token_raw=observed["real_token_raw"],
+                                    initial_total_supply_raw=observed["total_supply_raw"],
+                                    mayhem_mode=observed["mayhem_mode"],
+                                    owner_or_liquidity_safety_not_inferred=True,
+                                    not_an_executable_buy=True)
+                                if under30 and len(watched)<512:
+                                    watched[mint]={
+                                        "created_at_unix":observed["created_at_unix"],
+                                        "first_observed_at":stamp(),
+                                        "initial_lag_seconds":round(lag,3),
+                                        "creator":observed["creator"],
+                                        "mayhem":observed["mayhem_mode"],
+                                        "initial_virtual_sol":observed["virtual_sol_lamports"],
+                                        "initial_virtual_token":observed["virtual_token_raw"],
+                                        "initial_real_token":observed["real_token_raw"],
+                                        "initial_supply":observed["total_supply_raw"],
+                                        "virtual_sol":observed["virtual_sol_lamports"],
+                                        "virtual_token":observed["virtual_token_raw"],
+                                        "buyers":set(),"sellers":set(),
+                                        "buys":0,"sells":0,
+                                        "creator_buys":0,"creator_sells":0,
+                                        "buy_lamports":0,"sell_lamports":0,
+                                        "stream_gap":False,"done":False}
+                                    stats["watched_first30"]+=1
+                            elif kind=="TradeEvent":
+                                stats["trade_events_decoded"]+=1
+                                state=watched.get(mint)
+                                if state is None:
+                                    continue
+                                elapsed=observed["timestamp_unix"]-state["created_at_unix"]
+                                if not 0<=elapsed<=30:
+                                    continue
+                                stats["first30_trades_matched"]+=1
+                                user=observed["user"]
+                                if observed["is_buy"]:
+                                    state["buys"]+=1
+                                    state["buyers"].add(user)
+                                    state["buy_lamports"]+=observed["sol_lamports_reported"]
+                                    state["creator_buys"]+=int(user==state["creator"])
+                                else:
+                                    state["sells"]+=1
+                                    state["sellers"].add(user)
+                                    state["sell_lamports"]+=observed["sol_lamports_reported"]
+                                    state["creator_sells"]+=int(user==state["creator"])
+                                state["virtual_sol"]=observed["virtual_sol_lamports"]
+                                state["virtual_token"]=observed["virtual_token_raw"]
             except (OSError,ValueError,asyncio.TimeoutError,
                     websockets.exceptions.WebSocketException) as error:
                 stats["errors"]+=1
+                for state in watched.values():
+                    state["stream_gap"]=True
                 event("ws_reconnect",reason=type(error).__name__)
-                await asyncio.sleep(min(3,max(0.,until-time.monotonic())))
+                await asyncio.sleep(min(2,max(0.,until-time.monotonic())))
+        finalize_expired()
+        # A truncated observation window is censored, never called 0 trades.
+        for mint,state in watched.items():
+            snapshot(mint,state,False,"study_window_ended_before_30s")
         print("PUMPFUN_REAL_MAINNET_LAUNCH_RECEIPT",
               json.dumps({"at":stamp(),**stats,"read_only":True,
+                          "first30_coverage_not_100pct_claimed":True,
                           "no_trading_method_proven":True},allow_nan=False),
               flush=True)
         if PROOF and (not stats["program_subscribed"]
-                      or stats["launch_signatures"]<1
+                      or stats["create_events_decoded"]<1
                       or stats["mint_verified"]<1):
             raise SystemExit("PUMPFUN_FIRST_SECONDS_PROOF_FAILED")
     asyncio.run(main())
