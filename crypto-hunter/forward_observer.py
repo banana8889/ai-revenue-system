@@ -4123,6 +4123,92 @@ with open('evidence/onchain_rug_precursor_forward_test.json','w',encoding='utf-8
     json.dump(precursor_report,precursorfile,indent=2,allow_nan=False)
 print('ONCHAIN_PRE_RUG_FORWARD_TEST',json.dumps(precursor_report,allow_nan=False))
 
+# 10-minute forward outcome verification: absence of a recorded rug must NOT
+# count as a true negative unless paired-vault observations cover the window
+# without substantial telemetry gaps. Each pool/kind contributes one FIRST
+# alert; later near-simultaneous drains (<30s) count as too-late, not success.
+pairs_by_pool={}
+for e in onchain_evidence:
+    if e.get('kind')!='onchain_vault_pair_observation':
+        continue
+    try:
+        at=d.datetime.fromisoformat(e['at'])
+    except (KeyError,TypeError,ValueError):
+        continue
+    if e.get('genuine_vault_accounts_verified') is not True:
+        continue
+    pairs_by_pool.setdefault(e.get('pool'),[]).append((at,e))
+for pool,history in pairs_by_pool.items():
+    history.sort(key=lambda pair:pair[0])
+drains_by_pool={}
+for e in lp_drain_events:
+    try:
+        at=d.datetime.fromisoformat(e['at'])
+    except (KeyError,TypeError,ValueError):
+        continue
+    drains_by_pool.setdefault(e.get('pool'),[]).append((at,e))
+for pool,history in drains_by_pool.items():
+    history.sort(key=lambda pair:pair[0])
+first_alerts={}
+for ev in precursor_events:
+    key=(ev.get('pool'),ev.get('kind'))
+    if key[0] and key[1]:
+        previous=first_alerts.get(key)
+        if previous is None or ev.get('at','')<previous.get('at',''):
+            first_alerts[key]=ev
+evaluated=[]
+for (pool,kind),ev in sorted(first_alerts.items()):
+    try:
+        t0=d.datetime.fromisoformat(ev['at'])
+    except (KeyError,TypeError,ValueError):
+        continue
+    t1=t0+d.timedelta(minutes=10)
+    candidates=[(t,e) for t,e in drains_by_pool.get(pool,[])
+                if t0<=t<=t1]
+    first_drain=min(candidates,key=lambda z:z[0]) if candidates else None
+    post=[t for t,_ in pairs_by_pool.get(pool,[]) if t0<=t<=t1]
+    post.sort()
+    full_window=(
+        now>=t1 and len(post)>=6 and
+        (post[0]-t0).total_seconds()<=90 and
+        (t1-post[-1]).total_seconds()<=90 and
+        all((b-a).total_seconds()<=90 for a,b in zip(post,post[1:])))
+    if first_drain is not None:
+        lead=(first_drain[0]-t0).total_seconds()
+        outcome='observed_30s_plus_early' if lead>=30 else 'too_late_under_30s'
+    elif full_window:
+        lead=None
+        outcome='no_verified_joint_drain_during_covered_10m'
+    else:
+        lead=None
+        outcome='right_censored_or_provider_gap'
+    evaluated.append({'pool':pool,'trigger_kind':kind,'trigger_at':ev['at'],
+        'horizon_seconds':600,'outcome':outcome,
+        'observed_lead_seconds':round(lead,3) if lead is not None else None,
+        'paired_vault_observations_in_window':len(post),
+        'full_10m_telemetry_coverage_proven':full_window,
+        'no_actual_sell_or_buy':True})
+outcomes=['observed_30s_plus_early','too_late_under_30s',
+          'no_verified_joint_drain_during_covered_10m',
+          'right_censored_or_provider_gap']
+forward_ten_min={
+    'as_of':now.isoformat(),
+    'fixed_horizon_seconds':600,
+    'minimum_lead_seconds':30,
+    'telemetry_complete_definition':'At least 6 paired reserve samples; first and last <=90s from horizon edges; every gap <=90s',
+    'first_alerts_one_per_pool_and_type':len(evaluated),
+    'outcome_counts':{label:sum(e['outcome']==label for e in evaluated)
+                      for label in outcomes},
+    'censored_cases_are_not_true_negatives':True,
+    'same_slot_drain_only_for_verified_outcome':True,
+    'dataset_is_ascertained_by_live_sensor_not_all_pools':True,
+    'not_out_of_sample_proven_or_profitable':True,
+    'evidence':evaluated[:100]}
+with open('evidence/onchain_precursor_10m_followup.json','w',encoding='utf-8') as research_file:
+    json.dump(forward_ten_min,research_file,indent=2,allow_nan=False)
+print('ONCHAIN_PRECURSOR_10M_FOLLOWUP',json.dumps(forward_ten_min,allow_nan=False))
+
+
 
 
 
