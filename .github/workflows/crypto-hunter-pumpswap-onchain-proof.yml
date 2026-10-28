@@ -26,3 +26,5 @@ jobs:
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-ws-live-proof
       - name: Verify mainnet pool LP mint supply, creator LP holdings and largest LP account
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-lp-live-proof
+      - name: Verify actual mainnet tradeable-token supply and pool-creator direct balance
+        run: python3 -u crypto-hunter/forward_observer.py --pool-creator-token-live-proof
