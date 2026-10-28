@@ -4168,10 +4168,12 @@ for pool,baseline in lp_ledger.items():
             lag=(d.datetime.fromisoformat(ev['at'])-frozen_at).total_seconds()
         except (KeyError,TypeError,ValueError):
             continue
-        if lag>=30:
+        if lag>=0:
             matched.append((lag,ev))
     if matched:
         lag,first=min(matched,key=lambda x:x[0])
+        if lag<30:
+            continue
         lp_labels.append({'pool':pool,'lp_measured_at':baseline['sample_completed_at'],
             'risk_at_measurement':baseline.get('structural_risk_tier'),
             'first_onchain_joint_drain_at':first['at'],
@@ -4292,7 +4294,11 @@ precursor_kinds={'onchain_preemptive_sell_pressure',
                  'onchain_pool_creator_token_balance_drop'}
 precursor_events=[e for e in onchain_evidence
                   if e.get('kind') in precursor_kinds]
+# FIRST verifiable drain after each trigger; never skip an immediate drain
+# to cherry-pick a later recurrence 30+ seconds after the trigger.
+# These are RPC-confirmation timestamps, NOT proven physical drain start.
 forward_precursor_matches=[]
+too_late_precursor_matches=[]
 for trigger in precursor_events:
     try:
         trigger_at=d.datetime.fromisoformat(trigger['at'])
@@ -4306,18 +4312,33 @@ for trigger in precursor_events:
             seconds=(d.datetime.fromisoformat(drain['at'])-trigger_at).total_seconds()
         except (KeyError,TypeError,ValueError):
             continue
-        if seconds>=30:
+        if seconds>=0:
             later.append((seconds,drain))
     if later:
         lead,drain=min(later,key=lambda a:a[0])
-        forward_precursor_matches.append({
-            'pool':trigger.get('pool'),
-            'trigger_at':trigger['at'],'drain_at':drain['at'],
-            'trigger_kind':trigger.get('kind'),
-            'lead_seconds':round(lead,3),
-            'trigger_threshold_fixed_before_observation':True,
-            'drain_recorded_by':drain.get('kind'),
-            'not_an_executed_exit':True})
+        row={'pool':trigger.get('pool'),'trigger_at':trigger['at'],
+             'drain_at':drain['at'],'trigger_kind':trigger.get('kind'),
+             'first_confirmation_delay_seconds':round(lead,3),
+             'trigger_threshold_fixed_before_observation':True,
+             'drain_recorded_by':drain.get('kind'),
+             'confirmed_time_not_exact_chain_drain_time':True,
+             'not_an_executed_exit':True}
+        if lead>=30:
+            # A recorded confirmation >=30s later is still not proof that
+            # the physical withdrawal started then; caveat remains explicit.
+            forward_precursor_matches.append(row)
+        else:
+            too_late_precursor_matches.append(row)
+# A later drain must never rescue a trigger that had an earlier confirmed
+# same-pool drain. This invariant uses only retained real onchain events.
+assert all(
+    not any(
+        ev.get('pool')==x['pool']
+        and 0<=(d.datetime.fromisoformat(ev['at'])-
+                d.datetime.fromisoformat(x['trigger_at'])).total_seconds()
+                <x['first_confirmation_delay_seconds']
+        for ev in lp_drain_events)
+    for x in forward_precursor_matches)
 precursor_report={
     'as_of':now.isoformat(),
     'precommitted_definition':{
@@ -4336,7 +4357,11 @@ precursor_report={
         k:sum(x['trigger_kind']==k for x in forward_precursor_matches)
         for k in sorted(precursor_kinds)},
     'observed_subsequent_verified_2_vault_drains_at_least_30s_later':len(forward_precursor_matches),
+    'first_confirmed_drains_too_late_under_30s':len(too_late_precursor_matches),
+    'first_confirmation_only_no_later_event_cherry_pick':True,
+    'confirmation_time_does_not_prove_physical_drain_start':True,
     'matched_evidence':forward_precursor_matches[:40],
+    'too_late_evidence':too_late_precursor_matches[:40],
     'unmatched_outcomes_are_unknown_due_to_incomplete_followup':True,
     'no_sensitivity_precision_or_profitability_claim':True,
     'not_all_dexes_covered':True,
