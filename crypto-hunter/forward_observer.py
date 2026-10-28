@@ -117,7 +117,7 @@ def run_pumpfun_first_seconds_stream():
     VERIFIED=Path("evidence/pumpfun_verified_mints.jsonl")
     AUDIT.parent.mkdir(exist_ok=True)
     PROOF="--pumpfun-early-proof" in sys.argv
-    DURATION=28 if PROOF else max(60,min(1800,int(
+    DURATION=65 if PROOF else max(60,min(1800,int(
         os.getenv("PUMPFUN_FIRST_SECONDS_DURATION","1500"))))
     stats={"program_subscribed":False,"launch_signatures":0,
            "creator_instructions":0,"mint_verified":0,"rpc_attempts":0,
@@ -413,7 +413,9 @@ def run_pumpfun_first_seconds_stream():
               flush=True)
         if PROOF and (not stats["program_subscribed"]
                       or stats["create_events_decoded"]<1
-                      or stats["mint_verified"]<1):
+                      or stats["trade_events_decoded"]<1
+                      or stats["mint_verified"]<1
+                      or stats["first30_complete"]<1):
             raise SystemExit("PUMPFUN_FIRST_SECONDS_PROOF_FAILED")
     asyncio.run(main())
 
