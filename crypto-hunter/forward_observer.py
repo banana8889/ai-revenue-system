@@ -2068,6 +2068,8 @@ cohort_followup_quote_checks={x:0 for x in COHORT_GROUPS}
 shadow_new_this_run=0
 shadow_chart_11x_this_run=0
 shadow_quote_entries_this_run=0
+nascent_entry_quotes_this_run=0
+NASCENT_ENTRY_RESERVED=2
 shadow_quote_marks_this_run=0
 shadow_quote_marks_available_this_run=0
 frozen_policy_decisions_this_run=0
@@ -2136,6 +2138,24 @@ def hot_shadow_quote_targets(state, selected, now, budget):
     ranked.sort()
     return [pool for _,_,pool in ranked[:max(0,budget)]]
 
+# Research-only first-observation strata. NEVER use future price.
+def emergence_research_arm(age,liquidity,buyers,buys,sells,pre_chart_x=1):
+    try:
+        age=float(age);liquidity=float(liquidity);buyers=int(buyers)
+        buys=int(buys);sells=int(sells);pre_chart_x=float(pre_chart_x)
+    except (ValueError,TypeError):
+        return 'unclassified_missing_baseline'
+    if not (0<=age<=6 and liquidity>=10000 and 1<=pre_chart_x<2
+            and sells>=1 and buys>=1.5*sells):
+        return 'other_first_observed'
+    if 20<=buyers<200:
+        return 'nascent_20_199'
+    if 200<=buyers<450:
+        return 'growth_200_449'
+    if buyers>=450:
+        return 'crowded_450_plus'
+    return 'other_first_observed'
+
 def fair_shadow_quote_targets(state, selected, budget):
     """Choose previously unserved shadows before repeating earlier quote checks.
 
@@ -2148,7 +2168,25 @@ def fair_shadow_quote_targets(state, selected, budget):
              and item['shadow'].get('entry_quote')]
     waiting.sort(key=lambda pair:(pair[1].get('last_quote_scheduled_at') or '',
                                   pair[1].get('at') or '',pair[0]))
-    return [pool for pool,shadow in waiting[:max(0,budget-len(selected))]]
+    slots=max(0,budget-len(selected))
+    chosen=[]
+    # Balanced observation only: one young low-crowd and one crowded
+    # reference, where actually available, before fair rotation fills slots.
+    for arm in ('nascent_20_199','crowded_450_plus'):
+        if len(chosen)>=slots:break
+        for pool,sh in waiting:
+            frozen=sh.get('emergence_research_arm') or emergence_research_arm(
+                sh.get('initial_age_minutes'),sh.get('entry_liquidity_usd'),
+                sh.get('initial_buyers_1h'),sh.get('initial_buys_1h'),
+                sh.get('initial_sells_1h'),
+                sh.get('pre_signal_chart_x_v1') or 1)
+            if frozen==arm and pool not in chosen:
+                chosen.append(pool)
+                break
+    for pool,_ in waiting:
+        if len(chosen)>=slots:break
+        if pool not in chosen:chosen.append(pool)
+    return chosen
 try:
     with open('evidence/state.json') as f:st=json.load(f)
     for a in st.values():
@@ -2581,6 +2619,18 @@ for cycle in range(CYCLES_PER_RUN):
                 s['first_discovery_price_v1']=v
                 s['first_discovery_observed_at_v1']=t.isoformat()
                 s['first_discovery_age_minutes_v1']=round(age,4)
+                # First-observed universe, including NON-SELECTED pools.
+                # Future observation gaps remain censored, never negatives.
+                s['first_discovery_research_v1']={
+                    'at':t.isoformat(),'age_minutes':round(age,4),
+                    'liquidity_usd':round(x['liq'],4),
+                    'volume_1h_usd':round(x['volume_1h'],4),
+                    'buyers_1h':x['buyers_1h'],
+                    'buys_1h':x['buys_1h'],'sells_1h':x['sells_1h'],
+                    'arm':emergence_research_arm(age,x['liq'],x['buyers_1h'],
+                                x['buys_1h'],x['sells_1h'],1),
+                    'selected_for_shadow':False,
+                    'future_outcome_not_yet_observed':True}
 
             # Cohort selected only from FIRST discovery record, before future prices.
             # Both groups have identical minimum age, liquidity, buyer and seller filters.
@@ -2911,7 +2961,15 @@ for cycle in range(CYCLES_PER_RUN):
                     if not s.get('shadow') and not known_shadow and open_shadows<MAX_SHADOW_CANDIDATES:
                         active_tail=active_tail_count
                         tail_choice=active_tail<LONG_TAIL_MAX_ACTIVE and tail_is_selected(token_id)
+                        research_arm=emergence_research_arm(
+                            age,x['liq'],x['buyers_1h'],x['buys_1h'],
+                            x['sells_1h'],
+                            s.get('first_eligible_vs_first_discovery_chart_x_v1') or 1)
+                        if s.get('first_discovery_research_v1'):
+                            s['first_discovery_research_v1']['selected_for_shadow']=True
                         shadow={'at':d.datetime.now(d.timezone.utc).isoformat(),
+                                'emergence_research_arm':research_arm,
+                                'arm_frozen_before_later_quote':True,
                                 'long_tail_24h':bool(tail_choice),
                                 'long_tail_assignment_method':'sha256_mint_mod5_at_signal',
                                 'entry_pool_price':v,'entry_liquidity_usd':x['liq'],
@@ -2941,7 +2999,15 @@ for cycle in range(CYCLES_PER_RUN):
                                 'reason':risk,'no_capital_allocated':True}
                         # Even when allocating no paper capital, research tradability in
                         # real time. Quote evidence never becomes a simulated fill.
-                        if quote_checks<MAX_ENTRY_QUOTE_CHECKS:
+                        remaining_nascent_reserve=max(0,
+                            NASCENT_ENTRY_RESERVED-nascent_entry_quotes_this_run)
+                        may_quote=(quote_checks<MAX_ENTRY_QUOTE_CHECKS and (
+                            research_arm=='nascent_20_199'
+                            or quote_checks<MAX_ENTRY_QUOTE_CHECKS-remaining_nascent_reserve
+                            or cycle==CYCLES_PER_RUN-1))
+                        if may_quote:
+                            if research_arm=='nascent_20_199':
+                                nascent_entry_quotes_this_run+=1
                             proposal=entry_quote_preflight(token_id.removeprefix('solana_'))
                             shadow['initial_route_check']={'at':d.datetime.now(d.timezone.utc).isoformat(),
                                                            'reason':proposal.get('reason'),'ok':bool(proposal.get('ok'))}
@@ -3166,6 +3232,8 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'rapid_quote_warning_events_this_run':rapid_quote_warning_events_this_run,
    'rapid_quote_first_sample_90pct_cliffs_this_run':rapid_quote_first_sample_90pct_cliffs_this_run,
    'frozen_quote_exit_policy_decisions_this_run':frozen_policy_decisions_this_run,
+   'nascent_entry_quote_attempts_this_run':nascent_entry_quotes_this_run,
+   'nascent_entry_quote_reserved_capacity':NASCENT_ENTRY_RESERVED,
    'shadow_quote_slots_scheduled':len(shadow_quote_scheduled_this_run),
    'shadow_quote_slots_without_live_mark':len(shadow_quote_scheduled_this_run)-shadow_quote_marks_this_run,
    'shadow_quote_baselines_never_marked':sum(1 for x in st.values()
@@ -3308,6 +3376,11 @@ for pool,z in st.items():
         'initial_age_minutes':sh.get('initial_age_minutes'),
         'initial_volume_1h_usd':sh.get('initial_volume_1h_usd'),
         'initial_buyers_1h':sh.get('initial_buyers_1h'),
+        'emergence_research_arm':sh.get('emergence_research_arm') or
+            emergence_research_arm(sh.get('initial_age_minutes'),
+                sh.get('entry_liquidity_usd'),sh.get('initial_buyers_1h'),
+                sh.get('initial_buys_1h'),sh.get('initial_sells_1h'),
+                sh.get('pre_signal_chart_x_v1') or 1),
         'initial_buys_1h':sh.get('initial_buys_1h'),
         'initial_sells_1h':sh.get('initial_sells_1h'),
         'signal_activity_arm':sh.get('signal_activity_arm'),
