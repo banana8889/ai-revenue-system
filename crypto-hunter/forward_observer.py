@@ -3421,6 +3421,73 @@ for pool,z in st.items():
         'return_unrealized':True,'orders':0,'trades':0})
     archived.add(pool)
 shadow_ledger=shadow_ledger[-5000:]
+# Compare actual future exact-quantity SELL QUOTES against strata frozen
+# BEFORE those quotes were seen. Keep active vs archived windows separate:
+# active survivors are severely selected; never pool into a success rate.
+arm_groups=('nascent_20_199','growth_200_449','crowded_450_plus',
+            'other_first_observed','unclassified_missing_baseline')
+arm_histories={}
+for observation_class in ('archived','active'):
+    if observation_class=='archived':
+        rows=[(z.get('pool'),z) for z in shadow_ledger]
+    else:
+        rows=[(pool,z['shadow']) for pool,z in st.items()
+              if z.get('shadow') and not z['shadow'].get('expired')
+              and not z.get('entry')]
+    by_arm={arm:{'enrolled':0,'later_quote_observed':0,
+                 'future_quote_2x':0,'future_quote_5x':0,'future_quote_11x':0,
+                 'quote_missing_or_unchecked_censored':0}
+            for arm in arm_groups}
+    unique=set()
+    for pool,sh in rows:
+        if not pool or pool in unique:continue
+        unique.add(pool)
+        arm=sh.get('emergence_research_arm') or emergence_research_arm(
+            sh.get('initial_age_minutes'),sh.get('entry_liquidity_usd'),
+            sh.get('initial_buyers_1h'),sh.get('initial_buys_1h'),
+            sh.get('initial_sells_1h'),sh.get('pre_signal_chart_x_v1') or 1)
+        bucket=by_arm.get(arm,by_arm['unclassified_missing_baseline'])
+        bucket['enrolled']+=1
+        highest=(sh.get('max_later_sell_quote_multiple_unfilled')
+                 if observation_class=='archived'
+                 else sh.get('max_exit_quote_multiple'))
+        if not isinstance(highest,(int,float)) or not math.isfinite(highest):
+            bucket['quote_missing_or_unchecked_censored']+=1
+            continue
+        bucket['later_quote_observed']+=1
+        for tier in (2,5,11):
+            if highest>=tier:
+                bucket['future_quote_'+str(tier)+'x']+=1
+    arm_histories[observation_class]=by_arm
+first_discovery_unselected={arm:0 for arm in arm_groups}
+first_discovery_selected={arm:0 for arm in arm_groups}
+for item in st.values():
+    snapshot=item.get('first_discovery_research_v1')
+    if not snapshot:continue
+    arm=snapshot.get('arm')
+    if arm not in first_discovery_unselected:continue
+    target=(first_discovery_selected if snapshot.get('selected_for_shadow')
+            else first_discovery_unselected)
+    target[arm]+=1
+emergence_report={
+    'as_of':r['at'],
+    'objective':'Find uncrowded early opportunities via matched quoted followups',
+    'research_arm_fixed_before_future_quotes':True,
+    'strata_not_trading_rules_or_learned_probabilities':True,
+    'archived_and_active_never_pooled_for_rate_claims':True,
+    'live_active_survivor_selection_bias':True,
+    'missing_quotes_censored_not_failures':True,
+    'first_discovery_all_new_pool_denominators':{
+        'selected':first_discovery_selected,
+        'unselected':first_discovery_unselected},
+    'future_quote_by_frozen_arm_and_observation_class':arm_histories,
+    'early_nascent_quote_attempts_this_run':nascent_entry_quotes_this_run,
+    'guaranteed_first_quote_reserve_if_available':NASCENT_ENTRY_RESERVED,
+    'missing_first_discovery_history_not_backfilled':True,
+    'no_execution_or_profitability_proven':True,'orders':0,'trades':0}
+with open('evidence/emergence_research_arms.json','w',encoding='utf-8') as evidence_file:
+    json.dump(emergence_report,evidence_file,indent=2,allow_nan=False)
+print('CRYPTO_EMERGENCE_RESEARCH_ARMS',json.dumps(emergence_report,allow_nan=False))
 # Quantify first-quote cliff events from *actually observed* intraminute
 # Jupiter sell routes. Historical and new v1 windows both have timestamped
 # quotations; no unobserved intervals are interpolated, no fills assumed.
