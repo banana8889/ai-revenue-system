@@ -20,7 +20,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0,"slot_notifications":0,"slot_subscriptions_confirmed":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -33,7 +33,7 @@ def run_embedded_liquidity_sensor():
         row={"kind":kind,"at":stamp(),**fields}
         with EVENTS.open("a",encoding="utf-8") as f:
             f.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_vault_cross_slot_joint_drop_suspected","onchain_vault_ws_joint_drop_suspected","onchain_vault_rpc_confirmation","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_heartbeat"):
+        if kind in ("liquidity_warning","liquidity_critical","source_error","subscription_error","urgent_sell_quote","lp_withdrawal_log_hint","onchain_token_balance_evidence","onchain_token_balance_error","onchain_mint_risk","onchain_pumpswap_vaults","onchain_vault_joint_drop","onchain_vault_ws_joint_drop","onchain_vault_cross_slot_joint_drop_suspected","onchain_vault_ws_joint_drop_suspected","onchain_vault_rpc_confirmation","onchain_lp_control_snapshot","onchain_lp_creator_balance_drop","onchain_pool_creator_token_snapshot","onchain_pool_creator_token_balance_drop","onchain_preemptive_sell_pressure","ws_candidate_preflight","ws_vault_subscribed","ws_dynamic_candidate","ws_error","ws_connected","ws_slot_confirmed","ws_heartbeat"):
             print("LIQUIDITY_WS",json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
 
     def health(connected):
@@ -905,6 +905,12 @@ def run_embedded_liquidity_sensor():
         last_feed_scan=0.
         feed_offset=0
         subscribed_pools={item["pool"] for item in items}
+        SLOT_REQUEST_ID=900001
+        slot_request_at=time.monotonic()
+        last_slot_at=0.
+        slot_acknowledged=False
+        await ws.send(json.dumps({"jsonrpc":"2.0","id":SLOT_REQUEST_ID,
+                                  "method":"slotSubscribe"}))
         for idx,item in enumerate(items,1):
             await ws.send(json.dumps({"jsonrpc":"2.0","id":idx,"method":"logsSubscribe","params":[{"mentions":[item["pool"]]},{"commitment":"confirmed"}]}))
         async def worker():
@@ -949,6 +955,14 @@ def run_embedded_liquidity_sensor():
         last_health=0.
         try:
             while time.monotonic()<deadline:
+                clock=time.monotonic()
+                if ((not last_slot_at and clock-slot_request_at>45)
+                        or (last_slot_at and clock-last_slot_at>45)):
+                    emit("ws_error",reason="solana_slot_feed_stale",
+                         slot_acknowledged=slot_acknowledged,
+                         last_slot_age_seconds=(round(clock-last_slot_at,2)
+                                                if last_slot_at else None))
+                    raise asyncio.TimeoutError("solana_slot_feed_stale")
                 while not vault_pending.empty() and len(vault_last_pair)<3:
                     item,proof=vault_pending.get_nowait()
                     pool=item["pool"]
@@ -1043,7 +1057,8 @@ def run_embedded_liquidity_sensor():
                     except FileNotFoundError:
                         pass
                 if time.monotonic()-last_health>=60:
-                    health(bool(subscriptions))
+                    health(bool(subscriptions) and slot_acknowledged and
+                           bool(last_slot_at) and time.monotonic()-last_slot_at<=45)
                     last_health=time.monotonic()
                 try:
                     msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=3))
@@ -1051,6 +1066,13 @@ def run_embedded_liquidity_sensor():
                     continue
                 if msg.get("id") is not None:
                     idx=msg.get("id")
+                    if idx==SLOT_REQUEST_ID:
+                        slot_acknowledged=isinstance(msg.get("result"),int)
+                        if slot_acknowledged:
+                            stats["slot_subscriptions_confirmed"]+=1
+                        else:
+                            raise asyncio.TimeoutError("solana_slot_subscription_denied")
+                        continue
                     if idx in pending_vault_requests:
                         item,side,mint=pending_vault_requests.pop(idx)
                         if isinstance(msg.get("result"),int):
@@ -1078,6 +1100,18 @@ def run_embedded_liquidity_sensor():
                     elif msg.get("error"):
                         stats["errors"]+=1
                         emit("subscription_error",id=idx,error=str(msg["error"])[:120])
+                    continue
+                if msg.get("method")=="slotNotification":
+                    context=(msg.get("params") or {}).get("result") or {}
+                    current_slot=context.get("slot")
+                    if slot_acknowledged and isinstance(current_slot,int):
+                        first_slot=not last_slot_at
+                        last_slot_at=time.monotonic()
+                        stats["slot_notifications"]+=1
+                        if first_slot:
+                            emit("ws_slot_confirmed",slot=current_slot,
+                                 mainnet_slot_stream=True,
+                                 trade_or_pool_event_not_implied=True)
                     continue
                 if msg.get("method")=="accountNotification":
                     params=msg.get("params") or {}
@@ -3948,7 +3982,8 @@ readiness={
          'creator_token_ws_events','creator_token_decreases',
          'vault_pairs_same_slot','vault_pairs_bounded_skew',
          'vault_pair_skew_rejections','vault_cross_slot_joint_drop_suspected',
-         'vault_pair_telemetry_rows','vault_rpc_confirmation_checks',
+         'vault_pair_telemetry_rows','slot_notifications',
+         'slot_subscriptions_confirmed','vault_rpc_confirmation_checks',
          'vault_rpc_joint_drops_confirmed','vault_rpc_joint_drops_not_confirmed',
          'vault_rpc_joint_drops_unknown')},
     'observed_quote_economics':{k:quoted.get(k) for k in

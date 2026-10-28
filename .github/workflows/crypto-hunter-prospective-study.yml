@@ -173,10 +173,14 @@ jobs:
                    'checks':h.get('checks'),
                    'vault_ws_subscriptions':h.get('max_vault_ws_subscriptions'),
                    'rpc_checks':h.get('vault_rpc_confirmation_checks'),
+                   'mainnet_slot_notifications':h.get('slot_notifications'),
+                   'slot_subscriptions_confirmed':h.get('slot_subscriptions_confirmed'),
                    'trades':h.get('trades')}
           print('MAINNET_LIQUIDITY_SENSOR_HEALTH',json.dumps(receipt,allow_nan=False))
           if not (0<=age<=130 and h.get('connected') is True
                   and int(h.get('max_subscriptions') or 0)>0
+                  and int(h.get('slot_notifications') or 0)>0
+                  and int(h.get('slot_subscriptions_confirmed') or 0)>0
                   and h.get('orders')==h.get('trades')==0):
               raise SystemExit('FAIL: real mainnet liquidity sensor not proven live')
           PY
