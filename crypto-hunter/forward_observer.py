@@ -16,6 +16,7 @@ def run_pumpfun_first_seconds_stream():
         os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com"),
         os.getenv("SOLANA_RPC_BACKUP_URL","https://solana-rpc.publicnode.com")))))
     AUDIT=Path("evidence/pumpfun_first_seconds_live.jsonl")
+    VERIFIED=Path("evidence/pumpfun_verified_mints.jsonl")
     AUDIT.parent.mkdir(exist_ok=True)
     PROOF="--pumpfun-early-proof" in sys.argv
     DURATION=28 if PROOF else max(60,min(1800,int(
@@ -27,8 +28,14 @@ def run_pumpfun_first_seconds_stream():
     def stamp():return dt.datetime.now(dt.timezone.utc).isoformat()
     def event(kind,**fields):
         row={"kind":kind,"at":stamp(),**fields,"orders":0,"trades":0}
+        serialized=json.dumps(row,separators=(",",":"),allow_nan=False)+"\n"
         with AUDIT.open("a",encoding="utf-8") as log:
-            log.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
+            log.write(serialized)
+        # Persist only genuine chain-verified mint evidence between study
+        # cycles. Unverified signatures do not pollute the durable registry.
+        if kind=="pumpfun_early_verified":
+            with VERIFIED.open("a",encoding="utf-8") as durable:
+                durable.write(serialized)
         if kind in ("program_subscribed","pumpfun_early_verified",
                      "create_transaction_unverified","ws_reconnect"):
             print("PUMPFUN_FIRST_SECONDS",
@@ -2706,7 +2713,7 @@ def entry_quote_preflight(mint):
 
 def read_verified_pumpfun_launches():
     """Only chain-verified create mints, not unverified WebSocket signatures."""
-    file='evidence/pumpfun_first_seconds_live.jsonl'
+    file='evidence/pumpfun_verified_mints.jsonl'
     launches={}
     try:
         with open(file,encoding='utf-8') as stream:
