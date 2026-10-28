@@ -12,7 +12,9 @@ def run_pumpfun_first_seconds_stream():
     ENDPOINTS=tuple(dict.fromkeys(filter(None,(
         os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com"),
         os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com")))))
-    RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
+    RPC_URLS=tuple(dict.fromkeys(filter(None,(
+        os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com"),
+        os.getenv("SOLANA_RPC_BACKUP_URL","https://solana-rpc.publicnode.com")))))
     AUDIT=Path("evidence/pumpfun_first_seconds_live.jsonl")
     AUDIT.parent.mkdir(exist_ok=True)
     PROOF="--pumpfun-early-proof" in sys.argv
@@ -27,7 +29,8 @@ def run_pumpfun_first_seconds_stream():
         row={"kind":kind,"at":stamp(),**fields,"orders":0,"trades":0}
         with AUDIT.open("a",encoding="utf-8") as log:
             log.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
-        if kind!="raw_log":
+        if kind in ("program_subscribed","pumpfun_early_verified",
+                     "create_transaction_unverified","ws_reconnect"):
             print("PUMPFUN_FIRST_SECONDS",
                   json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
     def decode_create_transaction(signature):
@@ -35,15 +38,31 @@ def run_pumpfun_first_seconds_stream():
                "params":[signature,{"encoding":"jsonParsed",
                     "maxSupportedTransactionVersion":0,
                     "commitment":"confirmed"}]}
-        req=urllib.request.Request(RPC_URL,
-            data=json.dumps(query,separators=(",",":")).encode(),
-            headers={"Content-Type":"application/json",
-                     "User-Agent":"CryptoHunterReadOnlyFirstSeconds/1"})
-        with urllib.request.urlopen(req,timeout=7) as response:
-            document=json.load(response)
-        tx=document.get("result")
+        # Solana logs at confirmed commitment can precede the HTTP node's
+        # transaction-indexed read. Retry later and cross-provider; never
+        # equate a short-lived HTTP null with an invalid mint.
+        tx=None
+        last_reason="not_indexed_yet"
+        for attempt in range(6):
+            endpoint=RPC_URLS[attempt%len(RPC_URLS)]
+            try:
+                req=urllib.request.Request(endpoint,
+                    data=json.dumps(query,separators=(",",":")).encode(),
+                    headers={"Content-Type":"application/json",
+                             "User-Agent":"CryptoHunterReadOnlyFirstSeconds/1"})
+                with urllib.request.urlopen(req,timeout=6) as response:
+                    document=json.load(response)
+                tx=document.get("result")
+                if tx and isinstance(tx,dict):
+                    break
+                last_reason=("rpc_error" if document.get("error")
+                             else "not_indexed_yet")
+            except (OSError,ValueError,urllib.error.HTTPError,TimeoutError) as error:
+                last_reason=type(error).__name__
+            if attempt<5:
+                time.sleep(min(2.5,0.7*(attempt+1)))
         if not isinstance(tx,dict) or (tx.get("meta") or {}).get("err"):
-            return None
+            return {"_missing_reason":last_reason}
         message=((tx.get("transaction") or {}).get("message") or {})
         instructions=list(message.get("instructions") or [])
         for entry in (tx.get("meta") or {}).get("innerInstructions") or []:
@@ -63,7 +82,7 @@ def run_pumpfun_first_seconds_stream():
                     "block_time":tx.get("blockTime"),
                     "instruction_account_index":0,
                     "pump_program_verified":True}
-        return None
+        return {"_missing_reason":"program_create_accounts_not_parsed"}
     async def main():
         until=time.monotonic()+DURATION
         seen=set()
@@ -115,7 +134,7 @@ def run_pumpfun_first_seconds_stream():
                               requires_rpc_transaction_proof=True)
                         # Bound public RPC by shared gateway policies. A
                         # missed lookup remains unknown, not a false label.
-                        if (rpc_budget>=8 or
+                        if (rpc_budget>=4 or
                                 time.monotonic()-last_rpc<2):
                             continue
                         rpc_budget+=1
@@ -124,10 +143,12 @@ def run_pumpfun_first_seconds_stream():
                         try:
                             decoded=await asyncio.to_thread(
                                 decode_create_transaction,signature)
-                            if decoded is None:
+                            if not decoded or not decoded.get("mint"):
                                 stats["rpc_unavailable"]+=1
                                 event("create_transaction_unverified",
-                                      signature=signature,reason="tx_missing_or_not_parsed")
+                                      signature=signature,
+                                      reason=(decoded or {}).get(
+                                          "_missing_reason","rpc_missing"))
                                 continue
                             block=decoded.get("block_time")
                             lag=(time.time()-block if isinstance(block,(int,float))
@@ -159,7 +180,8 @@ def run_pumpfun_first_seconds_stream():
                           "no_trading_method_proven":True},allow_nan=False),
               flush=True)
         if PROOF and (not stats["program_subscribed"]
-                      or stats["launch_signatures"]<1):
+                      or stats["launch_signatures"]<1
+                      or stats["mint_verified"]<1):
             raise SystemExit("PUMPFUN_FIRST_SECONDS_PROOF_FAILED")
     asyncio.run(main())
 
