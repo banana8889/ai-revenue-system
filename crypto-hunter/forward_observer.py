@@ -370,8 +370,11 @@ def run_embedded_liquidity_sensor():
                           "holder_coverage_incomplete"
                           if creator is None or largest is None else
                           "no_large_direct_holder_observed_not_safe")
+        direct_status=(True if directly_concentrated else
+                       False if creator is not None and largest is not None
+                       else None)
         return {"available":True,"holder_detail_complete":creator is not None and largest is not None,
-                "direct_large_holder_risk_observed":bool(directly_concentrated),
+                "direct_large_holder_risk_observed":direct_status,
                 "outstanding_supply_only_flag":outstanding>=0.8 and not directly_concentrated,
                 "lp_control_evidence_category":control_category,
                 "outstanding_lp_supply_fraction":round(outstanding,6),
@@ -1422,6 +1425,10 @@ def run_embedded_liquidity_sensor():
                 "lp_control_evidence_category"]=="outstanding_supply_only_no_large_direct_holder"
             assert lp_control_risk_from_balances(1000,900,None,None)[
                 "lp_control_evidence_category"]=="outstanding_supply_only_holder_unknown"
+            assert lp_control_risk_from_balances(1000,900,None,None)[
+                "direct_large_holder_risk_observed"] is None
+            assert lp_control_risk_from_balances(1000,900,0,100)[
+                "direct_large_holder_risk_observed"] is False
             assert lp_balance_decline(100,90) is True
             assert lp_balance_decline(100,91) is False
             assert lp_balance_decline(0,0) is False
