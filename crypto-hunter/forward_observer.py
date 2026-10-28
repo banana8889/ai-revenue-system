@@ -1,5 +1,173 @@
 import sys
 
+def run_pumpfun_first_seconds_stream():
+    """Real confirmed Pump.fun CREATE events before GeckoTerminal listing.
+    Pure observation: never sign, buy, simulate fills, or infer safe liquidity.
+    """
+    import asyncio,datetime as dt,json,os,time,urllib.request,urllib.error
+    from pathlib import Path
+    import websockets
+    PUMP_PROGRAM="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    BASE58=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+    ENDPOINTS=tuple(dict.fromkeys(filter(None,(
+        os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com"),
+        os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com")))))
+    RPC_URL=os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com")
+    AUDIT=Path("evidence/pumpfun_first_seconds_live.jsonl")
+    AUDIT.parent.mkdir(exist_ok=True)
+    PROOF="--pumpfun-early-proof" in sys.argv
+    DURATION=28 if PROOF else max(60,min(1800,int(
+        os.getenv("PUMPFUN_FIRST_SECONDS_DURATION","1500"))))
+    stats={"program_subscribed":False,"launch_signatures":0,
+           "creator_instructions":0,"mint_verified":0,"rpc_attempts":0,
+           "rpc_unavailable":0,"latency_within_30s":0,"errors":0,
+           "orders":0,"trades":0}
+    def stamp():return dt.datetime.now(dt.timezone.utc).isoformat()
+    def event(kind,**fields):
+        row={"kind":kind,"at":stamp(),**fields,"orders":0,"trades":0}
+        with AUDIT.open("a",encoding="utf-8") as log:
+            log.write(json.dumps(row,separators=(",",":"),allow_nan=False)+"\n")
+        if kind!="raw_log":
+            print("PUMPFUN_FIRST_SECONDS",
+                  json.dumps(row,separators=(",",":"),allow_nan=False),flush=True)
+    def decode_create_transaction(signature):
+        query={"jsonrpc":"2.0","id":19,"method":"getTransaction",
+               "params":[signature,{"encoding":"jsonParsed",
+                    "maxSupportedTransactionVersion":0,
+                    "commitment":"confirmed"}]}
+        req=urllib.request.Request(RPC_URL,
+            data=json.dumps(query,separators=(",",":")).encode(),
+            headers={"Content-Type":"application/json",
+                     "User-Agent":"CryptoHunterReadOnlyFirstSeconds/1"})
+        with urllib.request.urlopen(req,timeout=7) as response:
+            document=json.load(response)
+        tx=document.get("result")
+        if not isinstance(tx,dict) or (tx.get("meta") or {}).get("err"):
+            return None
+        message=((tx.get("transaction") or {}).get("message") or {})
+        instructions=list(message.get("instructions") or [])
+        for entry in (tx.get("meta") or {}).get("innerInstructions") or []:
+            instructions.extend(entry.get("instructions") or [])
+        for instruction in instructions:
+            if instruction.get("programId")!=PUMP_PROGRAM:
+                continue
+            accounts=instruction.get("accounts") or []
+            if not accounts:continue
+            mint=accounts[0]
+            if not (isinstance(mint,str) and 32<=len(mint)<=44
+                    and set(mint)<=BASE58):
+                continue
+            # Mint is account index zero of the verified Pump.fun Create /
+            # CreateV2 instruction. A post-balance alone is not sufficient.
+            return {"mint":mint,"slot":tx.get("slot"),
+                    "block_time":tx.get("blockTime"),
+                    "instruction_account_index":0,
+                    "pump_program_verified":True}
+        return None
+    async def main():
+        until=time.monotonic()+DURATION
+        seen=set()
+        rpc_budget=0
+        last_rpc=0.
+        provider_attempt=0
+        while time.monotonic()<until:
+            ep=ENDPOINTS[provider_attempt%len(ENDPOINTS)]
+            provider_attempt+=1
+            try:
+                async with websockets.connect(ep,open_timeout=8,
+                        ping_interval=20,ping_timeout=20,max_size=2**20) as ws:
+                    await ws.send(json.dumps({"jsonrpc":"2.0","id":91,
+                        "method":"logsSubscribe","params":[
+                            {"mentions":[PUMP_PROGRAM]},
+                            {"commitment":"confirmed"}]}))
+                    acknowledged=False
+                    while time.monotonic()<until:
+                        try:
+                            msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=5))
+                        except asyncio.TimeoutError:
+                            continue
+                        if msg.get("id")==91:
+                            acknowledged=isinstance(msg.get("result"),int)
+                            if not acknowledged:
+                                raise ValueError("pumpfun_program_log_subscription_denied")
+                            stats["program_subscribed"]=True
+                            event("program_subscribed",
+                                  provider=("primary" if provider_attempt%len(ENDPOINTS)==1
+                                            else "backup"),
+                                  pump_program=PUMP_PROGRAM)
+                            continue
+                        if not acknowledged or msg.get("method")!="logsNotification":
+                            continue
+                        params=msg.get("params") or {}
+                        value=(params.get("result") or {}).get("value") or {}
+                        signature=value.get("signature")
+                        logs=value.get("logs") or []
+                        if (not signature or signature in seen or value.get("err")
+                            or not any("Program log: Instruction: Create" in z
+                                       for z in logs)):
+                            continue
+                        seen.add(signature)
+                        stats["launch_signatures"]+=1
+                        if len(seen)>30000:seen.clear()
+                        slot=(params.get("result") or {}).get("context",{}).get("slot")
+                        event("pumpfun_create_observed",signature=signature,
+                              slot=slot,mint_verified=False,
+                              requires_rpc_transaction_proof=True)
+                        # Bound public RPC by shared gateway policies. A
+                        # missed lookup remains unknown, not a false label.
+                        if (rpc_budget>=8 or
+                                time.monotonic()-last_rpc<2):
+                            continue
+                        rpc_budget+=1
+                        last_rpc=time.monotonic()
+                        stats["rpc_attempts"]+=1
+                        try:
+                            decoded=await asyncio.to_thread(
+                                decode_create_transaction,signature)
+                            if decoded is None:
+                                stats["rpc_unavailable"]+=1
+                                event("create_transaction_unverified",
+                                      signature=signature,reason="tx_missing_or_not_parsed")
+                                continue
+                            block=decoded.get("block_time")
+                            lag=(time.time()-block if isinstance(block,(int,float))
+                                 else None)
+                            on_time=lag is not None and 0<=lag<=30
+                            stats["mint_verified"]+=1
+                            stats["latency_within_30s"]+=int(on_time)
+                            event("pumpfun_early_verified",signature=signature,
+                                  mint=decoded["mint"],slot=decoded["slot"],
+                                  block_time_unix=block,
+                                  detection_lag_seconds=(round(lag,3)
+                                      if lag is not None else None),
+                                  detected_within_first_30s=on_time,
+                                  launch_eligible_for_live_study=True,
+                                  owner_or_liquidity_safety_not_inferred=True,
+                                  not_an_executable_buy=True)
+                        except (OSError,ValueError,urllib.error.HTTPError,
+                                TimeoutError) as error:
+                            stats["rpc_unavailable"]+=1
+                            event("create_transaction_unverified",
+                                  signature=signature,reason=type(error).__name__)
+            except (OSError,ValueError,asyncio.TimeoutError,
+                    websockets.exceptions.WebSocketException) as error:
+                stats["errors"]+=1
+                event("ws_reconnect",reason=type(error).__name__)
+                await asyncio.sleep(min(3,max(0.,until-time.monotonic())))
+        print("PUMPFUN_REAL_MAINNET_LAUNCH_RECEIPT",
+              json.dumps({"at":stamp(),**stats,"read_only":True,
+                          "no_trading_method_proven":True},allow_nan=False),
+              flush=True)
+        if PROOF and (not stats["program_subscribed"]
+                      or stats["launch_signatures"]<1):
+            raise SystemExit("PUMPFUN_FIRST_SECONDS_PROOF_FAILED")
+    asyncio.run(main())
+
+if ('--pumpfun-early-proof' in sys.argv or
+        '--pumpfun-early-sensor' in sys.argv):
+    run_pumpfun_first_seconds_stream()
+    raise SystemExit(0)
+
 def first_confirmed_drain_after(pool,trigger_at,evidence,horizon_seconds=None):
     """First recorded confirmed dual-vault drain; never skip a near-immediate one.
     Times are RPC receipt times, not authoritative transaction start times.
