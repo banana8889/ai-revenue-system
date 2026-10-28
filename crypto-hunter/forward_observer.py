@@ -2175,11 +2175,28 @@ def fair_shadow_quote_targets(state, selected, budget):
     for arm in ('nascent_20_199','crowded_450_plus'):
         if len(chosen)>=slots:break
         for pool,sh in waiting:
-            frozen=sh.get('emergence_research_arm') or emergence_research_arm(
-                sh.get('initial_age_minutes'),sh.get('entry_liquidity_usd'),
-                sh.get('initial_buyers_1h'),sh.get('initial_buys_1h'),
-                sh.get('initial_sells_1h'),
-                sh.get('pre_signal_chart_x_v1') or 1)
+            frozen=sh.get('emergence_research_arm')
+            if not frozen:
+                # Self-contained legacy fallback: the isolated deterministic
+                # regression harness loads only this fair-rotation function.
+                # Never query future outcomes for the cohort assignment.
+                try:
+                    age=float(sh.get('initial_age_minutes'))
+                    liq=float(sh.get('entry_liquidity_usd'))
+                    buyers=int(sh.get('initial_buyers_1h'))
+                    buys=int(sh.get('initial_buys_1h'))
+                    sells=int(sh.get('initial_sells_1h'))
+                    prec=float(sh.get('pre_signal_chart_x_v1') or 1)
+                    if (0<=age<=6 and liq>=10000 and 1<=prec<2
+                            and sells>=1 and buys>=1.5*sells):
+                        frozen=('nascent_20_199' if 20<=buyers<200 else
+                                'growth_200_449' if 200<=buyers<450 else
+                                'crowded_450_plus' if buyers>=450 else
+                                'other_first_observed')
+                    else:
+                        frozen='other_first_observed'
+                except (ValueError,TypeError):
+                    frozen='unclassified_missing_baseline'
             if frozen==arm and pool not in chosen:
                 chosen.append(pool)
                 break
