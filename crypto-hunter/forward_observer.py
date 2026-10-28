@@ -2704,8 +2704,31 @@ def entry_quote_preflight(mint):
             'buy_fee_bps':entry.get('fee_bps'),'sell_fee_bps':exit_quote.get('fee_bps'),
             'observed_at':d.datetime.now(d.timezone.utc).isoformat(),'quote_only':True}
 
+def read_verified_pumpfun_launches():
+    """Only chain-verified create mints, not unverified WebSocket signatures."""
+    file='evidence/pumpfun_first_seconds_live.jsonl'
+    launches={}
+    try:
+        with open(file,encoding='utf-8') as stream:
+            for line in stream:
+                try:row=json.loads(line)
+                except ValueError:continue
+                if (row.get('kind')!='pumpfun_early_verified'
+                        or not row.get('mint')
+                        or row.get('detected_within_first_30s') is not True
+                        or not isinstance(row.get('block_time_unix'),int)):
+                    continue
+                mint=row['mint']
+                old=launches.get(mint)
+                if old is None or row['at']<old['at']:
+                    launches[mint]=row
+    except OSError:
+        pass
+    return launches
+
 for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
+    pumpfun_native_verified=read_verified_pumpfun_launches()
     if cycle==0:
         long_tail_seeded_this_run=seed_long_tail_group(st)
         out({'kind':'long_tail_identity_cohort_seeded','at':t.isoformat(),
@@ -2826,6 +2849,25 @@ for cycle in range(CYCLES_PER_RUN):
                     first_seen_ages_minutes_this_run.append(age)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
+            if (token_id and token_id.startswith('solana_')
+                    and 'pumpfun_first_seconds' not in s):
+                launch=pumpfun_native_verified.get(token_id.removeprefix('solana_'))
+                if launch:
+                    lag=max(0,t.timestamp()-launch['block_time_unix'])
+                    s['pumpfun_first_seconds']={
+                        'create_signature':launch['signature'],
+                        'slot':launch.get('slot'),
+                        'block_time_unix':launch['block_time_unix'],
+                        'first_onchain_received_at':launch['at'],
+                        'onchain_create_observation_lag_seconds':
+                            launch.get('detection_lag_seconds'),
+                        'first_gecko_listing_lag_seconds':round(lag,3),
+                        'mint_verified_before_gecko_listing':True,
+                        'not_necessarily_executable_at_launch':True}
+                    out({'kind':'native_launch_joined_to_first_gecko_listing',
+                         'at':t.isoformat(),'pool':p,'mint':launch['mint'],
+                         'onchain_to_index_listing_seconds':round(lag,3),
+                         'no_trade':True})
             # Persist the genuine FIRST discovery observation, never
             # reconstruct a discovery price from future market observations.
             if s['first']==t and 'first_discovery_price_v1' not in s:
@@ -3399,6 +3441,10 @@ with open('evidence/state.json','w') as f:json.dump(serial,f,allow_nan=False)
 r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'requested_samples_this_run':CYCLES_PER_RUN,
    'new_mints_first_detected_this_run':len(first_seen_unique_mints_this_run),
+   'onchain_native_first_seconds_mints_visible_this_run':
+       len(pumpfun_native_verified),
+   'onchain_create_mints_later_matched_gecko':sum(
+       bool(z.get('pumpfun_first_seconds')) for z in st.values()),
    'new_mints_with_known_launch_age':len(first_seen_ages_minutes_this_run),
    'new_mints_first_seen_within_1m':sum(v<=1 for v in first_seen_ages_minutes_this_run),
    'new_mints_first_seen_within_3m':sum(v<=3 for v in first_seen_ages_minutes_this_run),
