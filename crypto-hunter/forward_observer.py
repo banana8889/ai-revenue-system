@@ -3468,6 +3468,7 @@ alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
              'onchain_vault_joint_drop':'confirmed_joint_pumpswap_vault_balance_drop',
              'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
              'onchain_preemptive_sell_pressure':'early_sell_pressure_vault_observation',
+             'onchain_lp_creator_balance_drop':'observed_creator_lp_balance_decrease',
              'liquidity_critical':'reserve_critical',
              'liquidity_warning':'reserve_warning'}
 events=[]
@@ -3487,6 +3488,7 @@ except OSError:
 # This allows forward tests after GitHub's individual 20-minute job ends.
 onchain_outcomes_file='evidence/onchain_risk_outcomes_ledger.jsonl'
 persistent_kinds={'onchain_preemptive_sell_pressure',
+                  'onchain_lp_creator_balance_drop',
                   'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
                   'urgent_sell_quote'}
 onchain_evidence_by_id={}
@@ -3704,8 +3706,10 @@ print('LP_EARLY_VERSUS_DRAIN_QUOTE',json.dumps(early_exit_report,allow_nan=False
 # Falsifiable order-flow precursor: pre-registered 12%/12% reserve pressure
 # within 120s, recorded at notification time. Only LATER >=30s confirmed
 # two-vault drains may count as lead-time evidence.
+precursor_kinds={'onchain_preemptive_sell_pressure',
+                 'onchain_lp_creator_balance_drop'}
 precursor_events=[e for e in onchain_evidence
-                  if e.get('kind')=='onchain_preemptive_sell_pressure']
+                  if e.get('kind') in precursor_kinds]
 forward_precursor_matches=[]
 for trigger in precursor_events:
     try:
@@ -3727,16 +3731,27 @@ for trigger in precursor_events:
         forward_precursor_matches.append({
             'pool':trigger.get('pool'),
             'trigger_at':trigger['at'],'drain_at':drain['at'],
+            'trigger_kind':trigger.get('kind'),
             'lead_seconds':round(lead,3),
             'trigger_threshold_fixed_before_observation':True,
             'drain_recorded_by':drain.get('kind'),
             'not_an_executed_exit':True})
 precursor_report={
     'as_of':now.isoformat(),
-    'precommitted_definition':'Watched mint reserve grows >=12% and counterasset reserve falls >=12% over <=120 seconds, after >=2 independent account notification slots',
+    'precommitted_definition':{
+        'sell_pressure':'Watched mint vault rises >=12% and counterasset falls >=12% within 120s, after two observed vault-pair slots',
+        'creator_lp_balance':'Creator direct verified LP token account drops >=10% across observed account notifications',
+        'outcome':'A later (>=30s) same-pool verified >=20% simultaneous two-vault loss',
+        'same_slot_lp_burn_is_not_a_lead_signal':True},
     'precursor_observations_in_this_run':sum(
-        x.get('kind')=='onchain_preemptive_sell_pressure' for x in events),
+        x.get('kind') in precursor_kinds for x in events),
     'precursor_observations_in_retained_ledger':len(precursor_events),
+    'precursor_counts_by_kind':{
+        k:sum(x.get('kind')==k for x in precursor_events)
+        for k in sorted(precursor_kinds)},
+    'precursor_matches_by_kind':{
+        k:sum(x['trigger_kind']==k for x in forward_precursor_matches)
+        for k in sorted(precursor_kinds)},
     'observed_subsequent_verified_2_vault_drains_at_least_30s_later':len(forward_precursor_matches),
     'matched_evidence':forward_precursor_matches[:40],
     'unmatched_outcomes_are_unknown_due_to_incomplete_followup':True,
