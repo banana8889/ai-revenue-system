@@ -48,6 +48,13 @@ jobs:
           key: crypto-pumpfun-verified-mints-${{ github.run_id }}
           restore-keys: |
             crypto-pumpfun-verified-mints-
+      - name: Restore native first-30s signed-event feature observations
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/pumpfun_30s_features.jsonl
+          key: crypto-pumpfun-first30-features-${{ github.run_id }}
+          restore-keys: |
+            crypto-pumpfun-first30-features-
       - name: Snapshot expanded cache before legacy recovery
         shell: bash
         run: |
@@ -180,7 +187,21 @@ jobs:
                       except ValueError:
                           continue
           mints={r['mint'] for r in rows}
+          thirty=pathlib.Path('evidence/pumpfun_30s_features.jsonl')
+          feature_rows=[]
+          if thirty.is_file():
+              for line in thirty.read_text(encoding='utf-8').splitlines():
+                  try:
+                      row=json.loads(line)
+                      if row.get('full_first_30s_observation') is True:
+                          feature_rows.append(row)
+                  except ValueError:continue
           print('PUMPFUN_FIRST_SECONDS_RESEARCH',json.dumps({
+              'first30_completed_distinct_mints':len({
+                  row['mint'] for row in feature_rows if row.get('mint')}),
+              'first30_distinct_mints_with_trades':len({
+                  row['mint'] for row in feature_rows
+                  if row.get('mint') and row.get('observed_trades',0)>0}),
               'chain_verified_mints_retained':len(mints),
               'within_30s_receipts':sum(r.get('detected_within_first_30s')
                                          is True for r in rows),
@@ -280,6 +301,12 @@ jobs:
             evidence/onchain_lp_control_prospective.jsonl
             evidence/onchain_risk_outcomes_ledger.jsonl
           key: crypto-prospective-state-${{ github.run_id }}
+      - name: Save real first-30s Pump.fun trade-flow features
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/pumpfun_30s_features.jsonl
+          key: crypto-pumpfun-first30-features-${{ github.run_id }}
       - name: Save independent verified first-seconds mint history
         if: always()
         uses: actions/cache/save@v4
