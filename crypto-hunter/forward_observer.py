@@ -2954,9 +2954,30 @@ def read_verified_pumpfun_launches():
         pass
     return launches
 
+def read_native_first30_features():
+    """Chronologically first complete observed 30s flow for each mint.
+    No future outcome or price used in assigning its early feature vector.
+    """
+    data={}
+    try:
+        with open('evidence/pumpfun_30s_features.jsonl',encoding='utf-8') as src:
+            for line in src:
+                try:row=json.loads(line)
+                except ValueError:continue
+                if not (row.get('mint') and
+                        row.get('full_first_30s_observation') is True
+                        and row.get('no_execution') is True):
+                    continue
+                key=row['mint']
+                if key not in data or row['completion_at']<data[key]['completion_at']:
+                    data[key]=row
+    except OSError:pass
+    return data
+
 for cycle in range(CYCLES_PER_RUN):
     t=d.datetime.now(d.timezone.utc)
     pumpfun_native_verified=read_verified_pumpfun_launches()
+    pumpfun_early_flow=read_native_first30_features()
     if cycle==0:
         long_tail_seeded_this_run=seed_long_tail_group(st)
         out({'kind':'long_tail_identity_cohort_seeded','at':t.isoformat(),
@@ -3077,6 +3098,31 @@ for cycle in range(CYCLES_PER_RUN):
                     first_seen_ages_minutes_this_run.append(age)
             s=st.setdefault(p,{'count':0,'first':t,'entry':None,'peak_net':0.,'previous_signature':None,'last_distinct_at':None,'qualified':0,'exit':None})
             if token_id:s['token_id']=token_id
+            if (token_id and token_id.startswith('solana_')
+                    and 'pumpfun_first30_features' not in s):
+                feat=pumpfun_early_flow.get(token_id.removeprefix('solana_'))
+                if feat:
+                    s['pumpfun_first30_features']={k:feat.get(k) for k in (
+                        'created_at_unix','completion_at',
+                        'buy_events_first30','sell_events_first30',
+                        'distinct_buyers_first30','distinct_sellers_first30',
+                        'creator_buy_events_first30',
+                        'creator_sell_events_first30',
+                        'buy_sol_lamports_reported_first30',
+                        'sell_sol_lamports_reported_first30',
+                        'initial_virtual_sol_lamports',
+                        'initial_virtual_token_raw',
+                        'last_virtual_sol_lamports',
+                        'last_virtual_token_raw','is_mayhem_mode')}
+                    s['pumpfun_first30_features']['frozen_pre_gecko'] = (
+                        feat['completion_at']<=t.isoformat())
+                    out({'kind':'native_30s_signal_joined_later_gecko',
+                         'pool':p,'mint':feat['mint'],'at':t.isoformat(),
+                         'features_measured_before_gecko':feat['completion_at']<=t.isoformat(),
+                         'buy_events_first30':feat.get('buy_events_first30'),
+                         'distinct_buyers_first30':feat.get('distinct_buyers_first30'),
+                         'creator_buy_events_first30':feat.get('creator_buy_events_first30'),
+                         'no_order':True,'no_trade':True})
             if (token_id and token_id.startswith('solana_')
                     and 'pumpfun_first_seconds' not in s):
                 launch=pumpfun_native_verified.get(token_id.removeprefix('solana_'))
@@ -3671,6 +3717,10 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'new_mints_first_detected_this_run':len(first_seen_unique_mints_this_run),
    'onchain_native_first_seconds_mints_visible_this_run':
        len(pumpfun_native_verified),
+   'complete_pre_gecko_first30_flow_vectors_visible_this_run':
+       len(pumpfun_early_flow),
+   'first30_flow_vectors_matched_later_gecko':sum(
+       bool(z.get('pumpfun_first30_features')) for z in st.values()),
    'onchain_create_mints_later_matched_gecko':sum(
        bool(z.get('pumpfun_first_seconds')) for z in st.values()),
    'new_mints_with_known_launch_age':len(first_seen_ages_minutes_this_run),
