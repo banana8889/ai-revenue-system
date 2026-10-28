@@ -41,6 +41,13 @@ jobs:
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
+      - name: Restore dedicated first-seconds verified-mint history
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/pumpfun_verified_mints.jsonl
+          key: crypto-pumpfun-verified-mints-${{ github.run_id }}
+          restore-keys: |
+            crypto-pumpfun-verified-mints-
       - name: Snapshot expanded cache before legacy recovery
         shell: bash
         run: |
@@ -148,12 +155,38 @@ jobs:
             python3 -u crypto-hunter/forward_observer.py --liquidity-selftest
             python3 -u crypto-hunter/forward_observer.py --liquidity-sensor &
             liquidity_ws_pid=$!
-            trap 'kill "$liquidity_ws_pid" 2>/dev/null || true; wait "$liquidity_ws_pid" 2>/dev/null || true' EXIT
+            # Genuine confirmed Pump.fun create instructions, BEFORE a DEX
+            # new-pool index lists the token. No wallet, orders, or fills.
+            python3 -u crypto-hunter/forward_observer.py --pumpfun-early-sensor &
+            early_launch_pid=$!
+            trap 'kill "$liquidity_ws_pid" "$early_launch_pid" 2>/dev/null || true; wait "$liquidity_ws_pid" "$early_launch_pid" 2>/dev/null || true' EXIT
             echo "LIQUIDITY_WS_PROCESS_STARTED=$liquidity_ws_pid"
+            echo "PUMPFUN_EARLY_MAINNET_PROCESS_STARTED=$early_launch_pid"
           else
             echo "LIQUIDITY_WS_UNAVAILABLE=DEPENDENCY_INSTALL_FAILED"
           fi
           python3 crypto-hunter/forward_observer.py
+          python3 - <<'PY'
+          import json,pathlib
+          path=pathlib.Path('evidence/pumpfun_verified_mints.jsonl')
+          rows=[]
+          if path.is_file():
+              with path.open(encoding='utf-8') as f:
+                  for line in f:
+                      try:
+                          z=json.loads(line)
+                          if z.get('kind')=='pumpfun_early_verified' and z.get('mint'):
+                              rows.append(z)
+                      except ValueError:
+                          continue
+          mints={r['mint'] for r in rows}
+          print('PUMPFUN_FIRST_SECONDS_RESEARCH',json.dumps({
+              'chain_verified_mints_retained':len(mints),
+              'within_30s_receipts':sum(r.get('detected_within_first_30s')
+                                         is True for r in rows),
+              'read_only':True,'trades':0,
+              'not_a_model_profit_or_fill':True},allow_nan=False))
+          PY
           if [ -z "${liquidity_ws_pid:-}" ] || ! kill -0 "$liquidity_ws_pid" 2>/dev/null; then
             echo "FAIL: live mainnet liquidity websocket process exited"
             exit 1
@@ -247,6 +280,12 @@ jobs:
             evidence/onchain_lp_control_prospective.jsonl
             evidence/onchain_risk_outcomes_ledger.jsonl
           key: crypto-prospective-state-${{ github.run_id }}
+      - name: Save independent verified first-seconds mint history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/pumpfun_verified_mints.jsonl
+          key: crypto-pumpfun-verified-mints-${{ github.run_id }}
       - name: Preserve independent evidence and receipt
         if: always()
         uses: actions/upload-artifact@v4

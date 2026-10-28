@@ -1,0 +1,29 @@
+name: Crypto Hunter Genuine Pump.fun First-Seconds Feed
+on:
+  pull_request:
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-native-early-launch-proof.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mainnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile canonical single-file scanner
+        run: python3 -m py_compile crypto-hunter/forward_observer.py
+      - name: Observe actual Pump.fun confirmed launch transactions on Solana mainnet
+        run: |
+          python3 -m pip install -q 'websockets==13.1'
+          python3 -u crypto-hunter/forward_observer.py --pumpfun-early-proof
+      - name: Persist original readonly first-seconds evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pumpfun-live-create-proof-${{ github.run_id }}
+          path: evidence/pumpfun_first_seconds_live.jsonl
+          if-no-files-found: warn
+          retention-days: 14
