@@ -5027,7 +5027,9 @@ persistent_kinds={'onchain_preemptive_sell_pressure',
                   'onchain_vault_cross_slot_joint_drop_suspected',
                   'onchain_vault_ws_joint_drop_suspected',
                   'onchain_vault_rpc_confirmation',
-                  'urgent_sell_quote'}
+                  'urgent_sell_quote',
+                  'liquidity_warning','liquidity_critical',
+                  'lp_withdrawal_log_hint'}
 onchain_evidence_by_id={}
 try:
     with open(onchain_outcomes_file,encoding='utf-8') as old_evidence:
@@ -5076,8 +5078,8 @@ print('ONCHAIN_FORWARD_EVENT_LEDGER',json.dumps({
         z.get('kind')=='onchain_vault_pair_observation' and
         z.get('current_pair_atomic') is False for z in onchain_evidence),
     'read_only':True,'observations_not_profit_predictions':True},allow_nan=False))
-risk_alerts=[x for x in events if x.get('kind') in alert_types]
-risk_quotes=[x for x in events if x.get('kind')=='urgent_sell_quote']
+risk_alerts=[x for x in onchain_evidence if x.get('kind') in alert_types]
+risk_quotes=[x for x in onchain_evidence if x.get('kind')=='urgent_sell_quote']
 matching_quotes=[]
 for alert in risk_alerts:
     try:
@@ -5106,8 +5108,12 @@ for alert in risk_alerts:
 latencies=[x['quote_latency_seconds'] for x in matching_quotes]
 alert_latency_report={
     'as_of':now.isoformat(),
-    'observation_window':'current GitHub job only',
+    'observation_window':'durable cross-run ledger when restored plus current job',
     'sensor_risk_alerts_total':len(risk_alerts),
+    'sensor_risk_alerts_new_this_run':sum(x.get('kind') in alert_types for x in events),
+    'retained_sell_quotes_total':len(risk_quotes),
+    'matching_requires_same_pool_trigger_and_quote_after_alert_within_60s':True,
+    'missing_quote_is_unknown_not_unexecutable':True,
     'risk_alerts_by_type':{k:sum(x.get('kind')==k for x in risk_alerts)
                            for k in alert_types},
     'matched_readonly_quotes_within_60s':len(matching_quotes),
