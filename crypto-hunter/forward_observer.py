@@ -109,7 +109,9 @@ def run_pumpfun_first_seconds_stream():
     BASE58=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
     ENDPOINTS=tuple(dict.fromkeys(filter(None,(
         os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com"),
-        os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com")))))
+        os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com"),
+        os.getenv("SOLANA_WS_THIRD_URL","wss://solana.api.onfinality.io/public-ws"),
+        os.getenv("SOLANA_WS_FOURTH_URL","wss://solana-mainnet.gateway.tatum.io/")))))
     RPC_URLS=tuple(dict.fromkeys(filter(None,(
         os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com"),
         os.getenv("SOLANA_RPC_BACKUP_URL","https://solana-rpc.publicnode.com")))))
@@ -117,7 +119,7 @@ def run_pumpfun_first_seconds_stream():
     VERIFIED=Path("evidence/pumpfun_verified_mints.jsonl")
     AUDIT.parent.mkdir(exist_ok=True)
     PROOF="--pumpfun-early-proof" in sys.argv
-    DURATION=65 if PROOF else max(60,min(1800,int(
+    DURATION=120 if PROOF else max(60,min(1800,int(
         os.getenv("PUMPFUN_FIRST_SECONDS_DURATION","1500"))))
     stats={"program_subscribed":False,"launch_signatures":0,
            "creator_instructions":0,"mint_verified":0,"rpc_attempts":0,
@@ -209,6 +211,7 @@ def run_pumpfun_first_seconds_stream():
         until=time.monotonic()+DURATION
         seen_signatures=set()
         watched={}
+        forward_outcomes={}
         provider_attempt=0
         stats["create_events_decoded"]=0
         stats["trade_events_decoded"]=0
@@ -216,6 +219,11 @@ def run_pumpfun_first_seconds_stream():
         stats["first30_complete"]=0
         stats["first30_censored"]=0
         stats["first30_trades_matched"]=0
+        stats["forward5m_complete"]=0
+        stats["forward5m_censored"]=0
+        stats["forward5m_post30_trade_events"]=0
+        stats["stale_provider_reconnects"]=0
+        FUTURE=Path("evidence/pumpfun_first30_to_5m_outcomes.jsonl")
         FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
         def snapshot(mint,state,complete,why):
             if state.get("done"):
@@ -278,15 +286,79 @@ def run_pumpfun_first_seconds_stream():
                     output.write(json.dumps(row,separators=(",",":"),
                                             allow_nan=False)+"\\n")
                 event("pumpfun_first30_features",**row)
+                # Future outcomes start only AFTER immutable first-30s
+                # baseline has been committed. Never leak future trading
+                # prices into eligibility or precursor features.
+                if last_sol>0 and last_token>0:
+                    forward_outcomes[mint]={
+                        "created_at_unix":state["created_at_unix"],
+                        "baseline_30s_virtual_sol":last_sol,
+                        "baseline_30s_virtual_token":last_token,
+                        "creator_sell_first30":state["creator_sells"]>0,
+                        "buyers_first30":len(state["buyers"]),
+                        "buy_events_first30":buys,
+                        "sell_events_first30":sells,
+                        "peak_x_after30":1.0,"last_x_after30":1.0,
+                        "first_cross_2x_at":None,
+                        "first_cross_5x_at":None,
+                        "first_cross_11x_at":None,
+                        "last_trade_unix":None,"post30_trade_events":0,
+                        "stream_gap":False}
             else:
                 stats["first30_censored"]+=1
                 event("pumpfun_first30_censored",
                       mint=mint,reason=why,partial_trades=buys+sells,
                       not_a_negative_label=True)
+        def finalize_forward_outcomes(at_end=False):
+            complete=[]
+            for mint,state in forward_outcomes.items():
+                horizon=state["created_at_unix"]+300
+                if not at_end and time.time()<horizon+0.5:
+                    continue
+                valid=not at_end and not state["stream_gap"]
+                row={"mint":mint,"first30_to_5m_horizon_seconds":300,
+                     "window_baseline":"actual observed 30-second onchain curve state",
+                     "outcome_frozen_at":stamp(),
+                     "original_launch_unix":state["created_at_unix"],
+                     "creator_sell_first30":state["creator_sell_first30"],
+                     "distinct_buyers_first30":state["buyers_first30"],
+                     "buy_events_first30":state["buy_events_first30"],
+                     "sell_events_first30":state["sell_events_first30"],
+                     "post30_trade_events":state["post30_trade_events"],
+                     "first_cross_2x_at":state["first_cross_2x_at"],
+                     "first_cross_5x_at":state["first_cross_5x_at"],
+                     "first_cross_11x_at":state["first_cross_11x_at"],
+                     "observed_later_curve_peak_x":
+                        round(state["peak_x_after30"],7) if valid else None,
+                     "observed_later_curve_last_x":
+                        round(state["last_x_after30"],7) if valid else None,
+                     "curve_peak_ge2x":state["peak_x_after30"]>=2 if valid else None,
+                     "curve_peak_ge5x":state["peak_x_after30"]>=5 if valid else None,
+                     "curve_peak_ge11x":state["peak_x_after30"]>=11 if valid else None,
+                     "complete_5m_telemetry_without_provider_gap":valid,
+                     "censored_reason":None if valid else (
+                         "provider_gap_during_followup"
+                         if state["stream_gap"] else "study_ended_before_5m"),
+                     "not_executable_quote_or_filled_trade":True,
+                     "future_not_used_in_entry_features":True,"trades":0}
+                if valid:
+                    stats["forward5m_complete"]+=1
+                    with FUTURE.open("a",encoding="utf-8") as handle:
+                        handle.write(json.dumps(row,allow_nan=False,
+                                                separators=(",",":"))+"\\n")
+                    event("pumpfun_5m_curve_outcome",**row)
+                else:
+                    stats["forward5m_censored"]+=1
+                    event("pumpfun_5m_outcome_censored",
+                          mint=mint,reason=row["censored_reason"],
+                          incomplete_not_negative=True)
+                complete.append(mint)
+            for mint in complete:
+                del forward_outcomes[mint]
         def finalize_expired():
             expired=[]
             for mint,state in watched.items():
-                if time.time()-state["created_at_unix"]>=30.5:
+                if time.time()-state["created_at_unix"]>=30.1:
                     snapshot(mint,state,
                         complete=state["initial_lag_seconds"]<=5 and
                                  not state["stream_gap"],
@@ -307,11 +379,17 @@ def run_pumpfun_first_seconds_stream():
                             {"mentions":[PUMP_PROGRAM]},
                             {"commitment":"confirmed"}]}))
                     acknowledged=False
+                    stale_create_streak=0
+                    latest_fresh_create_at=time.monotonic()
                     while time.monotonic()<until:
                         finalize_expired()
+                        finalize_forward_outcomes()
                         try:
                             msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=2))
                         except asyncio.TimeoutError:
+                            if time.monotonic()-latest_fresh_create_at>35:
+                                stats["stale_provider_reconnects"]+=1
+                                raise asyncio.TimeoutError("pumpfun_confirmed_log_feed_no_fresh_creates")
                             continue
                         if msg.get("id")==91:
                             acknowledged=isinstance(msg.get("result"),int)
@@ -354,6 +432,15 @@ def run_pumpfun_first_seconds_stream():
                                 stats["create_events_decoded"]+=1
                                 lag=time.time()-observed["created_at_unix"]
                                 under30=0<=lag<=30
+                                if under30:
+                                    stale_create_streak=0
+                                    latest_fresh_create_at=time.monotonic()
+                                else:
+                                    stale_create_streak+=1
+                                    if stale_create_streak>=4:
+                                        stats["stale_provider_reconnects"]+=1
+                                        raise asyncio.TimeoutError(
+                                            "pumpfun_confirmed_logs_arriving_30s_plus_late")
                                 stats["mint_verified"]+=1
                                 stats["latency_within_30s"]+=int(under30)
                                 event("pumpfun_early_verified",
@@ -400,6 +487,24 @@ def run_pumpfun_first_seconds_stream():
                                 stats["trade_events_decoded"]+=1
                                 state=watched.get(mint)
                                 if state is None:
+                                    later=forward_outcomes.get(mint)
+                                    if later is not None:
+                                        age=observed["timestamp_unix"]-later["created_at_unix"]
+                                        if 30<age<=300 and observed["virtual_token_raw"]>0:
+                                            vs=later["baseline_30s_virtual_sol"]
+                                            vt=later["baseline_30s_virtual_token"]
+                                            price_x=(observed["virtual_sol_lamports"]*vt/
+                                                     (observed["virtual_token_raw"]*vs))
+                                            later["post30_trade_events"]+=1
+                                            stats["forward5m_post30_trade_events"]+=1
+                                            later["last_trade_unix"]=observed["timestamp_unix"]
+                                            later["last_x_after30"]=price_x
+                                            later["peak_x_after30"]=max(
+                                                later["peak_x_after30"],price_x)
+                                            for multiplier in (2,5,11):
+                                                key="first_cross_"+str(multiplier)+"x_at"
+                                                if price_x>=multiplier and later[key] is None:
+                                                    later[key]=observed["timestamp_unix"]
                                     continue
                                 elapsed=observed["timestamp_unix"]-state["created_at_unix"]
                                 if not 0<=elapsed<=30:
@@ -439,9 +544,13 @@ def run_pumpfun_first_seconds_stream():
                 stats["errors"]+=1
                 for state in watched.values():
                     state["stream_gap"]=True
-                event("ws_reconnect",reason=type(error).__name__)
+                for state in forward_outcomes.values():
+                    state["stream_gap"]=True
+                event("ws_reconnect",reason=type(error).__name__,
+                      detail=str(error)[:120])
                 await asyncio.sleep(min(2,max(0.,until-time.monotonic())))
         finalize_expired()
+        finalize_forward_outcomes(at_end=True)
         # A truncated observation window is censored, never called 0 trades.
         for mint,state in watched.items():
             snapshot(mint,state,False,"study_window_ended_before_30s")
@@ -4068,6 +4177,90 @@ emergence_report={
 with open('evidence/emergence_research_arms.json','w',encoding='utf-8') as evidence_file:
     json.dump(emergence_report,evidence_file,indent=2,allow_nan=False)
 print('CRYPTO_EMERGENCE_RESEARCH_ARMS',json.dumps(emergence_report,allow_nan=False))
+# Forward model-preparation only: compare PRE-OUTCOME 30-second signals to
+# independently recorded later 30s-to-5min onchain curve observations.
+# Pools absent from GeckoTerminal remain valid here. No hindsight selection.
+early_complete={}
+try:
+    with open('evidence/pumpfun_30s_features.jsonl',encoding='utf-8') as f:
+        for line in f:
+            try:row=json.loads(line)
+            except ValueError:continue
+            if (row.get('full_first_30s_observation') is True
+                    and row.get('mint') and row.get('completion_at')):
+                mint=row['mint']
+                if (mint not in early_complete or
+                        row['completion_at']<early_complete[mint]['completion_at']):
+                    early_complete[mint]=row
+except OSError:pass
+later_complete={}
+try:
+    with open('evidence/pumpfun_first30_to_5m_outcomes.jsonl',
+              encoding='utf-8') as f:
+        for line in f:
+            try:row=json.loads(line)
+            except ValueError:continue
+            if (row.get('complete_5m_telemetry_without_provider_gap') is True
+                    and row.get('mint') and row.get('outcome_frozen_at')):
+                mint=row['mint']
+                if (mint not in later_complete or
+                        row['outcome_frozen_at']<later_complete[mint]['outcome_frozen_at']):
+                    later_complete[mint]=row
+except OSError:pass
+frozen_strata={}
+for name in ('creator_sold_first30','creator_not_sold_first30',
+             'five_plus_distinct_buyers','under_five_distinct_buyers'):
+    frozen_strata[name]={'with_30s_features':0,'matched_forward_5m':0,
+        'not_yet_observed_or_gap_censored':0,'post30_curve_2x':0,
+        'post30_curve_5x':0,'post30_curve_11x':0}
+sample_cases=[]
+for mint,early in early_complete.items():
+    arms=[
+        'creator_sold_first30' if early.get('creator_sell_observed_before30s')
+        else 'creator_not_sold_first30',
+        'five_plus_distinct_buyers' if
+            int(early.get('distinct_buyers_first30') or 0)>=5
+        else 'under_five_distinct_buyers']
+    later=later_complete.get(mint)
+    for name in arms:
+        entry=frozen_strata[name]
+        entry['with_30s_features']+=1
+        if later is None:
+            entry['not_yet_observed_or_gap_censored']+=1
+        else:
+            entry['matched_forward_5m']+=1
+            for level in (2,5,11):
+                if later.get('curve_peak_ge'+str(level)+'x') is True:
+                    entry['post30_curve_'+str(level)+'x']+=1
+    if later and len(sample_cases)<40:
+        sample_cases.append({
+            'mint':mint,'creator_sells_first30':
+                early.get('creator_sell_events_first30'),
+            'distinct_buyers_first30':early.get('distinct_buyers_first30'),
+            'post30_observed_curve_peak_x':
+                later.get('observed_later_curve_peak_x'),
+            'no_quote_or_filled_exit':True})
+native_forward_report={
+    'as_of':r['at'],'frozen_initial_feature_mints':len(early_complete),
+    'complete_future_5m_mints':len(later_complete),
+    'same_mint_paired_complete_first30_then_future5m':len(
+        set(early_complete)&set(later_complete)),
+    'precursor_strata_defined_without_future_labels':True,
+    'real_first30_creator_sale_vs_followup_curve_truth':frozen_strata,
+    'paired_examples':sample_cases,
+    'unmatched_followup_censored_not_negative':True,
+    'onchain_curve_price_not_sell_quote_or_executed_profit':True,
+    'tracked_beyond_gecko_and_without_token_listing':True,
+    'selection_and_provider_bias_possible':True,
+    'no_backfilled_timestamps_or_future_labels_in_features':True,
+    'orders':0,'trades':0}
+with open('evidence/pumpfun_first30_5m_forward_validation.json','w',
+          encoding='utf-8') as f:
+    json.dump(native_forward_report,f,indent=2,allow_nan=False)
+print('PUMPFUN_PRECURSOR_TO_FORWARD_5M',json.dumps(
+    {k:v for k,v in native_forward_report.items()
+     if k!='paired_examples'},allow_nan=False))
+
 # Quantify first-quote cliff events from *actually observed* intraminute
 # Jupiter sell routes. Historical and new v1 windows both have timestamped
 # quotations; no unobserved intervals are interpolated, no fills assumed.
