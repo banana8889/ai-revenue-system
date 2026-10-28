@@ -1083,6 +1083,55 @@ def run_embedded_liquidity_sensor():
                 pass
 
     async def main():
+        if "--creator-lp-ws-live-proof" in sys.argv:
+            samples=(
+                ("Gom42WgFrT7sXRYnhSGuZaR91Uxmt4BZMgc2JSdfMW8b",
+                 "7AVC9kUy9RWAL9TAQAa9bd2Hc1AZLYBH3Y5ZmudaACC"),
+                ("FprgYs7j6A8GmBAWJMUFVqfGe7pZ6p68CFdPp6vcgvTo",
+                 "APeJi5ZEjBZXqGxQ1DKWuJjsHtsBtbV7oj1Ukfn6qPGa"),
+                ("BrpvpZZp2pncFjzQXojifm9QtvQL6iKvmPcku27KDGeN",
+                 "Gw6iwL6dWRvpEqwGeqDQPy8s6fwqUnci46LB4zXjwv7K"))
+            errors=[]
+            for pool,mint in samples:
+                try:
+                    proof=await asyncio.to_thread(read_pumpswap_vaults,pool,mint)
+                    if not proof.get("verified_pumpswap_layout"):
+                        continue
+                    lp=await asyncio.to_thread(read_lp_control,proof)
+                    creators=lp.get("creator_lp_token_accounts") or []
+                    if not creators:
+                        errors.append("no_current_direct_creator_lp_for_"+pool[:8])
+                        continue
+                    address=creators[0]["pubkey"]
+                    ack=None
+                    async with websockets.connect(WS_URL,open_timeout=10,
+                        ping_interval=20,ping_timeout=20) as ws:
+                        await ws.send(json.dumps({"jsonrpc":"2.0","id":77,
+                            "method":"accountSubscribe","params":[address,
+                            {"encoding":"jsonParsed","commitment":"confirmed"}]}))
+                        for _ in range(5):
+                            msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=4))
+                            if msg.get("id")==77:
+                                ack=msg.get("result")
+                                break
+                    receipt={"at":stamp(),"pool":pool,"lp_mint":proof["lp_mint"],
+                             "verified_token_account":address,
+                             "observed_creator_lp_raw":creators[0]["amount_raw"],
+                             "account_subscribe_ack":ack,
+                             "network_confirmed":isinstance(ack,int),
+                             "balance_change_event_observed":False,
+                             "real_orders":0,"real_trades":0}
+                    print("CREATOR_LP_ACCOUNT_WS_MAINNET_PROOF",
+                          json.dumps(receipt,allow_nan=False),flush=True)
+                    if isinstance(ack,int):
+                        return
+                    errors.append("no_subscription_ack_"+pool[:8])
+                except Exception as error:
+                    errors.append(type(error).__name__+"_"+pool[:8])
+            print("CREATOR_LP_ACCOUNT_WS_MAINNET_PROOF",
+                  json.dumps({"network_confirmed":False,"reasons":errors,
+                              "no_claim_of_success":True,"real_trades":0}))
+            raise SystemExit(1)
         if "--pumpswap-lp-live-proof" in sys.argv:
             pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
             mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
@@ -1259,7 +1308,8 @@ def run_embedded_liquidity_sensor():
 
 if ('--liquidity-sensor' in sys.argv or '--liquidity-selftest' in sys.argv
         or '--pumpswap-live-proof' in sys.argv or '--pumpswap-ws-live-proof' in sys.argv
-        or '--pumpswap-lp-live-proof' in sys.argv):
+        or '--pumpswap-lp-live-proof' in sys.argv
+        or '--creator-lp-ws-live-proof' in sys.argv):
     run_embedded_liquidity_sensor()
     raise SystemExit(0)
 
