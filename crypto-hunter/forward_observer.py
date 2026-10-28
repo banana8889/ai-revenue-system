@@ -223,6 +223,17 @@ def run_pumpfun_first_seconds_stream():
             state["done"]=True
             buys=state["buys"]
             sells=state["sells"]
+            initial_sol=state["initial_virtual_sol"]
+            initial_token=state["initial_virtual_token"]
+            last_sol=state["virtual_sol"]
+            last_token=state["virtual_token"]
+            last_curve_x=(last_sol*initial_token/(last_token*initial_sol)
+                          if last_token>0 and initial_token>0 and
+                             initial_sol>0 else None)
+            max_curve_x=state["peak_curve_x"]
+            retracement=(1-last_curve_x/max_curve_x
+                         if last_curve_x is not None and max_curve_x>0
+                         else None)
             row={"mint":mint,"created_at_unix":state["created_at_unix"],
                  "first_observed_at":state["first_observed_at"],
                  "initial_lag_seconds":state["initial_lag_seconds"],
@@ -236,6 +247,16 @@ def run_pumpfun_first_seconds_stream():
                  "distinct_sellers_first30":len(state["sellers"]),
                  "creator_buy_events_first30":state["creator_buys"],
                  "creator_sell_events_first30":state["creator_sells"],
+                 "creator_sell_observed_before30s":state["creator_sells"]>0,
+                 "first30_buy_event_count_exceeds_sell_count":buys>sells,
+                 "onchain_virtual_curve_last_price_multiple":
+                     round(last_curve_x,7) if last_curve_x is not None else None,
+                 "onchain_virtual_curve_peak_price_multiple":
+                     round(max_curve_x,7),
+                 "onchain_curve_peak_to_last_retracement_fraction":
+                     round(max(0,retracement),7) if retracement is not None else None,
+                 "curve_price_is_not_executable_quote":True,
+                 "creator_sale_is_risk_observation_not_rug_proof":True,
                  "buy_sol_lamports_reported_first30":state["buy_lamports"],
                  "sell_sol_lamports_reported_first30":state["sell_lamports"],
                  "last_virtual_sol_lamports":state["virtual_sol"],
@@ -371,6 +392,8 @@ def run_pumpfun_first_seconds_stream():
                                         "buys":0,"sells":0,
                                         "creator_buys":0,"creator_sells":0,
                                         "buy_lamports":0,"sell_lamports":0,
+                                        "peak_curve_x":1.0,
+                                        "creator_first_sell_alerted":False,
                                         "stream_gap":False,"done":False}
                                     stats["watched_first30"]+=1
                             elif kind=="TradeEvent":
@@ -393,8 +416,24 @@ def run_pumpfun_first_seconds_stream():
                                     state["sellers"].add(user)
                                     state["sell_lamports"]+=observed["sol_lamports_reported"]
                                     state["creator_sells"]+=int(user==state["creator"])
+                                    if (user==state["creator"] and not
+                                            state["creator_first_sell_alerted"]):
+                                        state["creator_first_sell_alerted"]=True
+                                        event("pumpfun_creator_sell_first30_observed",
+                                              mint=mint,signature=signature,
+                                              observed_trade_timestamp=observed["timestamp_unix"],
+                                              minutes_since_launch=round(elapsed/60,5),
+                                              creator=state["creator"],
+                                              not_a_predicted_rug=True,
+                                              not_a_sell_order=True)
                                 state["virtual_sol"]=observed["virtual_sol_lamports"]
                                 state["virtual_token"]=observed["virtual_token_raw"]
+                                if (state["initial_virtual_sol"]>0 and
+                                        state["initial_virtual_token"]>0 and
+                                        state["virtual_token"]>0):
+                                    x=(state["virtual_sol"]*state["initial_virtual_token"]/
+                                       (state["virtual_token"]*state["initial_virtual_sol"]))
+                                    state["peak_curve_x"]=max(state["peak_curve_x"],x)
             except (OSError,ValueError,asyncio.TimeoutError,
                     websockets.exceptions.WebSocketException) as error:
                 stats["errors"]+=1
@@ -3108,6 +3147,10 @@ for cycle in range(CYCLES_PER_RUN):
                         'distinct_buyers_first30','distinct_sellers_first30',
                         'creator_buy_events_first30',
                         'creator_sell_events_first30',
+                        'creator_sell_observed_before30s',
+                        'onchain_virtual_curve_last_price_multiple',
+                        'onchain_virtual_curve_peak_price_multiple',
+                        'onchain_curve_peak_to_last_retracement_fraction',
                         'buy_sol_lamports_reported_first30',
                         'sell_sol_lamports_reported_first30',
                         'initial_virtual_sol_lamports',
