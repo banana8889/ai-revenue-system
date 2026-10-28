@@ -1406,6 +1406,9 @@ def run_embedded_liquidity_sensor():
                     samples.append((pool,mint))
                     seen.add(pool)
             errors=[]
+            zero_lp_fallbacks=[]
+            zero_lp_count=0
+            positive_lp_without_direct_owner=0
             for pool,mint in samples:
                 try:
                     proof=await asyncio.to_thread(read_pumpswap_vaults,pool,mint)
@@ -1414,10 +1417,17 @@ def run_embedded_liquidity_sensor():
                     lp=await asyncio.to_thread(read_lp_control,proof)
                     creators=lp.get("creator_lp_token_accounts") or []
                     if not creators:
-                        errors.append("no_current_direct_creator_lp_for_"+pool[:8]+
-                            "_"+str((lp.get("read_endpoint_health") or {}).get(
-                                "getTokenAccountsByOwner"))+"_issued="+str(
-                                lp.get("current_lp_mint_supply_raw")))
+                        if (lp.get("available") and
+                                lp.get("current_lp_mint_supply_raw")=="0"):
+                            zero_lp_count+=1
+                            if len(zero_lp_fallbacks)<3:
+                                zero_lp_fallbacks.append((pool,mint,proof))
+                            errors.append("zero_outstanding_lp_no_direct_owner_"+pool[:8])
+                        else:
+                            positive_lp_without_direct_owner+=1
+                            errors.append("owner_not_verified_"+pool[:8]+
+                                "_"+str((lp.get("read_endpoint_health") or {}).get(
+                                    "getTokenAccountsByOwner")))
                         continue
                     address=creators[0]["pubkey"]
                     ack=None
@@ -1445,10 +1455,63 @@ def run_embedded_liquidity_sensor():
                     errors.append("no_subscription_ack_"+pool[:8])
                 except Exception as error:
                     errors.append(type(error).__name__+"_"+pool[:8])
-            print("CREATOR_LP_ACCOUNT_WS_MAINNET_PROOF",
-                  json.dumps({"network_confirmed":False,"candidates_checked":len(samples),
+            # Zero outstanding LP has NO positive-balance creator LP account.
+            # Still verify two genuine live pool vault subscriptions instead.
+            # This is vault coverage, NOT proof of LP owner control coverage.
+            for pool,mint,proof in zero_lp_fallbacks:
+                try:
+                    acknowledgements=set()
+                    async with websockets.connect(WS_URL,open_timeout=10,
+                            ping_interval=20,ping_timeout=20) as ws:
+                        for index,side in enumerate(("base","quote"),1):
+                            await ws.send(json.dumps({"jsonrpc":"2.0","id":index,
+                                "method":"accountSubscribe",
+                                "params":[proof[side+"_vault"],
+                                    {"encoding":"jsonParsed",
+                                     "commitment":"confirmed"}]}))
+                        for _ in range(8):
+                            message=json.loads(await asyncio.wait_for(
+                                ws.recv(),timeout=4))
+                            request_id=message.get("id")
+                            if (request_id in (1,2)
+                                    and isinstance(message.get("result"),int)):
+                                acknowledgements.add(request_id)
+                            if len(acknowledgements)==2:
+                                break
+                    verified=len(acknowledgements)==2
+                    print("LP_COVERAGE_MAINNET_PROOF",
+                          json.dumps({"at":stamp(),"pool":pool,"mint":mint,
+                              "mode":"two_verified_pool_vault_streams_only",
+                              "issued_lp_raw":"0",
+                              "creator_lp_owner_stream_verified":False,
+                              "creator_lp_stream_applicable":False,
+                              "vault_stream_subscriptions_confirmed":
+                                  len(acknowledgements),
+                              "onchain_pool_layout_verified":True,
+                              "vault_stream_verified":verified,
+                              "does_not_establish_related_wallet_safety":True,
+                              "candidates_checked":len(samples),
+                              "zero_outstanding_lp_pools":zero_lp_count,
+                              "positive_or_unknown_lp_pools_without_direct_owner":
+                                  positive_lp_without_direct_owner,
+                              "owner_monitoring_not_claimed":True,
+                              "real_orders":0,"real_trades":0},
+                              allow_nan=False),flush=True)
+                    if verified:
+                        return
+                    errors.append("vault_subscription_ack_unavailable_"+pool[:8])
+                except Exception as error:
+                    errors.append("vault_fallback_"+type(error).__name__+"_"+pool[:8])
+            print("LP_COVERAGE_MAINNET_PROOF",
+                  json.dumps({"at":stamp(),"vault_stream_verified":False,
+                              "creator_lp_owner_stream_verified":False,
+                              "candidates_checked":len(samples),
+                              "zero_outstanding_lp_pools":zero_lp_count,
+                              "positive_or_unknown_lp_pools_without_direct_owner":
+                                  positive_lp_without_direct_owner,
                               "reasons":errors,"no_claim_of_success":True,
-                              "real_trades":0}))
+                              "real_orders":0,"real_trades":0},allow_nan=False),
+                  flush=True)
             raise SystemExit(1)
         if "--pumpswap-lp-live-proof" in sys.argv:
             pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
