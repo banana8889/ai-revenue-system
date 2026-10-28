@@ -33,7 +33,7 @@ jobs:
             cat /tmp/crypto-live-startup.log
             exit 1
           fi
-          grep -q '"kind":"ws_started"' /tmp/crypto-live-startup.log
+          grep -q '"kind":"ws_started"' evidence/liquidity_ws_events.jsonl
           echo "MAINNET_SENSOR_STARTED_WITHOUT_EXCEPTION=true"
       - name: Verify actual PumpSwap mainnet RPC two-vault snapshot
         run: python3 -u crypto-hunter/forward_observer.py --pumpswap-live-proof
