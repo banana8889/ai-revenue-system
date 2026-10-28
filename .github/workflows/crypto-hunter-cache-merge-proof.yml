@@ -72,3 +72,13 @@ jobs:
           assert len(state)>=26427
           assert len(known)>=97
           PY
+      - name: Promote fully recovered corpus into current durable cache layout
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+            evidence/onchain_risk_outcomes_ledger.jsonl
+          key: crypto-prospective-state-${{ github.run_id }}
