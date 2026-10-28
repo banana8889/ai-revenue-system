@@ -4463,8 +4463,8 @@ for (pool,kind),ev in sorted(first_alerts.items()):
         continue
     t1=t0+d.timedelta(minutes=10)
     earliest=first_confirmed_drain_after(pool,ev['at'],lp_drain_events,600)
-    first_drain=(t0+d.timedelta(seconds=earliest[0]),earliest[1])
-        if earliest is not None else None
+    first_drain=((t0+d.timedelta(seconds=earliest[0]),earliest[1])
+                 if earliest is not None else None)
     post=[t for t,_ in pairs_by_pool.get(pool,[]) if t0<=t<=t1]
     post.sort()
     full_window=(
