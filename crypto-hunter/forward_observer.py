@@ -3644,6 +3644,7 @@ alert_types={'lp_withdrawal_log_hint':'unverified_lp_withdrawal_log',
              'onchain_vault_ws_joint_drop':'same_slot_pumpswap_vault_ws_joint_drop',
              'onchain_preemptive_sell_pressure':'early_sell_pressure_vault_observation',
              'onchain_lp_creator_balance_drop':'observed_creator_lp_balance_decrease',
+             'onchain_pool_creator_token_balance_drop':'observed_pool_creator_token_balance_decrease',
              'liquidity_critical':'reserve_critical',
              'liquidity_warning':'reserve_warning'}
 events=[]
@@ -3664,6 +3665,8 @@ except OSError:
 onchain_outcomes_file='evidence/onchain_risk_outcomes_ledger.jsonl'
 persistent_kinds={'onchain_preemptive_sell_pressure',
                   'onchain_lp_creator_balance_drop',
+                  'onchain_pool_creator_token_snapshot',
+                  'onchain_pool_creator_token_balance_drop',
                   'onchain_vault_ws_joint_drop','onchain_vault_joint_drop',
                   'urgent_sell_quote'}
 onchain_evidence_by_id={}
@@ -3882,7 +3885,8 @@ print('LP_EARLY_VERSUS_DRAIN_QUOTE',json.dumps(early_exit_report,allow_nan=False
 # within 120s, recorded at notification time. Only LATER >=30s confirmed
 # two-vault drains may count as lead-time evidence.
 precursor_kinds={'onchain_preemptive_sell_pressure',
-                 'onchain_lp_creator_balance_drop'}
+                 'onchain_lp_creator_balance_drop',
+                 'onchain_pool_creator_token_balance_drop'}
 precursor_events=[e for e in onchain_evidence
                   if e.get('kind') in precursor_kinds]
 forward_precursor_matches=[]
@@ -3916,6 +3920,7 @@ precursor_report={
     'precommitted_definition':{
         'sell_pressure':'Watched mint vault rises >=12% and counterasset falls >=12% within 120s, after two observed vault-pair slots',
         'creator_lp_balance':'Creator direct verified LP token account drops >=10% across observed account notifications',
+        'pool_creator_tradeable_token':'Pool creator (not necessarily original token developer) verified tradeable base token account drops >=10%; may be transfer not sale',
         'outcome':'A later (>=30s) same-pool verified >=20% simultaneous two-vault loss',
         'same_slot_lp_burn_is_not_a_lead_signal':True},
     'precursor_observations_in_this_run':sum(
