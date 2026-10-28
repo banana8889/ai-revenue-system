@@ -109,7 +109,9 @@ def run_pumpfun_first_seconds_stream():
     BASE58=set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
     ENDPOINTS=tuple(dict.fromkeys(filter(None,(
         os.getenv("SOLANA_WS_URL","wss://api.mainnet-beta.solana.com"),
-        os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com")))))
+        os.getenv("SOLANA_WS_BACKUP_URL","wss://solana-rpc.publicnode.com"),
+        os.getenv("SOLANA_WS_THIRD_URL","wss://solana.api.onfinality.io/public-ws"),
+        os.getenv("SOLANA_WS_FOURTH_URL","wss://solana-mainnet.gateway.tatum.io/")))))
     RPC_URLS=tuple(dict.fromkeys(filter(None,(
         os.getenv("SOLANA_RPC_URL","https://api.mainnet-beta.solana.com"),
         os.getenv("SOLANA_RPC_BACKUP_URL","https://solana-rpc.publicnode.com")))))
