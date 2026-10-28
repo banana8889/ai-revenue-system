@@ -41,7 +41,7 @@ def decode_pumpfun_anchor_event(encoded):
             while v:
                 v,mod=divmod(v,58)
                 enc=alphabet[mod]+enc
-            return "1"*(len(raw)-len(raw.lstrip(b"\\x00")))+(enc or "")
+            return "1"*(len(raw)-len(raw.lstrip(bytes((0,)))))+(enc or "")
         if is_create:
             name=string()
             symbol=string()
@@ -152,7 +152,7 @@ def run_pumpfun_first_seconds_stream():
             if ix<0:return False
             value=value*58+ix
         raw=value.to_bytes((value.bit_length()+7)//8,"big")
-        raw=b"\\x00"*(len(encoded)-len(encoded.lstrip("1")))+raw
+        raw=bytes((0,))*(len(encoded)-len(encoded.lstrip("1")))+raw
         expected=(hashlib.sha256(b"global:"+name).digest()[:8]
                   for name in (b"create",b"create_v2"))
         return len(raw)>=8 and raw[:8] in expected
@@ -663,6 +663,7 @@ def run_embedded_liquidity_sensor():
     USDC="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     MAX_POOLS=max(1,min(12,int(os.getenv("LIQUIDITY_WS_POOLS","8"))))
     DURATION=max(60,min(1800,int(os.getenv("LIQUIDITY_WS_DURATION","1500"))))
+    MAX_PAIR_TELEMETRY_ROWS=max(1000,MAX_POOLS*((DURATION+2)//3+20))
     B58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
@@ -685,6 +686,8 @@ def run_embedded_liquidity_sensor():
 
     def health(connected):
         row={"at":stamp(),"connected":connected,**stats,
+             "vault_pair_telemetry_budget":MAX_PAIR_TELEMETRY_ROWS,
+             "vault_pair_telemetry_budget_exhausted":stats["vault_pair_telemetry_rows"]>=MAX_PAIR_TELEMETRY_ROWS,
              "ever_subscribed":stats["max_subscriptions"]>0,
              "ever_received_events":stats["events"]>0,
              "orders":0,"trades":0,"automatic_exit_enabled":False}
@@ -1864,8 +1867,9 @@ def run_embedded_liquidity_sensor():
                                    abs(current[0]-previous[0])*100>=previous[0]*5)
                     quote_move=bool(previous and previous[1]>0 and
                                     abs(current[1]-previous[1])*100>=previous[1]*5)
-                    if (stats["vault_pair_telemetry_rows"]<500 and
-                            (now_s-baseline_observed>=15 or base_move or quote_move)):
+                    if (stats["vault_pair_telemetry_rows"]<MAX_PAIR_TELEMETRY_ROWS and
+                            (now_s-baseline_observed>=15 or
+                             ((base_move or quote_move) and now_s-baseline_observed>=3))):
                         stats["vault_pair_telemetry_rows"]+=1
                         item["last_pair_telemetry_at"]=now_s
                         emit("onchain_vault_pair_observation",
