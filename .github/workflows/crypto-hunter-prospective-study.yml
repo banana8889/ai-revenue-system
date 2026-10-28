@@ -43,6 +43,97 @@ jobs:
           key: crypto-prospective-state-${{ github.run_id }}
           restore-keys: |
             crypto-prospective-state-
+      - name: Snapshot expanded cache before legacy recovery
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/crypto_new_cache"
+          for file in state.json prospective_cohort_ledger.json shadow_outcomes_ledger.json onchain_lp_control_prospective.jsonl onchain_risk_outcomes_ledger.jsonl; do
+            if [ -s "evidence/$file" ]; then
+              cp "evidence/$file" "$RUNNER_TEMP/crypto_new_cache/$file"
+            fi
+          done
+      - name: Recover legacy four-path checkpoint from before cache-layout change
+        uses: actions/cache/restore@v4
+        with:
+          # IMPORTANT: exactly the OLD four paths; changing this list changes
+          # cache version and makes the healthy >26K checkpoint invisible.
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+          key: crypto-prospective-legacy-restore-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Reconcile both cache generations without losing historical signals
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          root=pathlib.Path('evidence')
+          root.mkdir(exist_ok=True)
+          new=pathlib.Path(os.environ['RUNNER_TEMP'])/'crypto_new_cache'
+          def load(path,kind):
+              if not path.exists() or not path.stat().st_size:
+                  return {} if kind=='dict' else []
+              try:
+                  with path.open(encoding='utf-8') as handle:
+                      obj=json.load(handle)
+              except (ValueError,UnicodeError):
+                  raise SystemExit('CHECKPOINT_RECONCILIATION_INVALID='+str(path))
+              if not isinstance(obj,dict if kind=='dict' else list):
+                  raise SystemExit('CHECKPOINT_RECONCILIATION_WRONG_TYPE='+str(path))
+              return obj
+          old_state=load(root/'state.json','dict')
+          fresh_state=load(new/'state.json','dict')
+          state=dict(old_state)
+          for pool,record in fresh_state.items():
+              if pool in state and isinstance(state[pool],dict) and isinstance(record,dict):
+                  state[pool]={**state[pool],**record}
+              else:
+                  state[pool]=record
+          if state:
+              (root/'state.json').write_text(json.dumps(state,separators=(',',':')),encoding='utf-8')
+          for filename in ('prospective_cohort_ledger.json','shadow_outcomes_ledger.json'):
+              older=load(root/filename,'list')
+              newer=load(new/filename,'list')
+              seen=set()
+              out=[]
+              for row in older+newer:
+                  key=json.dumps(row,sort_keys=True,separators=(',',':'),allow_nan=False)
+                  if key not in seen:
+                      out.append(row);seen.add(key)
+              if out:
+                  (root/filename).write_text(json.dumps(out,separators=(',',':')),encoding='utf-8')
+          filename='onchain_lp_control_prospective.jsonl'
+          found={}
+          for path in (root/filename,new/filename):
+              if not path.exists():
+                  continue
+              for line in path.read_text(encoding='utf-8').splitlines():
+                  try:
+                      row=json.loads(line)
+                  except (ValueError,TypeError):
+                      continue
+                  pool=row.get('pool')
+                  if not isinstance(pool,str) or not row.get('available'):
+                      continue
+                  previous=found.get(pool)
+                  if previous is None or row.get('sample_completed_at','')<previous.get('sample_completed_at',''):
+                      found[pool]=row
+          if found:
+              with (root/filename).open('w',encoding='utf-8') as handle:
+                  for row in sorted(found.values(),key=lambda x:x.get('sample_completed_at','')):
+                      handle.write(json.dumps(row,allow_nan=False,separators=(',',':'))+'\n')
+          filename='onchain_risk_outcomes_ledger.jsonl'
+          if (new/filename).is_file():
+              (root/filename).write_bytes((new/filename).read_bytes())
+          print('CRYPTO_STATE_RECONCILIATION',json.dumps({
+              'legacy_tracked':len(old_state),'expanded_tracked':len(fresh_state),
+              'recovered_tracked':len(state),'retained_first_lp_snapshots':len(found),
+              'lossless_pool_count':len(state)>=max(len(old_state),len(fresh_state)),
+              'no_trades':True},allow_nan=False))
+          PY
       - name: Collect live forward-only observations without transactions
         run: |
           mkdir -p evidence
