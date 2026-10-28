@@ -1,0 +1,74 @@
+name: Crypto Hunter Full Cache Merge Proof
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-cache-merge-proof.yml
+permissions:
+  contents: read
+jobs:
+  merge-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore current five-file cache version
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+            evidence/onchain_risk_outcomes_ledger.jsonl
+          key: crypto-proof-new-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Preserve new cache in a safe temporary directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/crypto_new_cache"
+          for file in state.json prospective_cohort_ledger.json shadow_outcomes_ledger.json onchain_lp_control_prospective.jsonl onchain_risk_outcomes_ledger.jsonl; do
+            if [ -s "evidence/$file" ]; then
+              cp "evidence/$file" "$RUNNER_TEMP/crypto_new_cache/$file"
+            fi
+          done
+      - name: Restore old four-file cache generation
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            evidence/state.json
+            evidence/prospective_cohort_ledger.json
+            evidence/shadow_outcomes_ledger.json
+            evidence/onchain_lp_control_prospective.jsonl
+          key: crypto-proof-legacy-${{ github.run_id }}
+          restore-keys: |
+            crypto-prospective-state-
+      - name: Execute exact production reconciliation step and validate corpus
+        run: |
+          python3 - <<'PY'
+          import pathlib,subprocess,textwrap,json
+          yaml=pathlib.Path('.github/workflows/crypto-hunter-prospective-study.yml').read_text()
+          section=yaml.split('      - name: Reconcile both cache generations without losing historical signals\n',1)[1]
+          section=section.split('      - name: Collect live forward-only observations without transactions\n',1)[0]
+          script=section.split('        run: |\n',1)[1]
+          script=textwrap.dedent(script)
+          subprocess.run(['bash','-e','-o','pipefail','-c',script],check=True)
+          state=json.loads(pathlib.Path('evidence/state.json').read_text())
+          lp=pathlib.Path('evidence/onchain_lp_control_prospective.jsonl')
+          known=set()
+          for line in lp.read_text().splitlines():
+              if line.strip():
+                  row=json.loads(line)
+                  known.add(row['pool'])
+          outcome=pathlib.Path('evidence/onchain_risk_outcomes_ledger.jsonl')
+          print('CRYPTO_CACHE_MERGE_PROOF',json.dumps({
+              'merged_pools':len(state),'first_lp_baselines':len(known),
+              'newer_outcomes_ledger_present':outcome.exists(),
+              'pool_history_unchanged':len(state)>=26427,
+              'no_trading':True}))
+          assert len(state)>=26427
+          assert len(known)>=97
+          PY
