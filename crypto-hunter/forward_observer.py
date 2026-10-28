@@ -934,6 +934,10 @@ def run_embedded_liquidity_sensor():
                         item["last_vault_ws_slot"]=proof["slot"]
                         item["rpc_vault_baseline_slot"]=proof["slot"]
                     vault_pair_updates[pool]={}
+                    item["last_paired_account_slots"]={
+                        "base":int(proof.get("slot") or 0),
+                        "quote":int(proof.get("slot") or 0)}
+                    item["last_paired_atomic"]=True
                     for side in ("base","quote"):
                         next_vault_id+=1
                         vault_addr=proof[side+"_vault"]
@@ -1116,13 +1120,24 @@ def run_embedded_liquidity_sensor():
                                 abs(pending["base"][0]-pending["quote"][0])>3):
                             stats["vault_pair_skew_rejections"]+=1
                         continue
+                    # Both token accounts must have NEW observations since
+                    # the preceding pair. Never reuse one stale quote vault
+                    # with a new base notification to invent an apparent swap.
+                    previous_pair_slots=item.get("last_paired_account_slots") or {}
+                    if any(pending[name][0]<=previous_pair_slots.get(name,0)
+                           for name in ("base","quote")):
+                        continue
                     current=paired["current"]
                     previous=vault_last_pair.get(pool)
+                    previous_pair_atomic=bool(item.get("last_paired_atomic"))
                     pair_slot=paired["pair_slot"]
                     last_slot=int(item.get("last_vault_ws_slot") or 0)
                     if pair_slot<=last_slot:
                         continue
                     item["last_vault_ws_slot"]=pair_slot
+                    item["last_paired_account_slots"]={
+                        name:pending[name][0] for name in ("base","quote")}
+                    item["last_paired_atomic"]=paired["atomic_same_slot"]
                     vault_last_pair[pool]=current
                     if paired["atomic_same_slot"]:
                         stats["vault_pairs_same_slot"]+=1
@@ -1166,7 +1181,11 @@ def run_embedded_liquidity_sensor():
                             urgent_ws_tasks.add(task)
                             task.add_done_callback(urgent_ws_tasks.discard)
                     if vault_joint_drop(previous,current):
-                        if paired["atomic_same_slot"]:
+                        # A confirmed comparison requires BOTH current and
+                        # previous paired reserve snapshots from atomic slots.
+                        verified_atomic_compare=(
+                            paired["atomic_same_slot"] and previous_pair_atomic)
+                        if verified_atomic_compare:
                             stats["vault_ws_joint_drops"]+=1
                             drain_kind="onchain_vault_ws_joint_drop"
                         else:
@@ -1174,12 +1193,14 @@ def run_embedded_liquidity_sensor():
                             drain_kind="onchain_vault_cross_slot_joint_drop_suspected"
                         emit(drain_kind,pool=pool,mint=item["mint"],
                              slot=pair_slot,vault_pair_slot_skew=paired["slot_skew"],
-                             same_slot_confirmation=paired["atomic_same_slot"],
+                             same_slot_confirmation=verified_atomic_compare,
+                             current_pair_atomic=paired["atomic_same_slot"],
+                             previous_pair_atomic=previous_pair_atomic,
                              previous_base_raw=str(previous[0]),
                              previous_quote_raw=str(previous[1]),
                              new_base_raw=str(current[0]),new_quote_raw=str(current[1]),
                              verified_vault_owners=True,
-                             not_proof_of_atomic_joint_withdrawal=not paired["atomic_same_slot"],
+                             not_proof_of_atomic_joint_withdrawal=not verified_atomic_compare,
                              read_only=True,no_fill_executed=True)
                         if len(urgent_ws_tasks)<3:
                             async def quote_vault_alarm(watched):
