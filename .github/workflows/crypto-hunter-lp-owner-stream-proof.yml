@@ -1,6 +1,10 @@
-name: Crypto Hunter Creator LP Account Stream Proof
+name: Crypto Hunter LP Owner and Vault Coverage Proof
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-lp-owner-stream-proof.yml
   push:
     branches: [main]
     paths:
@@ -33,5 +37,5 @@ jobs:
           python3 -m py_compile crypto-hunter/forward_observer.py
           python3 -m pip install -q --disable-pip-version-check 'websockets==13.1'
           python3 crypto-hunter/forward_observer.py --liquidity-selftest
-      - name: Verify live public creator LP token account stream only
+      - name: Verify creator LP subscriptions or explicitly identified zero-LP vault monitoring on mainnet
         run: python3 -u crypto-hunter/forward_observer.py --creator-lp-ws-live-proof
