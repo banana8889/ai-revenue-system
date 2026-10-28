@@ -1195,6 +1195,26 @@ def run_embedded_liquidity_sensor():
                 pass
 
     async def main():
+        if "--pool-creator-token-live-proof" in sys.argv:
+            pool="GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J"
+            mint="7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump"
+            proof=await asyncio.to_thread(read_pumpswap_vaults,pool,mint)
+            if not proof.get("verified_pumpswap_layout"):
+                raise RuntimeError("invalid_reference_pool")
+            try:
+                token=await asyncio.to_thread(read_pool_creator_token_holdings,
+                                              proof,mint)
+            except Exception as error:
+                token={"available":False,"reason":type(error).__name__}
+            print("PUMPSWAP_REAL_CREATOR_TRADEABLE_TOKEN_PROOF",
+                  json.dumps({"at":stamp(),"pool":pool,"mint":mint,
+                      "onchain_pool_verified":True,
+                      "creator_is_not_verified_developer":True,
+                      "zero_balance_does_not_imply_related_wallets_safe":True,
+                      "orders":0,"trades":0,**token},allow_nan=False),flush=True)
+            if not token.get("available"):
+                raise SystemExit(1)
+            return
         if "--creator-lp-ws-live-proof" in sys.argv:
             # Use the newest timestamped FIRST-OBSERVED risk snapshots from
             # durable research state; old test addresses may have since
@@ -1454,7 +1474,8 @@ def run_embedded_liquidity_sensor():
 if ('--liquidity-sensor' in sys.argv or '--liquidity-selftest' in sys.argv
         or '--pumpswap-live-proof' in sys.argv or '--pumpswap-ws-live-proof' in sys.argv
         or '--pumpswap-lp-live-proof' in sys.argv
-        or '--creator-lp-ws-live-proof' in sys.argv):
+        or '--creator-lp-ws-live-proof' in sys.argv
+        or '--pool-creator-token-live-proof' in sys.argv):
     run_embedded_liquidity_sensor()
     raise SystemExit(0)
 
