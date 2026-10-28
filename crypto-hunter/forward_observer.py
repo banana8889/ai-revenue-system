@@ -4159,6 +4159,90 @@ emergence_report={
 with open('evidence/emergence_research_arms.json','w',encoding='utf-8') as evidence_file:
     json.dump(emergence_report,evidence_file,indent=2,allow_nan=False)
 print('CRYPTO_EMERGENCE_RESEARCH_ARMS',json.dumps(emergence_report,allow_nan=False))
+# Forward model-preparation only: compare PRE-OUTCOME 30-second signals to
+# independently recorded later 30s-to-5min onchain curve observations.
+# Pools absent from GeckoTerminal remain valid here. No hindsight selection.
+early_complete={}
+try:
+    with open('evidence/pumpfun_30s_features.jsonl',encoding='utf-8') as f:
+        for line in f:
+            try:row=json.loads(line)
+            except ValueError:continue
+            if (row.get('full_first_30s_observation') is True
+                    and row.get('mint') and row.get('completion_at')):
+                mint=row['mint']
+                if (mint not in early_complete or
+                        row['completion_at']<early_complete[mint]['completion_at']):
+                    early_complete[mint]=row
+except OSError:pass
+later_complete={}
+try:
+    with open('evidence/pumpfun_first30_to_5m_outcomes.jsonl',
+              encoding='utf-8') as f:
+        for line in f:
+            try:row=json.loads(line)
+            except ValueError:continue
+            if (row.get('complete_5m_telemetry_without_provider_gap') is True
+                    and row.get('mint') and row.get('outcome_frozen_at')):
+                mint=row['mint']
+                if (mint not in later_complete or
+                        row['outcome_frozen_at']<later_complete[mint]['outcome_frozen_at']):
+                    later_complete[mint]=row
+except OSError:pass
+frozen_strata={}
+for name in ('creator_sold_first30','creator_not_sold_first30',
+             'five_plus_distinct_buyers','under_five_distinct_buyers'):
+    frozen_strata[name]={'with_30s_features':0,'matched_forward_5m':0,
+        'not_yet_observed_or_gap_censored':0,'post30_curve_2x':0,
+        'post30_curve_5x':0,'post30_curve_11x':0}
+sample_cases=[]
+for mint,early in early_complete.items():
+    arms=[
+        'creator_sold_first30' if early.get('creator_sell_observed_before30s')
+        else 'creator_not_sold_first30',
+        'five_plus_distinct_buyers' if
+            int(early.get('distinct_buyers_first30') or 0)>=5
+        else 'under_five_distinct_buyers']
+    later=later_complete.get(mint)
+    for name in arms:
+        entry=frozen_strata[name]
+        entry['with_30s_features']+=1
+        if later is None:
+            entry['not_yet_observed_or_gap_censored']+=1
+        else:
+            entry['matched_forward_5m']+=1
+            for level in (2,5,11):
+                if later.get('curve_peak_ge'+str(level)+'x') is True:
+                    entry['post30_curve_'+str(level)+'x']+=1
+    if later and len(sample_cases)<40:
+        sample_cases.append({
+            'mint':mint,'creator_sells_first30':
+                early.get('creator_sell_events_first30'),
+            'distinct_buyers_first30':early.get('distinct_buyers_first30'),
+            'post30_observed_curve_peak_x':
+                later.get('observed_later_curve_peak_x'),
+            'no_quote_or_filled_exit':True})
+native_forward_report={
+    'as_of':r['at'],'frozen_initial_feature_mints':len(early_complete),
+    'complete_future_5m_mints':len(later_complete),
+    'same_mint_paired_complete_first30_then_future5m':len(
+        set(early_complete)&set(later_complete)),
+    'precursor_strata_defined_without_future_labels':True,
+    'real_first30_creator_sale_vs_followup_curve_truth':frozen_strata,
+    'paired_examples':sample_cases,
+    'unmatched_followup_censored_not_negative':True,
+    'onchain_curve_price_not_sell_quote_or_executed_profit':True,
+    'tracked_beyond_gecko_and_without_token_listing':True,
+    'selection_and_provider_bias_possible':True,
+    'no_backfilled_timestamps_or_future_labels_in_features':True,
+    'orders':0,'trades':0}
+with open('evidence/pumpfun_first30_5m_forward_validation.json','w',
+          encoding='utf-8') as f:
+    json.dump(native_forward_report,f,indent=2,allow_nan=False)
+print('PUMPFUN_PRECURSOR_TO_FORWARD_5M',json.dumps(
+    {k:v for k,v in native_forward_report.items()
+     if k!='paired_examples'},allow_nan=False))
+
 # Quantify first-quote cliff events from *actually observed* intraminute
 # Jupiter sell routes. Historical and new v1 windows both have timestamped
 # quotations; no unobserved intervals are interpolated, no fills assumed.
