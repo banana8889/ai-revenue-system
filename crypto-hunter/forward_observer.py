@@ -831,8 +831,25 @@ def run_embedded_liquidity_sensor():
                         await ws.send(json.dumps({"jsonrpc":"2.0","id":next_vault_id,
                             "method":"accountSubscribe","params":[vault_addr,
                                 {"encoding":"jsonParsed","commitment":"confirmed"}]}))
+                    # Creator LP token account is an OPTIONAL third stream.
+                    # It is distinct from the two pool token vaults, and may
+                    # expose a transfer/burn before any subsequent rug.
+                    for account in (item.get("creator_lp_monitor_accounts") or [])[:1]:
+                        lp_address=account.get("pubkey")
+                        if not (lp_address and item.get("creator_lp_mint")
+                                and item.get("creator_lp_owner")):
+                            continue
+                        next_vault_id+=1
+                        pending_vault_requests[next_vault_id]=(
+                            item,"creator_lp",item["creator_lp_mint"])
+                        item["creator_lp_ws_initial_raw"]=int(account["amount_raw"])
+                        item["creator_lp_ws_account"]=lp_address
+                        await ws.send(json.dumps({"jsonrpc":"2.0","id":next_vault_id,
+                            "method":"accountSubscribe","params":[lp_address,
+                                {"encoding":"jsonParsed","commitment":"confirmed"}]}))
                     emit("ws_vault_subscribed",pool=pool,mint=item["mint"],
                          base_vault=proof["base_vault"],quote_vault=proof["quote_vault"],
+                         creator_lp_account=item.get("creator_lp_ws_account"),
                          rpc_baseline_slot=proof.get("slot"),
                          active_vault_pairs=len(vault_last_pair))
                 if time.monotonic()-last_feed_scan>=2 and len(items)<MAX_POOLS:
@@ -880,8 +897,15 @@ def run_embedded_liquidity_sensor():
                         item,side,mint=pending_vault_requests.pop(idx)
                         if isinstance(msg.get("result"),int):
                             vault_subscriptions[msg["result"]]=(item,side,mint)
-                            stats["vault_ws_subscriptions"]=len(vault_subscriptions)
-                            stats["max_vault_ws_subscriptions"]=max(stats["max_vault_ws_subscriptions"],len(vault_subscriptions))
+                            if side=="creator_lp":
+                                stats["creator_lp_ws_subscriptions"]+=1
+                            else:
+                                stats["vault_ws_subscriptions"]=sum(
+                                    1 for _,kind,_ in vault_subscriptions.values()
+                                    if kind in ("base","quote"))
+                                stats["max_vault_ws_subscriptions"]=max(
+                                    stats["max_vault_ws_subscriptions"],
+                                    stats["vault_ws_subscriptions"])
                         elif msg.get("error"):
                             stats["errors"]+=1
                             emit("subscription_error",id=idx,reason="vault_account_subscribe",
@@ -905,8 +929,44 @@ def run_embedded_liquidity_sensor():
                     slot=(payload.get("context") or {}).get("slot")
                     if not isinstance(slot,int):
                         continue
-                    amount=ws_vault_balance(payload.get("value"),mint,item["pool"])
+                    expected_owner=(item.get("creator_lp_owner")
+                                    if side=="creator_lp" else item["pool"])
+                    amount=ws_vault_balance(payload.get("value"),mint,expected_owner)
                     if amount is None:
+                        continue
+                    if side=="creator_lp":
+                        if slot<=int(item.get("creator_lp_baseline_slot") or 0):
+                            continue
+                        previous=item.get("creator_lp_ws_initial_raw")
+                        stats["creator_lp_ws_events"]+=1
+                        item["creator_lp_baseline_slot"]=slot
+                        item["creator_lp_ws_initial_raw"]=amount
+                        if (lp_balance_decline(previous,amount)
+                                and not item.get("creator_lp_early_alarm_sent")):
+                            item["creator_lp_early_alarm_sent"]=True
+                            stats["creator_lp_early_decreases"]+=1
+                            emit("onchain_lp_creator_balance_drop",
+                                 pool=item["pool"],mint=item["mint"],
+                                 lp_mint=mint,creator=item["creator_lp_owner"],
+                                 lp_token_account=item.get("creator_lp_ws_account"),
+                                 slot=slot,previous_lp_raw=str(previous),
+                                 new_lp_raw=str(amount),
+                                 drop_threshold="ge_10_percent_direct_creator_lp_balance",
+                                 transfer_or_burn_not_proven=True,
+                                 advance_warning_not_proven=True,
+                                 real_trades=0)
+                            if len(urgent_ws_tasks)<3:
+                                async def check_creator_lp_exit(watched):
+                                    try:
+                                        await urgent_quote_only(
+                                            watched,reason="observed_creator_lp_balance_decrease")
+                                    except Exception as error:
+                                        stats["errors"]+=1
+                                        emit("ws_error",reason="creator_lp_quote_failed",
+                                             detail=type(error).__name__)
+                                emergency=asyncio.create_task(check_creator_lp_exit(item))
+                                urgent_ws_tasks.add(emergency)
+                                emergency.add_done_callback(urgent_ws_tasks.discard)
                         continue
                     stats["vault_ws_events"]+=1
                     pool=item["pool"]
@@ -3389,7 +3449,8 @@ readiness={
     'failed_gates':[name for name,passed in gates.items() if not passed],
     'live_sensor_snapshot':{k:sensor_health.get(k) for k in
         ('at','connected','subscriptions','max_subscriptions','ever_subscribed','events','checks','errors','tx_rpc_checks','onchain_token_balance_changes','dex_checks',
-         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown','pre_rug_sell_pressure_events','candidate_preflight_queued')},
+         'gecko_fallback_checks','lp_instruction_hints','pump_vault_queries','pump_vault_confirmed','pump_vault_joint_drops','pump_vault_errors','vault_ws_subscriptions','max_vault_ws_subscriptions','vault_ws_events','vault_ws_joint_drops','lp_control_probes','lp_control_confirmed','lp_control_high_risk','lp_control_unknown','pre_rug_sell_pressure_events','candidate_preflight_queued',
+         'creator_lp_ws_subscriptions','creator_lp_ws_events','creator_lp_early_decreases')},
     'observed_quote_economics':{k:quoted.get(k) for k in
         ('entry_quoted_total','later_exit_quote_observed','winners_quote_gt_1x',
          'losers_quote_lt_1x','gross_quote_pl_usdc_conditional_on_later_quote')},
