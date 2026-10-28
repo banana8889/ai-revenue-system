@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
     paths: [.github/workflows/crypto-hunter-shadow-regression.yml, crypto-hunter/forward_observer.py]
+  pull_request:
+    paths: [.github/workflows/crypto-hunter-shadow-regression.yml, crypto-hunter/forward_observer.py]
 permissions:
   contents: read
 jobs:
