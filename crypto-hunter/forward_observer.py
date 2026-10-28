@@ -1,7 +1,7 @@
 import sys
 
 def run_embedded_liquidity_sensor():
-    import asyncio,base64,datetime as dt,json,os,time,urllib.error,urllib.parse,urllib.request
+    import asyncio,base64,datetime as dt,hashlib,json,os,time,urllib.error,urllib.parse,urllib.request
     from pathlib import Path
     import websockets
 
@@ -126,8 +126,48 @@ def run_embedded_liquidity_sensor():
             priority=(0 if item.get("entry") and not item.get("exit") else 1,0 if latest>=10000 else 1,age,-latest)
             selected.append((priority,pool,{"pool":pool,"mint":mint,"qty":qty,"initial":initial,"last":latest,"seen":0.,"last_check":0.,"risk":None}))
         selected.sort(key=lambda item:item[0])
-        # Keep capacity for fresh pools discovered during this run.
-        return [item[2] for item in selected[:max(1,MAX_POOLS//2)]]
+        # Reserve 50% of slots for same-run mint discoveries. Two historical
+        # slots remain allocated to open quote positions and recent liquidity.
+        # For the other historical slots, deterministically rotate pools
+        # WITHOUT a previously verified first LP snapshot. Otherwise a
+        # fixed top-4 shortlist repeatedly tests the same pools every cycle.
+        startup_slots=max(1,MAX_POOLS//2)
+        reserved=min(startup_slots,max(1,MAX_POOLS//4))
+        core=selected[:reserved]
+        known_lp=set()
+        try:
+            with LP_PROSPECTIVE.open("r",encoding="utf-8") as lp_file:
+                for line in lp_file:
+                    try:
+                        row=json.loads(line)
+                        if row.get("available") and row.get("pool"):
+                            known_lp.add(row["pool"])
+                    except (ValueError,TypeError):
+                        continue
+        except OSError:
+            pass
+        cycle=os.getenv("GITHUB_RUN_ID",dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H"))
+        other=selected[reserved:]
+        fresh=[item for item in other if item[1] not in known_lp and item[0][2]<=7200]
+        if len(fresh)<startup_slots-reserved:
+            fresh=[item for item in other if item[1] not in known_lp]
+        if len(fresh)<startup_slots-reserved:
+            fresh=other
+        # Stable within each run; different across runs. No future outcomes
+        # or retrospectively observed peaks affect sample selection.
+        fresh.sort(key=lambda item:hashlib.sha256(
+            (str(cycle)+":"+item[1]).encode("ascii")).digest())
+        rotating=fresh[:startup_slots-reserved]
+        chosen=core+rotating
+        emit("candidate_sampling_receipt",
+             run_key_sha256=hashlib.sha256(str(cycle).encode("ascii")).hexdigest()[:12],
+             eligible=len(selected),historical_slots=len(chosen),
+             always_on_open_or_liquid_positions=len(core),
+             rotating_lp_unseen_slots=sum(x[1] not in known_lp for x in rotating),
+             prior_lp_seen=len(known_lp),
+             fresh_discovery_slots=max(0,MAX_POOLS-len(chosen)),
+             selection_precedes_new_market_outcomes=True)
+        return [item[2] for item in chosen]
 
     async def inspect(item):
         nonlocal last_quote,last_liquidity_request,source_cooldown_until
