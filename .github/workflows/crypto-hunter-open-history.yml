@@ -1,0 +1,45 @@
+name: Crypto Hunter Free Historical Onchain Sample
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-open-history.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  historical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Acquire published, no-key Solana historical events and validate schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check -q 'duckdb==1.4.1'
+          mkdir -p evidence/history
+          curl -fLsS --retry 3 --retry-delay 3 --max-time 240             -o evidence/history/events.parquet             'https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample/resolve/main/events/pumpdata-2026-10-15-events.parquet'
+          python3 - <<'PY'
+          import duckdb,json,os
+          con=duckdb.connect()
+          f='evidence/history/events.parquet'
+          schema=con.execute(f"describe select * from '{f}'").fetchall()
+          counts=con.execute(f"select kind,count(*) as n from '{f}' group by 1 order by 2 desc").fetchall()
+          examples=con.execute(f"select * from '{f}' limit 5").fetchdf().astype(str).to_dict('records')
+          result={'bytes':os.stat(f).st_size,'schema':schema,
+                  'counts':counts,'examples':examples,'sample_day':'2026-10-15',
+                  'source':'pumpdatafun/pump-fun-trades-sample','license':'CC BY 4.0'}
+          os.makedirs('evidence',exist_ok=True)
+          with open('evidence/historical_source_probe.json','w') as out:
+              json.dump(result,out,indent=2,default=str)
+          print('HISTORICAL_SOURCE_PROBE',json.dumps(result,default=str))
+          assert sum(n for _,n in counts)>10000
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crypto-historical-source-probe-${{ github.run_id }}
+          path: evidence/historical_source_probe.json
+          retention-days: 30
+          if-no-files-found: warn
