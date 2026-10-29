@@ -102,7 +102,7 @@ def run_pumpfun_first_seconds_stream():
     """Real confirmed Pump.fun CREATE events before GeckoTerminal listing.
     Pure observation: never sign, buy, simulate fills, or infer safe liquidity.
     """
-    import asyncio,datetime as dt,hashlib,json,os,time,urllib.request,urllib.error
+    import asyncio,datetime as dt,hashlib,json,os,time,urllib.request,urllib.error,urllib.parse
     from pathlib import Path
     import websockets
     PUMP_PROGRAM="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -226,6 +226,155 @@ def run_pumpfun_first_seconds_stream():
         last_progress=time.monotonic()
         FUTURE=Path("evidence/pumpfun_first30_to_5m_outcomes.jsonl")
         FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
+        NATIVE_ROUTES=Path("evidence/pumpfun_native_first30_route_quotes.jsonl")
+        native_route_state={}
+        native_route_tasks=set()
+        last_selected_minute={}
+        native_quote_lock=asyncio.Semaphore(1)
+        stats["native_quote_selected"]=0
+        stats["native_quote_buy_available"]=0
+        stats["native_quote_roundtrip_available"]=0
+        stats["native_quote_five_minute_checked"]=0
+        stats["native_quote_five_minute_available"]=0
+        def native_route_record(kind,**data):
+            row={"kind":kind,"at":stamp(),**data,"orders":0,"trades":0,
+                 "no_fill":True,"quote_not_an_executable_transaction":True}
+            with NATIVE_ROUTES.open("a",encoding="utf-8") as output:
+                output.write(json.dumps(row,separators=(",",":"),
+                                        allow_nan=False)+"\n")
+            return row
+        def native_jupiter_quote(input_mint,output_mint,amount):
+            # Same read-only keyless request used by the canonical scanner.
+            # Never POST, sign, construct an order, or infer an executed fill.
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            if (not isinstance(amount,int) or amount<=0 or
+                    input_mint==output_mint or
+                    not {input_mint,output_mint}.issuperset({usdc})):
+                return {"available":False,"reason":"invalid_quote_request"}
+            time.sleep(2.3)
+            params=urllib.parse.urlencode({
+                "inputMint":input_mint,"outputMint":output_mint,
+                "amount":str(amount)})
+            req=urllib.request.Request(
+                "https://api.jup.ag/swap/v2/order?"+params,
+                headers={"User-Agent":"CryptoHunterFirst30Study/1.0",
+                         "Accept":"application/json"})
+            try:
+                with urllib.request.urlopen(req,timeout=12) as response:
+                    result=json.load(response)
+                raw=int(result.get("outAmount") or 0)
+                return {"available":raw>0,"out_amount":raw if raw>0 else None,
+                        "router":result.get("router"),
+                        "fee_bps":result.get("feeBps"),
+                        "reason":None if raw>0 else "no_positive_quote"}
+            except urllib.error.HTTPError as err:
+                return {"available":False,"http":err.code,
+                        "reason":"http_error_not_a_fill"}
+            except (OSError,ValueError,TypeError,TimeoutError):
+                return {"available":False,"reason":"unavailable_not_a_loss"}
+        def start_native_task(coro):
+            task=asyncio.create_task(coro)
+            native_route_tasks.add(task)
+            task.add_done_callback(native_route_tasks.discard)
+        async def quote_native_first30(mint,row,arm):
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            async with native_quote_lock:
+                quoted_at=stamp()
+                buy=await asyncio.to_thread(
+                    native_jupiter_quote,usdc,mint,5000000)
+                sell={"available":False,"reason":"buy_route_unavailable"}
+                qty=int(buy.get("out_amount") or 0)
+                if buy.get("available") and qty>0:
+                    stats["native_quote_buy_available"]+=1
+                    sell=await asyncio.to_thread(
+                        native_jupiter_quote,mint,usdc,qty)
+                if sell.get("available"):
+                    stats["native_quote_roundtrip_available"]+=1
+                observed_sell=int(sell.get("out_amount") or 0)
+                native_route_record("native_first30_quote_baseline",
+                    mint=mint,arm=arm,
+                    completed_first30_at=row["completion_at"],
+                    create_at_unix=row["created_at_unix"],
+                    quote_started_at=quoted_at,
+                    buy_route_available=bool(buy.get("available")),
+                    sellback_route_available=bool(sell.get("available")),
+                    token_raw=qty if qty>0 else None,
+                    sellback_usdc=observed_sell/1000000
+                        if sell.get("available") else None,
+                    roundtrip_quote_x=round(observed_sell/5000000,8)
+                        if sell.get("available") else None,
+                    buy_http=buy.get("http"),sell_http=sell.get("http"),
+                    buy_router=buy.get("router"),
+                    sell_router=sell.get("router"),
+                    missing_quote_is_censored_not_loss=True,
+                    before_later_curve_outcomes=True,
+                    quote_sequential_not_atomic=True)
+                if qty>0:
+                    native_route_state[mint]={
+                        "mint":mint,"arm":arm,
+                        "created_at_unix":row["created_at_unix"],
+                        "initial_quote_started_at":quoted_at,
+                        "token_raw":qty,
+                        "initial_sellback_available":bool(sell.get("available")),
+                        "followup_scheduled":False}
+        async def quote_native_5m(mint,state):
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            async with native_quote_lock:
+                at=stamp()
+                delay=time.time()-state["created_at_unix"]
+                if not 300<=delay<=420:
+                    native_route_record("native_first30_late_quote_censored",
+                        mint=mint,arm=state["arm"],elapsed_seconds=round(delay,2),
+                        not_counted_as_an_executable_outcome=True)
+                    return
+                q=await asyncio.to_thread(
+                    native_jupiter_quote,mint,usdc,state["token_raw"])
+                stats["native_quote_five_minute_checked"]+=1
+                if q.get("available"):
+                    stats["native_quote_five_minute_available"]+=1
+                native_route_record("native_first30_five_minute_sell_quote",
+                    mint=mint,arm=state["arm"],quote_started_at=at,
+                    initial_quote_started_at=state["initial_quote_started_at"],
+                    elapsed_since_launch_seconds=round(delay,2),
+                    token_raw=state["token_raw"],
+                    original_buy_quote_amount_usdc=5,
+                    initial_sellback_available=state["initial_sellback_available"],
+                    sell_route_available=bool(q.get("available")),
+                    sell_quote_usdc=round(int(q["out_amount"])/1000000,8)
+                        if q.get("available") else None,
+                    future_quote_multiple_x=round(int(q["out_amount"])/5000000,8)
+                        if q.get("available") else None,
+                    sell_http=q.get("http"),sell_router=q.get("router"),
+                    not_a_realized_gain_or_trade=True,
+                    fees_rent_mev_and_execution_not_proven=True)
+        def schedule_native_quotes():
+            for mint,state in native_route_state.items():
+                if (not state["followup_scheduled"] and
+                        time.time()>=state["created_at_unix"]+300):
+                    state["followup_scheduled"]=True
+                    start_native_task(quote_native_5m(mint,state))
+        def select_native_quote(mint,row):
+            # First complete mint per arm per UTC minute; selection is made
+            # prospectively BEFORE later 5m price or route outcomes.
+            if (row["observed_trades"]<2 or
+                    stats["native_quote_selected"]>=60 or
+                    len(native_route_tasks)>=4):
+                return
+            buyers=row["distinct_buyers_first30"]
+            if buyers<1:return
+            arm="five_plus_buyers" if buyers>=5 else "one_to_four_buyers"
+            minute=int(time.time()//60)
+            if last_selected_minute.get(arm)==minute:return
+            last_selected_minute[arm]=minute
+            stats["native_quote_selected"]+=1
+            native_route_record("native_first30_quote_selection",
+                mint=mint,arm=arm,completed_first30_at=row["completion_at"],
+                observed_trades=row["observed_trades"],
+                distinct_buyers_first30=buyers,
+                creator_sell_first30=row["creator_sell_observed_before30s"],
+                selected_before_future_prices=True,
+                first_complete_in_arm_for_minute=True)
+            start_native_task(quote_native_first30(mint,row,arm))
         def snapshot(mint,state,complete,why):
             if state.get("done"):
                 return
@@ -287,6 +436,7 @@ def run_pumpfun_first_seconds_stream():
                     output.write(json.dumps(row,separators=(",",":"),
                                             allow_nan=False)+"\n")
                 event("pumpfun_first30_features",**row)
+                select_native_quote(mint,row)
                 # Future outcomes start only AFTER immutable first-30s
                 # baseline has been committed. Never leak future trading
                 # prices into eligibility or precursor features.
@@ -385,6 +535,7 @@ def run_pumpfun_first_seconds_stream():
                     while time.monotonic()<until:
                         finalize_expired()
                         finalize_forward_outcomes()
+                        schedule_native_quotes()
                         if time.monotonic()-last_progress>=60:
                             print("PUMPFUN_FIRST30_PROGRESS",json.dumps(
                                 {"at":stamp(),**stats,"watched_current":len(watched),
@@ -558,6 +709,12 @@ def run_pumpfun_first_seconds_stream():
                 await asyncio.sleep(min(2,max(0.,until-time.monotonic())))
         finalize_expired()
         finalize_forward_outcomes(at_end=True)
+        schedule_native_quotes()
+        if native_route_tasks:
+            await asyncio.wait(native_route_tasks,timeout=18)
+        stats["native_quote_followups_not_matured_at_end"]=sum(
+            not value["followup_scheduled"]
+            for value in native_route_state.values())
         # A truncated observation window is censored, never called 0 trades.
         for mint,state in watched.items():
             snapshot(mint,state,False,"study_window_ended_before_30s")
