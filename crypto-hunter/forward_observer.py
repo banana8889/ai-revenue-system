@@ -922,10 +922,27 @@ def run_pumpfun_first_seconds_stream():
                         "reason":"http_error_not_a_fill"}
             except (OSError,ValueError,TypeError,TimeoutError):
                 return {"available":False,"reason":"unavailable_not_a_loss"}
+        stats["native_quote_tasks_failed"]=0
+        stats["native_quote_tasks_cancelled"]=0
         def start_native_task(coro):
             task=asyncio.create_task(coro)
             native_route_tasks.add(task)
-            task.add_done_callback(native_route_tasks.discard)
+            def native_task_completed(finished):
+                native_route_tasks.discard(finished)
+                kind=getattr(finished.get_coro(),"__name__","unknown_quote")
+                if finished.cancelled():
+                    stats["native_quote_tasks_cancelled"]+=1
+                    native_route_record("native_quote_async_task_cancelled",
+                        task_type=kind,missing_quote_censored=True)
+                    return
+                error=finished.exception()
+                if error is not None:
+                    stats["native_quote_tasks_failed"]+=1
+                    native_route_record("native_quote_async_task_error",
+                        task_type=kind,error_type=type(error).__name__,
+                        missing_quote_censored=True,
+                        no_market_execution_asserted=True)
+            task.add_done_callback(native_task_completed)
         async def quote_native_first30(mint,row,arm):
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             async with native_entry_quote_lock:
