@@ -4596,6 +4596,7 @@ print('PUMPFUN_PRECURSOR_TO_FORWARD_5M',json.dumps(
 native_route_selected={}
 native_route_baseline={}
 native_route_five_minute={}
+native_route_crossings={}
 for record in live_jsonl_evidence(
         'evidence/pumpfun_native_first30_route_quotes.jsonl'):
     mint=record.get('mint')
@@ -4607,6 +4608,10 @@ for record in live_jsonl_evidence(
         native_route_baseline.setdefault(mint,record)
     elif kind=='native_first30_five_minute_sell_quote':
         native_route_five_minute.setdefault(mint,record)
+    elif kind=='native_first30_curve_cross_sell_quote':
+        tier=record.get('tier_x')
+        if tier in (2,5,11):
+            native_route_crossings.setdefault((mint,tier),record)
 native_route_report={'as_of':r['at'],
     'source':'prospectively selected native Pump.fun 30s flow, direct Jupiter read-only request',
     'fixed_entry_quote_usdc':5,
@@ -4630,8 +4635,20 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
     later_good=[rec for rec in later
                 if rec.get('sell_route_available') is True and
                 isinstance(rec.get('future_quote_multiple_x'),(int,float))]
+    crossing=[rec for (mint,tier),rec in native_route_crossings.items()
+              if mint in mint_ids]
+    crossing_available=[rec for rec in crossing
+                        if rec.get('sell_route_available') is True and
+                        isinstance(rec.get('quote_multiple_x'),(int,float))]
     native_route_report['arm_counts'][arm]={
         'selected_before_future_outcomes':len(mint_ids),
+        'onchain_curve_crossing_quote_attempts':len(crossing),
+        'onchain_curve_crossing_sell_routes_available':len(crossing_available),
+        'onchain_curve_11x_crossings_quoted':sum(
+            rec.get('tier_x')==11 for rec in crossing),
+        'onchain_curve_11x_crossings_with_actual_quote_11x_unfilled':sum(
+            rec.get('tier_x')==11 and rec['quote_multiple_x']>=11
+            for rec in crossing_available),
         'initial_quote_attempt_finished':len(baseline),
         'initial_buy_route_available':len(initial_buy),
         'two_sided_initial_buy_sellback_quote':len(roundtrip),
