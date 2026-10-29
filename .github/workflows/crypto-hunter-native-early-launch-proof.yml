@@ -27,7 +27,7 @@ jobs:
       - name: Verify same-mint source linkage of native-first30 route requests
         run: |
           python3 - <<'PY'
-          import json,pathlib
+          import json,pathlib,hashlib
           root=pathlib.Path('evidence')
           def read(name):
               path=root/name
@@ -48,6 +48,19 @@ jobs:
                      for row in selected.values())
           assert all(row['mint'] in selected for row in baselines)
           assert all(row['mint'] in selected for row in later)
+          fixed=[row for row in rows
+                 if row.get('kind')=='native_first30_fixed_horizon_sell_quote']
+          baseline_mints={row['mint'] for row in baselines}
+          for row in fixed:
+              mint=row['mint']
+              expected=60 if hashlib.sha256(mint.encode('ascii')).digest()[0]%2==0 else 120
+              assert mint in selected and mint in baseline_mints
+              assert row['fixed_horizon_s']==expected
+              assert (row.get('within_30s_of_assigned_deadline') is True)==(
+                  expected<=row['elapsed_at_response_s']<=expected+30)
+              assert not row.get('timely_sell_route_available') or (
+                  row.get('sell_route_available') is True and
+                  row.get('within_30s_of_assigned_deadline') is True)
           assert all(row.get('orders')==row.get('trades')==0
                      and row.get('no_fill') is True for row in rows)
           print('NATIVE_FIRST30_ROUTE_PROOF',json.dumps({
@@ -55,6 +68,8 @@ jobs:
               'prospectively_selected_mints':len(selected),
               'read_only_quote_baselines':len(baselines),
               'five_minute_sell_quotes_recorded':len(later),
+              'independent_60_or_120s_horizon_quotes_recorded':len(fixed),
+              'horizon_hash_assignment_and_timing_verified':True,
               'missing_quote_is_not_a_filled_loss':True,
               'real_orders':0,'real_trades':0}))
           PY
