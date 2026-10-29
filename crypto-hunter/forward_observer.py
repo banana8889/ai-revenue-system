@@ -1,5 +1,103 @@
 import sys
 
+def run_free_multiday_launch_study():
+    """Independent several-week recorder; risk/graduate labels, not 11x exits.
+    All predictors are frozen before labels, feature sampling is nonrandom.
+    Source: https://huggingface.co/datasets/loopholetape/pumpfun-launches
+    Critical exclusions: post 2026-10-09 decoder seam, SOL classic only,
+    sampled f10 features only; no outcome imputation or quote claims.
+    """
+    import duckdb,glob,json,pathlib
+    files=sorted(glob.glob("evidence/history/multiweek/*.parquet"))
+    if len(files)!=13:
+        raise RuntimeError("free multiweek data incomplete, require Oct10-Oct22")
+    db=duckdb.connect()
+    db.execute("SET memory_limit='3GB'")
+    file_set="["+(",".join("'"+p+"'" for p in files))+"]"
+    db.execute(f"""CREATE TEMP TABLE tape AS SELECT * FROM
+        read_parquet({file_set}) WHERE
+        t0>=1791590400 AND t0<1792713600 AND
+        quote_asset='sol' AND mayhem=0 AND decoder_complete=1""")
+    source_count=db.execute("SELECT count(*) FROM tape").fetchone()[0]
+    # A conditional-on-sampled experiment, not the population graduation rate.
+    db.execute("""CREATE TEMP TABLE eligible AS
+        SELECT mint,t0,CAST(f10_age AS DOUBLE) f10_age,
+          CAST(f10_n_buys AS DOUBLE) f10_buys,
+          CAST(f10_bundle_wallets AS DOUBLE) bundle_wallets,
+          CAST(f10_insider_share AS DOUBLE) insider_share,
+          CAST(f10_dev_share AS DOUBLE) creator_share,
+          graduated,rugged,rug_dt_s,migrate_dt_s,
+          CASE WHEN t0<1792195200 THEN 'oct10_to_oct16_exploration'
+               ELSE 'oct17_to_oct22_holdout' END split,
+          CASE WHEN f10_n_buys>=5 THEN 'five_plus_buys_first10s'
+               ELSE 'under_five_buys_first10s' END arm
+        FROM tape
+        WHERE f10_age>=0 AND f10_age<10
+          AND f10_n_buys IS NOT NULL AND graduated IN (0,1)
+          AND (migrate_dt_s IS NULL OR migrate_dt_s>f10_age)
+          AND (rugged IS NULL OR rugged=0 OR
+              (rug_dt_s IS NOT NULL AND rug_dt_s>f10_age))""")
+    summaries=db.execute("""SELECT split,arm,count(*) n,
+       count(*) FILTER(WHERE graduated=1) graduates_lifecycle,
+       count(*) FILTER(WHERE rugged IN (0,1)) settled_rug_labels,
+       count(*) FILTER(WHERE rugged=1 AND rug_dt_s>f10_age AND
+                       rug_dt_s<=f10_age+300) rug_within_followup_300s,
+       count(*) FILTER(WHERE bundle_wallets>=3) three_plus_bundle_wallets,
+       round(avg(f10_buys),2) mean_first10_buys
+       FROM eligible GROUP BY split,arm ORDER BY split,arm""").fetchall()
+    source_groups=db.execute("""SELECT
+       count(*) total_classic_SOL_decoded,
+       count(*) FILTER(WHERE f10_age>=0 AND f10_age<10 AND
+                    f10_n_buys IS NOT NULL) sampled_with_full_f10_buy_count,
+       count(*) FILTER(WHERE NOT (f10_age>=0 AND f10_age<10 AND
+                    f10_n_buys IS NOT NULL)) missing_early_sample,
+       count(*) FILTER(WHERE graduated=1) graduated_in_entire_source
+       FROM tape""").fetchone()
+    strata=[]
+    for split,arm,n,graduated,settled,rugs,bundles,mean in summaries:
+        strata.append({"split":split,"arm":arm,"eligible_sampled_mints":n,
+            "graduated_in_lifecycle":graduated,
+            "graduated_in_lifecycle_rate":round(graduated/n,8) if n else None,
+            "settled_rug_labels":settled,
+            "rug_recorded_within_300s_after_sample":rugs,
+            "rug_next5m_fraction_of_settled":round(rugs/settled,8) if settled else None,
+            "three_plus_bundle_wallets_in_sample":bundles,
+            "average_buy_events_first10s":mean})
+    report={"study_version":"independent_multiday_2026_oct10_22_v1",
+        "source":"loopholetape/pumpfun-launches",
+        "source_url":"https://huggingface.co/datasets/loopholetape/pumpfun-launches",
+        "sample_days":"2026-10-10 through 2026-10-22 inclusive",
+        "source_days":len(files),"source_filtered_classic_SOL_rows":source_count,
+        "source_snapshot_sampling":{
+            "all_classic_sol":source_groups[0],
+            "has_eligible_f10_sample":source_groups[1],
+            "no_f10_sample":source_groups[2],
+            "graduated_in_entire_classic_sol":source_groups[3]},
+        "precommitted_binary_first10_buy_count_threshold":5,
+        "not_equivalent_to_distinct_buyers":True,
+        "independent_time_holdout":"2026-10-17 through 2026-10-22",
+        "strata":strata,"no_execution":True,
+        "warnings":[
+          "Historical snapshots were non-randomly selected by the source recorder",
+          "The source's 10-second buy count is NOT distinct wallet count",
+          "Graduation is not 11x return or executable exit",
+          "Rug classifications are recorder-derived, not transaction-executed losses",
+          "Rug and graduation can both be true; they are not complements",
+          "Missing early features excluded, not set to zero",
+          "Rug probability only among settled source labels",
+          "No filled buy/sell, quotes, costs or profitability shown"]}
+    out=pathlib.Path("evidence/historical_early_buy_multiday.json")
+    out.write_text(json.dumps(report,indent=2,allow_nan=False),encoding="utf-8")
+    print("HISTORICAL_INDEPENDENT_MULTIDAY_RESULTS",
+          json.dumps(report,allow_nan=False),flush=True)
+    if source_count<100000 or sum(row["eligible_sampled_mints"] for row in strata)<20000:
+        raise RuntimeError("insufficient independent retrospective sample")
+
+if "--historical-multiweek" in sys.argv:
+    run_free_multiday_launch_study()
+    raise SystemExit(0)
+
+
 def run_free_pumpfun_historical_study():
     """Read-only 2026-10-15 CC-BY-4.0 event-confirmed Pump.fun cohorts.
     Source: https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample
