@@ -909,19 +909,25 @@ def run_pumpfun_first_seconds_stream():
                 "https://api.jup.ag/swap/v2/order?"+params,
                 headers={"User-Agent":"CryptoHunterFirst30Study/1.0",
                          "Accept":"application/json"})
+            started=time.monotonic()
             try:
                 with urllib.request.urlopen(req,timeout=12) as response:
                     result=json.load(response)
+                if not isinstance(result,dict):
+                    raise ValueError("invalid_quote_payload")
                 raw=int(result.get("outAmount") or 0)
                 return {"available":raw>0,"out_amount":raw if raw>0 else None,
                         "router":result.get("router"),
                         "fee_bps":result.get("feeBps"),
-                        "reason":None if raw>0 else "no_positive_quote"}
+                        "reason":None if raw>0 else "no_positive_quote",
+                        "request_seconds":round(time.monotonic()-started,3)}
             except urllib.error.HTTPError as err:
                 return {"available":False,"http":err.code,
-                        "reason":"http_error_not_a_fill"}
+                        "reason":"http_error_not_a_fill",
+                        "request_seconds":round(time.monotonic()-started,3)}
             except (OSError,ValueError,TypeError,TimeoutError):
-                return {"available":False,"reason":"unavailable_not_a_loss"}
+                return {"available":False,"reason":"unavailable_not_a_loss",
+                        "request_seconds":round(time.monotonic()-started,3)}
         stats["native_quote_tasks_failed"]=0
         stats["native_quote_tasks_cancelled"]=0
         def start_native_task(coro):
@@ -988,7 +994,9 @@ def run_pumpfun_first_seconds_stream():
                         if sell.get("available") else None,
                     roundtrip_quote_x=round(observed_sell/5000000,8)
                         if sell.get("available") else None,
-                    buy_http=buy.get("http"),sell_http=sell.get("http"),
+                    buy_request_seconds=buy.get("request_seconds"),
+                     sell_request_seconds=sell.get("request_seconds"),
+                     buy_http=buy.get("http"),sell_http=sell.get("http"),
                     buy_router=buy.get("router"),
                     sell_router=sell.get("router"),
                     missing_quote_is_censored_not_loss=True,
