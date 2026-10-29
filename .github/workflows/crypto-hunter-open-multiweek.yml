@@ -1,0 +1,38 @@
+name: Crypto Hunter Independent Multi-Day Free History
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-open-multiweek.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  independent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate full source and download 13 free independent dated launch tables
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile crypto-hunter/forward_observer.py
+          python3 -m pip install -q --disable-pip-version-check duckdb==1.4.1
+          mkdir -p evidence/history/multiweek
+          BASE=https://huggingface.co/datasets/loopholetape/pumpfun-launches/resolve/main/data/launches
+          for day in 10 11 12 13 14 15 16 17 18 19 20 21 22; do
+            echo "INDEPENDENT_HISTORICAL_DATE=2026-10-$day"
+            curl -fLsS --retry 3 --retry-delay 3 --max-time 300 \
+              -o "evidence/history/multiweek/2026-10-$day.parquet" \
+              "$BASE/2026-10-$day.parquet"
+          done
+          python3 -u crypto-hunter/forward_observer.py --historical-multiweek
+      - name: Preserve independent time-holdout research results only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-historical-multiday-${{ github.run_id }}
+          path: evidence/historical_early_buy_multiday.json
+          retention-days: 30
+          if-no-files-found: warn
