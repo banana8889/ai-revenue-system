@@ -4941,6 +4941,31 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
             rec['future_quote_multiple_x']>=11 for rec in later_good),
         'unpaired_or_not_attempted_censored':len(mint_ids)-len(later),
         'no_wallet_or_execution':True}
+native_route_report['stratum_counts']={}
+for stratum in ('five_plus_buyers:creator_sold',
+                'five_plus_buyers:creator_not_sold',
+                'one_to_four_buyers:creator_sold',
+                'one_to_four_buyers:creator_not_sold'):
+    chosen=[mint for mint,selection in native_route_selected.items()
+            if selection.get('stratum')==stratum]
+    bases=[native_route_baseline[mint] for mint in chosen
+           if mint in native_route_baseline]
+    follows=[native_route_five_minute[mint] for mint in chosen
+             if mint in native_route_five_minute]
+    crosses=[rec for (mint,tier),rec in native_route_crossings.items()
+             if mint in chosen]
+    native_route_report['stratum_counts'][stratum]={
+        'selected_pre_outcome':len(chosen),
+        'entry_buy_quotes_observed':sum(
+            rec.get('buy_route_available') is True for rec in bases),
+        'two_sided_initial_quotes_observed':sum(
+            rec.get('sellback_route_available') is True for rec in bases),
+        'five_minute_sell_routes_observed':sum(
+            rec.get('sell_route_available') is True for rec in follows),
+        'ten_second_crossing_sell_quotes_observed':sum(
+            rec.get('sell_route_available') is True and
+            rec.get('quote_observed_within_10s') is True for rec in crosses),
+        'later_or_missing_not_negative':True}
 with open('evidence/pumpfun_native_route_forward_report.json','w',
           encoding='utf-8') as report:
     json.dump(native_route_report,report,indent=2,allow_nan=False)
