@@ -1,5 +1,11 @@
 name: Crypto Hunter Prospective Study
 on:
+  push:
+    # Explicit workflow-file change starts a fresh latest-code research run.
+    # Source commits alone cannot preempt or flood a 10-cycle study.
+    branches: [main]
+    paths:
+      - .github/workflows/crypto-hunter-prospective-study.yml
   workflow_dispatch:
     inputs:
       chain:
@@ -9,9 +15,8 @@ on:
         default: false
   schedule:
     - cron: '3,33 * * * *'
-  # No push trigger: frequent code commits used to replace pending study runs
-  # before any 10-sample market cycle could finish. Regular research still
-  # runs through schedule and workflow_dispatch self-chain below.
+  # No scanner source push trigger; run on explicit workflow update,
+  # regular schedule or self-dispatched continuation.
 permissions:
   contents: read
   actions: write
