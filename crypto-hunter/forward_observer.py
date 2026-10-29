@@ -5245,6 +5245,7 @@ native_route_selected={}
 native_route_baseline={}
 native_route_five_minute={}
 native_route_crossings={}
+native_route_fixed_horizon={}
 for record in live_jsonl_evidence(
         'evidence/pumpfun_native_first30_route_quotes.jsonl'):
     mint=record.get('mint')
@@ -5256,6 +5257,8 @@ for record in live_jsonl_evidence(
         native_route_baseline.setdefault(mint,record)
     elif kind=='native_first30_five_minute_sell_quote':
         native_route_five_minute.setdefault(mint,record)
+    elif kind=='native_first30_fixed_horizon_sell_quote':
+        native_route_fixed_horizon.setdefault(mint,record)
     elif kind=='native_first30_curve_cross_sell_quote':
         tier=record.get('tier_x')
         if tier in (2,5,11):
@@ -5268,6 +5271,7 @@ native_route_report={'as_of':r['at'],
     'arm_counts':{},'quote_only_not_actual_fills':True,
     'missing_route_or_unobserved_followup_censored_not_losses':True,
     'comparison_not_adjusted_for_selection_or_market_regimes':True,
+    'forward_quote_horizons_hash_assigned_before_outcomes':(60,120),
     'no_proven_profitability':True,'orders':0,'trades':0}
 for arm in ('five_plus_buyers','one_to_four_buyers'):
     mint_ids=[mint for mint,rec in native_route_selected.items()
@@ -5315,6 +5319,35 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
             rec['future_quote_multiple_x']>=11 for rec in later_good),
         'unpaired_or_not_attempted_censored':len(mint_ids)-len(later),
         'no_wallet_or_execution':True}
+
+native_route_report['short_horizon_quote_cohorts']={}
+for arm in ('five_plus_buyers','one_to_four_buyers'):
+    for horizon in (60,120):
+        # Exact deterministic 1/2 assignment; ONLY mints with observed
+        # baseline buy-quote and frozen first30 selection enter this study.
+        assigned=[mint for mint,initial in native_route_baseline.items()
+             if mint in native_route_selected and
+             native_route_selected[mint].get('arm')==arm and
+             (60 if hashlib.sha256(mint.encode('ascii')).digest()[0]%2==0
+              else 120)==horizon]
+        attempts=[native_route_fixed_horizon[mint] for mint in assigned
+                  if mint in native_route_fixed_horizon]
+        usable=[rec for rec in attempts
+                if rec.get('timely_sell_route_available') is True and
+                isinstance(rec.get('raw_quote_multiple_x'),(int,float))]
+        native_route_report['short_horizon_quote_cohorts'][
+            arm+':'+str(horizon)+'s']={
+            'assigned_at_frozen_baseline':len(assigned),
+            'read_only_quotes_returned':len(attempts),
+            'timely_read_only_quotes_available':len(usable),
+            'timely_quote_above_1x_no_fill':sum(
+                rec['raw_quote_multiple_x']>1 for rec in usable),
+            'timely_quote_at_least_2x_no_fill':sum(
+                rec['raw_quote_multiple_x']>=2 for rec in usable),
+            'timely_quote_at_least_11x_no_fill':sum(
+                rec['raw_quote_multiple_x']>=11 for rec in usable),
+            'no_returned_quote_censored_not_loss':len(assigned)-len(attempts),
+            'no_transaction_or_fill':True}
 native_route_report['stratum_counts']={}
 for stratum in ('five_plus_buyers:creator_sold',
                 'five_plus_buyers:creator_not_sold',
