@@ -1,5 +1,5 @@
 name: Crypto Hunter Free Historical Onchain Sample
-# Depth / reaction pass: DuckDB DECIMAL-safe JSON and 10-second forward price mark.
+# Fixed entry/exit pass across all eligible 30-second mints; no hindsight winners.
 # Second measured pass: creator-sell x buyer-count exploratory subgroups
 on:
   push:
