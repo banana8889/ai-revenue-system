@@ -908,10 +908,13 @@ def run_pumpfun_first_seconds_stream():
             params=urllib.parse.urlencode({
                 "inputMint":input_mint,"outputMint":output_mint,
                 "amount":str(amount)})
+            headers={"User-Agent":"CryptoHunterFirst30Study/1.0",
+                     "Accept":"application/json"}
+            if os.getenv("JUPITER_API_KEY"):
+                headers["x-api-key"]=os.environ["JUPITER_API_KEY"]
             req=urllib.request.Request(
                 "https://api.jup.ag/swap/v2/order?"+params,
-                headers={"User-Agent":"CryptoHunterFirst30Study/1.0",
-                         "Accept":"application/json"})
+                headers=headers)
             started=time.monotonic()
             try:
                 with urllib.request.urlopen(req,timeout=12) as response:
@@ -3958,7 +3961,10 @@ def jupiter_quote(input_mint,output_mint,raw_amount):
     """No taker, no transaction, no API key, strictly a read-only quotation."""
     time.sleep(2.3)  # keyless gateway 0.5 requests/second
     params=urllib.parse.urlencode({'inputMint':input_mint,'outputMint':output_mint,'amount':str(raw_amount)})
-    req=urllib.request.Request('https://api.jup.ag/swap/v2/order?'+params,headers={'User-Agent':'CryptoHunterRouteStudy/1.0','Accept':'application/json'})
+    headers={'User-Agent':'CryptoHunterRouteStudy/1.0','Accept':'application/json'}
+    if os.getenv('JUPITER_API_KEY'):
+        headers['x-api-key']=os.environ['JUPITER_API_KEY']
+    req=urllib.request.Request('https://api.jup.ag/swap/v2/order?'+params,headers=headers)
     try:
         with urllib.request.urlopen(req,timeout=15) as resp:body=json.load(resp)
         amount=int(body.get('outAmount') or 0)
