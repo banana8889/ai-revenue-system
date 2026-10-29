@@ -279,23 +279,23 @@ def run_free_pumpfun_historical_study():
         "missing_10s_mark_right_censored_not_loss":True,
         "no_inferred_trade_fill_jupiter_or_net_profit":True,
         "by_time_arm_and_lot":[{
-           "split":split,"arm":arm,"entry_sol":amount/1e9,
+           "split":split,"arm":arm,"entry_sol":float(amount)/1e9,
            "first11x_strict_window_cases":n,
            "upper_bound_11x_at_first_crossing":cross11,
            "upper_bound_5x_at_first_crossing":cross5,
-           "mean_upper_bound_first_crossing_x":mean_cross,
+           "mean_upper_bound_first_crossing_x":float(mean_cross) if mean_cross is not None else None,
            "observed_mark_10_to_15s_later":n10,
            "upper_bound_11x_after_10s":after11,
            "upper_bound_2x_after_10s":after2,
-           "mean_upper_bound_at_10s_when_observed_x":mean10}
+           "mean_upper_bound_at_10s_when_observed_x":float(mean10) if mean10 is not None else None}
            for split,arm,amount,n,cross11,cross5,mean_cross,n10,
                after11,after2,mean10 in depth_summary],
         "case_examples":[{
            "mint":mint,"birth_ts":birth,
            "buyers_first30":buyers,"first_11x_crossing_unix":cross,
-           "10s_mark_unix":mark,"entry_sol":amount/1e9,
-           "idealized_first_crossing_multiple_x":qcross,
-           "idealized_10s_mark_multiple_x":qmark}
+           "10s_mark_unix":mark,"entry_sol":float(amount)/1e9,
+           "idealized_first_crossing_multiple_x":float(qcross) if qcross is not None else None,
+           "idealized_10s_mark_multiple_x":float(qmark) if qmark is not None else None}
            for mint,birth,buyers,cross,mark,amount,qcross,qmark in depth_cases],
     }
     print("HISTORICAL_IDEALIZED_DEPTH_REACTION",
