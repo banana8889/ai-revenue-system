@@ -48,6 +48,26 @@ jobs:
                      for row in selected.values())
           assert all(row['mint'] in selected for row in baselines)
           assert all(row['mint'] in selected for row in later)
+          for mint,selection in selected.items():
+              if selection.get('fixed_horizon_protocol')!='20261029_fixed60_120_v2':
+                  continue
+              expected=60 if hashlib.sha256(mint.encode('ascii')).digest()[0]%2==0 else 120
+              assert selection.get('fixed_horizon_s')==expected, mint
+              assert selection.get('selected_before_future_prices') is True
+          for base in baselines:
+              if base.get('fixed_horizon_protocol')!='20261029_fixed60_120_v2':
+                  continue
+              mint=base['mint']
+              assert selected[mint].get('fixed_horizon_protocol')==base['fixed_horizon_protocol']
+              assert base['fixed_horizon_s']==selected[mint]['fixed_horizon_s']
+              age=base.get('buy_quote_response_seconds_after_launch')
+              assert isinstance(age,(int,float))
+              valid=base.get('first30_buy_quote_early_valid') is True
+              assert valid == (base.get('buy_route_available') is True
+                  and isinstance(base.get('token_raw'),int)
+                  and base['token_raw']>0 and 30<=age<60)
+              assert (base.get('late_or_unavailable_first30_entry_censored')
+                      is True)==(not valid)
           fixed=[row for row in rows
                  if row.get('kind')=='native_first30_fixed_horizon_sell_quote']
           baseline_mints={row['mint'] for row in baselines}
@@ -61,6 +81,11 @@ jobs:
               assert not row.get('timely_sell_route_available') or (
                   row.get('sell_route_available') is True and
                   row.get('within_30s_of_assigned_deadline') is True)
+          assert all(
+              any(base['mint']==row['mint'] and
+                  base.get('first30_buy_quote_early_valid') is True
+                  for base in baselines)
+              for row in fixed)
           assert all(row.get('orders')==row.get('trades')==0
                      and row.get('no_fill') is True for row in rows)
           print('NATIVE_FIRST30_ROUTE_PROOF',json.dumps({
@@ -70,6 +95,12 @@ jobs:
               'five_minute_sell_quotes_recorded':len(later),
               'independent_60_or_120s_horizon_quotes_recorded':len(fixed),
               'horizon_hash_assignment_and_timing_verified':True,
+              'fixed_horizon_protocol':'20261029_fixed60_120_v2',
+              'early_buy_quote_response_and_protocol_validated':True,
+              'eligible_early_quote_baselines':sum(
+                  row.get('first30_buy_quote_early_valid') is True
+                  and row.get('fixed_horizon_protocol')=='20261029_fixed60_120_v2'
+                  for row in baselines),
               'missing_quote_is_not_a_filled_loss':True,
               'real_orders':0,'real_trades':0}))
           PY
