@@ -946,6 +946,9 @@ def run_pumpfun_first_seconds_stream():
                         "request_seconds":round(time.monotonic()-started,3)}
         stats["native_quote_tasks_failed"]=0
         stats["native_quote_tasks_cancelled"]=0
+        stats["native_quote_drawdown_alerts"]=0
+        stats["native_quote_drawdown_checked"]=0
+        stats["native_quote_drawdown_fresh_available"]=0
         def start_native_task(coro):
             task=asyncio.create_task(coro)
             native_route_tasks.add(task)
@@ -1031,6 +1034,10 @@ def run_pumpfun_first_seconds_stream():
                         "initial_quote_started_at":quoted_at,
                         "token_raw":qty,
                         "initial_sellback_available":bool(sell.get("available")),
+                        "baseline_virtual_sol":int(row["last_virtual_sol_lamports"]),
+                        "baseline_virtual_token":int(row["last_virtual_token_raw"]),
+                        "post30_peak_x":1.0,
+                        "drawdown_scheduled":False,
                         "followup_scheduled":False,
                         # Two equal, fixed prospective arms; timestamp-independent
                         # SHA256 assignment cannot see future outcomes.
@@ -1096,6 +1103,46 @@ def run_pumpfun_first_seconds_stream():
                     fee_rent_mev_not_accounted=True,
                     observation_after_chain_cross_not_atomic=True,
                     no_realized_profit=True)
+        async def quote_native_drawdown(mint,state,peak_x,current_x,trade_time,signal_at):
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            async with native_exit_quote_lock:
+                started=stamp()
+                try:
+                    delay=(dt.datetime.fromisoformat(started)-
+                           dt.datetime.fromisoformat(signal_at)).total_seconds()
+                except (TypeError,ValueError):
+                    delay=1e9
+                if not 0<=delay<=10:
+                    native_route_record("native_first30_drawdown_quote_censored",
+                        mint=mint,arm=state["arm"],reason="stale_signal",
+                        peak_curve_x=round(peak_x,7),
+                        observed_curve_x=round(current_x,7),
+                        missing_quote_not_assumed_loss=True)
+                    return
+                q=await asyncio.to_thread(
+                    native_jupiter_quote,mint,usdc,state["token_raw"])
+                returned=stamp()
+                total_lag=(dt.datetime.fromisoformat(returned)-
+                           dt.datetime.fromisoformat(signal_at)).total_seconds()
+                fresh=0<=total_lag<=10
+                stats["native_quote_drawdown_checked"]+=1
+                if fresh and q.get("available"):
+                    stats["native_quote_drawdown_fresh_available"]+=1
+                native_route_record("native_first30_drawdown_sell_quote",
+                    mint=mint,arm=state["arm"],chain_trade_timestamp_unix=trade_time,
+                    triggered_at=signal_at,quote_started_at=started,
+                    quote_response_at=returned,quote_lag_seconds=round(total_lag,3),
+                    peak_curve_x=round(peak_x,7),
+                    observed_curve_x=round(current_x,7),
+                    drawdown_fraction=round(1-current_x/peak_x,7),
+                    quote_fresh_within_10s=fresh,
+                    sell_route_available=bool(q.get("available")),
+                    token_raw=state["token_raw"],
+                    quote_multiple_x=(round(int(q["out_amount"])/5000000,8)
+                        if q.get("available") else None),
+                    sell_http=q.get("http"),
+                    sell_provider_error_code=q.get("provider_error_code"),
+                    quotes_not_fills=True,no_realized_profit=True)
         async def quote_native_fixed_horizon(mint,state):
             """Read-only 60s versus 120s matched-token sell quote.
             Hash assignment is frozen before outcome. Missing routes censored.
@@ -1579,6 +1626,26 @@ def run_pumpfun_first_seconds_stream():
                                                             quote_native_curve_crossing(
                                                                 mint,account,multiplier,price_x,
                                                                 observed["timestamp_unix"],stamp()))
+                                    account=native_route_state.get(mint)
+                                    if account is not None and observed["virtual_token_raw"]>0:
+                                        account_age=(observed["timestamp_unix"]-
+                                                     account["created_at_unix"])
+                                        base_sol=account["baseline_virtual_sol"]
+                                        base_tok=account["baseline_virtual_token"]
+                                        if (30<account_age<=300 and base_sol>0
+                                                and base_tok>0):
+                                            current_x=(observed["virtual_sol_lamports"]*base_tok/
+                                                       (observed["virtual_token_raw"]*base_sol))
+                                            peak_x=account["post30_peak_x"]
+                                            if (current_x<=0.8*peak_x
+                                                    and not account["drawdown_scheduled"]
+                                                    and len(native_route_tasks)<3):
+                                                account["drawdown_scheduled"]=True
+                                                stats["native_quote_drawdown_alerts"]+=1
+                                                start_native_task(quote_native_drawdown(
+                                                    mint,account,peak_x,current_x,
+                                                    observed["timestamp_unix"],stamp()))
+                                            account["post30_peak_x"]=max(peak_x,current_x)
                                     continue
                                 elapsed=observed["timestamp_unix"]-state["created_at_unix"]
                                 if not 0<=elapsed<=30:
