@@ -1146,6 +1146,16 @@ def run_pumpfun_first_seconds_stream():
             minute=int(time.time()//60)
             if last_selected_minute.get(stratum)==minute:return
             last_selected_minute[stratum]=minute
+            first30_n=row["observed_trades"]
+            buy_share=(row["buy_events_first30"]/first30_n
+                       if first30_n>0 else 0)
+            flow_proxy_loose=(buyers>=5 and first30_n>=10 and
+                              buy_share>=0.65 and not creator_sold)
+            flow_proxy_strict=(buyers>=8 and first30_n>=20 and
+                               buy_share>=0.75 and not creator_sold)
+            # Historical risk-guard INCLUDED failed attempts <=25%; direct
+            # native first30 stream cannot completely recover that denominator.
+            # These traffic-only proxies are NOT the original risk guard.
             stats["native_quote_selected"]+=1
             horizon=(60 if hashlib.sha256(
                 mint.encode("ascii")).digest()[0]%2==0 else 120)
@@ -1157,6 +1167,11 @@ def run_pumpfun_first_seconds_stream():
                 observed_trades=row["observed_trades"],
                 distinct_buyers_first30=buyers,
                 creator_sell_first30=creator_sold,
+                buy_share_first30=round(buy_share,6),
+                traffic_only_loose_proxy_no_failure_ratio=flow_proxy_loose,
+                traffic_only_strict_proxy_no_failure_ratio=flow_proxy_strict,
+                direct_failed_attempt_ratio_complete=False,
+                historical_risk_guard_NOT_measurable_from_this_signal=True,
                 selected_before_future_prices=True,
                 first_complete_in_stratum_for_minute=True,
                 quote_study_only_no_capital_permission=True)
@@ -5500,6 +5515,38 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
                 len(assigned)-len(attempts),
             'quotes_not_fills':True,
             'no_net_profit_evidence':True}
+native_route_report['traffic_only_risk_proxy_cohorts']={}
+for label,flag in (
+        ('strict_shape_without_failure_sensor',
+         'traffic_only_strict_proxy_no_failure_ratio'),
+        ('loose_shape_without_failure_sensor',
+         'traffic_only_loose_proxy_no_failure_ratio')):
+    frozen=[mint for mint,selection in native_route_selected.items()
+        if selection.get('fixed_horizon_protocol')==
+            '20261029_fixed60_120_v2' and selection.get(flag) is True]
+    for horizon in (60,120):
+        group=[mint for mint in frozen if
+            native_route_selected[mint].get('fixed_horizon_s')==horizon]
+        valid=[mint for mint in group if
+            native_route_baseline.get(mint,{}).get(
+                'first30_buy_quote_early_valid') is True]
+        quotes=[native_route_fixed_horizon[mint] for mint in valid
+            if mint in native_route_fixed_horizon and
+            native_route_fixed_horizon[mint].get('fixed_horizon_s')==horizon]
+        usable=sorted(float(q['raw_quote_multiple_x']) for q in quotes
+            if q.get('timely_sell_route_available') is True and
+               isinstance(q.get('raw_quote_multiple_x'),(int,float)))
+        n=len(usable)
+        native_route_report['traffic_only_risk_proxy_cohorts'][
+            label+':'+str(horizon)+'s']={
+            'prospective_traffic_only_selected':len(group),
+            'timely_initial_buy_quote_eligible':len(valid),
+            'observed_short_horizon_sell_routes':n,
+            'quote_only_return_above_1x':sum(x>1 for x in usable),
+            'mean_multiple_observed_only':round(sum(usable)/n,6) if n else None,
+            'failed_tx_ratio_not_fully_observable_here':True,
+            'NOT_equivalent_to_historical_low_failure_risk_guard':True,
+            'not_a_trade_or_verified_profit':True}
 native_route_report['stratum_counts']={}
 for stratum in ('five_plus_buyers:creator_sold',
                 'five_plus_buyers:creator_not_sold',
