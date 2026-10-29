@@ -855,6 +855,8 @@ def run_pumpfun_first_seconds_stream():
         stats["watched_first30"]=0
         stats["first30_complete"]=0
         stats["first30_censored"]=0
+        stats["first30_partial10_eligible"]=0
+        stats["first30_partial10_quotes_selected"]=0
         stats["first30_trades_matched"]=0
         stats["forward5m_complete"]=0
         stats["forward5m_censored"]=0
@@ -863,6 +865,7 @@ def run_pumpfun_first_seconds_stream():
         last_progress=time.monotonic()
         FUTURE=Path("evidence/pumpfun_first30_to_5m_outcomes.jsonl")
         FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
+        PARTIAL10=Path("evidence/pumpfun_30s_partial10_features.jsonl")
         NATIVE_ROUTES=Path("evidence/pumpfun_native_first30_route_quotes.jsonl")
         native_route_state={}
         native_route_tasks=set()
@@ -1169,7 +1172,9 @@ def run_pumpfun_first_seconds_stream():
                 return
             buyers=row["distinct_buyers_first30"]
             if buyers<1:return
-            arm="five_plus_buyers" if buyers>=5 else "one_to_four_buyers"
+            partial10=row.get("early_window_coverage")=="first_observed_5_to_10s"
+            arm=("partial10_" if partial10 else "early5_")+(
+                "five_plus_buyers" if buyers>=5 else "one_to_four_buyers")
             creator_sold=bool(row["creator_sell_observed_before30s"])
             stratum=arm+(":creator_sold" if creator_sold else ":creator_not_sold")
             minute=int(time.time()//60)
@@ -1186,10 +1191,15 @@ def run_pumpfun_first_seconds_stream():
             # native first30 stream cannot completely recover that denominator.
             # These traffic-only proxies are NOT the original risk guard.
             stats["native_quote_selected"]+=1
+            if partial10:
+                stats["first30_partial10_quotes_selected"]+=1
             horizon=(60 if hashlib.sha256(
                 mint.encode("ascii")).digest()[0]%2==0 else 120)
             native_route_record("native_first30_quote_selection",
                 mint=mint,arm=arm,stratum=stratum,
+                early_window_coverage=row.get("early_window_coverage"),
+                initial_lag_seconds=row.get("initial_lag_seconds"),
+                partial10_is_not_full_first30_coverage=partial10,
                 fixed_horizon_protocol="20261029_fixed60_120_v2",
                 fixed_horizon_s=horizon,
                 completed_first30_at=row["completion_at"],
@@ -1227,6 +1237,12 @@ def run_pumpfun_first_seconds_stream():
                  "initial_lag_seconds":state["initial_lag_seconds"],
                  "completion_at":stamp(),
                  "full_first_30s_observation":bool(complete),
+                 "early_window_coverage":(
+                     "first_observed_within_5s" if complete else
+                     "first_observed_5_to_10s" if
+                     5<state["initial_lag_seconds"]<=10 and
+                     not state["stream_gap"] and why=="late_discovery" else
+                     "unusable_or_interrupted"),
                  "censored_reason":None if complete else why,
                  "observed_trades":buys+sells,
                  "buy_events_first30":buys,
@@ -1293,8 +1309,19 @@ def run_pumpfun_first_seconds_stream():
                         "stream_gap":False}
             else:
                 stats["first30_censored"]+=1
+                if (row["early_window_coverage"]=="first_observed_5_to_10s"
+                        and row["observed_trades"]>=2):
+                    stats["first30_partial10_eligible"]+=1
+                    with PARTIAL10.open("a",encoding="utf-8") as output:
+                        output.write(json.dumps(row,separators=(",",":"),
+                                                allow_nan=False)+"\n")
+                    event("pumpfun_partial10_features",**row)
+                    select_native_quote(mint,row)
                 event("pumpfun_first30_censored",
                       mint=mint,reason=why,partial_trades=buys+sells,
+                      partial10_study_eligible=(
+                          row["early_window_coverage"]=="first_observed_5_to_10s"
+                          and row["observed_trades"]>=2),
                       not_a_negative_label=True)
         def finalize_forward_outcomes(at_end=False):
             complete=[]
