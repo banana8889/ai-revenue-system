@@ -236,6 +236,9 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_roundtrip_available"]=0
         stats["native_quote_five_minute_checked"]=0
         stats["native_quote_five_minute_available"]=0
+        stats["native_quote_curve_crossings_selected"]=0
+        stats["native_quote_curve_crossings_checked"]=0
+        stats["native_quote_curve_crossings_available"]=0
         def native_route_record(kind,**data):
             row={"kind":kind,"at":stamp(),**data,"orders":0,"trades":0,
                  "no_fill":True,"quote_not_an_executable_transaction":True}
@@ -316,7 +319,51 @@ def run_pumpfun_first_seconds_stream():
                         "initial_quote_started_at":quoted_at,
                         "token_raw":qty,
                         "initial_sellback_available":bool(sell.get("available")),
-                        "followup_scheduled":False}
+                        "followup_scheduled":False,
+                        "curve_tiers_scheduled":set()}
+        async def quote_native_curve_crossing(mint,state,tier,curve_x,
+                                               trade_time,signal_at):
+            # The *same token amount* from an independent actual $5 buy
+            # quote. A chain price multiple is not a sellable price multiple.
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            async with native_quote_lock:
+                quote_started=stamp()
+                try:
+                    lag=(dt.datetime.fromisoformat(quote_started)-
+                         dt.datetime.fromisoformat(signal_at)).total_seconds()
+                except (ValueError,TypeError):
+                    lag=1e9
+                if lag>30 or lag<0:
+                    native_route_record("native_first30_curve_cross_quote_censored",
+                        mint=mint,arm=state["arm"],tier_x=tier,
+                        observed_curve_price_x=round(curve_x,6),
+                        chain_trade_timestamp_unix=trade_time,
+                        detected_at=signal_at,quote_started_at=quote_started,
+                        reason="stale_quote_slot_more_than_30s",
+                        no_market_price_assumed=True)
+                    return
+                q=await asyncio.to_thread(
+                    native_jupiter_quote,mint,usdc,state["token_raw"])
+                stats["native_quote_curve_crossings_checked"]+=1
+                if q.get("available"):
+                    stats["native_quote_curve_crossings_available"]+=1
+                native_route_record("native_first30_curve_cross_sell_quote",
+                    mint=mint,arm=state["arm"],tier_x=tier,
+                    chain_trade_timestamp_unix=trade_time,
+                    detected_at=signal_at,quote_started_at=quote_started,
+                    latency_from_ws_observation_seconds=round(lag,3),
+                    onchain_curve_price_x=round(curve_x,6),
+                    token_raw=state["token_raw"],
+                    original_buy_quote_amount_usdc=5,
+                    sell_route_available=bool(q.get("available")),
+                    sell_quote_usdc=round(int(q["out_amount"])/1e6,8)
+                        if q.get("available") else None,
+                    quote_multiple_x=round(int(q["out_amount"])/5e6,8)
+                        if q.get("available") else None,
+                    sell_http=q.get("http"),sell_router=q.get("router"),
+                    fee_rent_mev_not_accounted=True,
+                    observation_after_chain_cross_not_atomic=True,
+                    no_realized_profit=True)
         async def quote_native_5m(mint,state):
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             async with native_quote_lock:
@@ -663,6 +710,16 @@ def run_pumpfun_first_seconds_stream():
                                                 key="first_cross_"+str(multiplier)+"x_at"
                                                 if price_x>=multiplier and later[key] is None:
                                                     later[key]=observed["timestamp_unix"]
+                                                    account=native_route_state.get(mint)
+                                                    if (account and
+                                                            multiplier not in account["curve_tiers_scheduled"]
+                                                            and len(native_route_tasks)<4):
+                                                        account["curve_tiers_scheduled"].add(multiplier)
+                                                        stats["native_quote_curve_crossings_selected"]+=1
+                                                        start_native_task(
+                                                            quote_native_curve_crossing(
+                                                                mint,account,multiplier,price_x,
+                                                                observed["timestamp_unix"],stamp()))
                                     continue
                                 elapsed=observed["timestamp_unix"]-state["created_at_unix"]
                                 if not 0<=elapsed<=30:
