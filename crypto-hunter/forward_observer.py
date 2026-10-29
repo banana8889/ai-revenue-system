@@ -951,6 +951,8 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_drawdown_alerts"]=0
         stats["native_quote_drawdown_checked"]=0
         stats["native_quote_drawdown_fresh_available"]=0
+        stats["native_quote_drawdown_quote_below_80pct"]=0
+        stats["native_quote_drawdown_curve_quote_disagreements"]=0
         def start_native_task(coro):
             task=asyncio.create_task(coro)
             native_route_tasks.add(task)
@@ -1036,6 +1038,8 @@ def run_pumpfun_first_seconds_stream():
                         "initial_quote_started_at":quoted_at,
                         "token_raw":qty,
                         "initial_sellback_available":bool(sell.get("available")),
+                        "initial_sellback_quote_x":(observed_sell/5000000
+                            if sell.get("available") else None),
                         "baseline_virtual_sol":int(row["last_virtual_sol_lamports"]),
                         "baseline_virtual_token":int(row["last_virtual_token_raw"]),
                         "post30_peak_x":1.0,
@@ -1127,6 +1131,18 @@ def run_pumpfun_first_seconds_stream():
                 total_lag=(dt.datetime.fromisoformat(returned)-
                            dt.datetime.fromisoformat(signal_at)).total_seconds()
                 fresh=0<=total_lag<=10
+                sell_x=(int(q["out_amount"])/5000000
+                        if q.get("available") else None)
+                if not fresh or sell_x is None:
+                    confirmed="quote_stale_or_missing"
+                elif sell_x<0.8:
+                    confirmed="sell_quote_below_80pct_entry"
+                    stats["native_quote_drawdown_quote_below_80pct"]+=1
+                elif sell_x<1:
+                    confirmed="sell_quote_below_entry"
+                else:
+                    confirmed="curve_drop_not_confirmed_by_sell_quote_loss"
+                    stats["native_quote_drawdown_curve_quote_disagreements"]+=1
                 stats["native_quote_drawdown_checked"]+=1
                 if fresh and q.get("available"):
                     stats["native_quote_drawdown_fresh_available"]+=1
@@ -1138,6 +1154,11 @@ def run_pumpfun_first_seconds_stream():
                     observed_curve_x=round(current_x,7),
                     drawdown_fraction=round(1-current_x/peak_x,7),
                     quote_fresh_within_10s=fresh,
+                    sell_quote_confirmation=confirmed,
+                    sell_quote_below_entry_verified=(fresh and sell_x is not None and sell_x<1),
+                    curve_drop_without_sell_quote_loss=(fresh and sell_x is not None and sell_x>=1),
+                    initial_sellback_quote_x=state.get("initial_sellback_quote_x"),
+                    quote_does_not_prove_executable_fill=True,
                     sell_route_available=bool(q.get("available")),
                     token_raw=state["token_raw"],
                     quote_multiple_x=(round(int(q["out_amount"])/5000000,8)
