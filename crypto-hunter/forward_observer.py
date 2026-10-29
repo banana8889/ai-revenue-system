@@ -675,7 +675,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_notifications_rejected":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0,"slot_notifications":0,"slot_subscriptions_confirmed":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_notifications_rejected":0,"vault_binary_account_updates_decoded":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0,"slot_notifications":0,"slot_subscriptions_confirmed":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -1452,6 +1452,33 @@ def run_embedded_liquidity_sensor():
     def ws_vault_balance(value,expected_mint,expected_owner):
         if not isinstance(value,dict):return None
         data=value.get("data")
+        if isinstance(data,list):
+            if (len(data)!=2 or data[1]!="base64" or
+                    value.get("owner") not in (
+                        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                        "TokenzQdBNbLqP5VEhdkAS6EPFHGubZyfxZbGbqXoU")):
+                return None
+            def key_bytes(address):
+                if not isinstance(address,str) or not 32<=len(address)<=44:
+                    return None
+                n=0
+                for ch in address:
+                    digit=B58.find(ch)
+                    if digit<0:return None
+                    n=n*58+digit
+                raw=n.to_bytes((n.bit_length()+7)//8,"big")
+                raw=bytes((0,))*(len(address)-len(address.lstrip("1")))+raw
+                return raw if len(raw)==32 else None
+            try:
+                raw=base64.b64decode(data[0],validate=True)
+            except (ValueError,TypeError):
+                return None
+            if (not 165<=len(raw)<=4096 or raw[108] not in (1,2) or
+                    raw[:32]!=key_bytes(expected_mint) or
+                    raw[32:64]!=key_bytes(expected_owner)):
+                return None
+            stats["vault_binary_account_updates_decoded"]+=1
+            return int.from_bytes(raw[64:72],"little")
         if not isinstance(data,dict):return None
         parsed=data.get("parsed")
         if not isinstance(parsed,dict):return None
@@ -2410,6 +2437,21 @@ def run_embedded_liquidity_sensor():
             assert ws_vault_balance({"data":{"parsed":[]}},base_mint,a) is None
             assert ws_vault_balance({"data":{"parsed":{"type":"account",
                 "info":{"owner":a,"mint":base_mint,"tokenAmount":[]}}}},base_mint,a) is None
+            raw_token=bytearray(165)
+            raw_token[:32]=bytes([1])*32
+            raw_token[32:64]=bytes([2])*32
+            raw_token[64:72]=(42).to_bytes(8,"little")
+            raw_token[108]=1
+            mint_binary=encode_pubkey(bytes([1])*32)
+            owner_binary=encode_pubkey(bytes([2])*32)
+            raw_message={"owner":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+                         "data":[base64.b64encode(raw_token).decode(),"base64"]}
+            assert ws_vault_balance(raw_message,mint_binary,owner_binary)==42
+            assert ws_vault_balance(raw_message,mint_binary,a) is None
+            assert ws_vault_balance({**raw_message,"owner":"invalid"},
+                                    mint_binary,owner_binary) is None
+            assert ws_vault_balance({**raw_message,"data":["!","base64"]},
+                                    mint_binary,owner_binary) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
