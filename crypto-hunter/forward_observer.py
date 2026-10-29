@@ -802,6 +802,9 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_roundtrip_available"]=0
         stats["native_quote_five_minute_checked"]=0
         stats["native_quote_five_minute_available"]=0
+        stats["native_quote_fixed_horizon_selected"]=0
+        stats["native_quote_fixed_horizon_attempted"]=0
+        stats["native_quote_fixed_horizon_available"]=0
         stats["native_quote_curve_crossings_selected"]=0
         stats["native_quote_curve_crossings_checked"]=0
         stats["native_quote_curve_crossings_available"]=0
@@ -887,6 +890,11 @@ def run_pumpfun_first_seconds_stream():
                         "token_raw":qty,
                         "initial_sellback_available":bool(sell.get("available")),
                         "followup_scheduled":False,
+                        # Two equal, fixed prospective arms; timestamp-independent
+                        # SHA256 assignment cannot see future outcomes.
+                        "fixed_horizon_s":(60 if hashlib.sha256(
+                            mint.encode("ascii")).digest()[0]%2==0 else 120),
+                        "fixed_horizon_scheduled":False,
                         "curve_tiers_scheduled":set()}
         async def quote_native_curve_crossing(mint,state,tier,curve_x,
                                                trade_time,signal_at):
@@ -947,6 +955,50 @@ def run_pumpfun_first_seconds_stream():
                     fee_rent_mev_not_accounted=True,
                     observation_after_chain_cross_not_atomic=True,
                     no_realized_profit=True)
+        async def quote_native_fixed_horizon(mint,state):
+            """Read-only 60s versus 120s matched-token sell quote.
+            Hash assignment is frozen before outcome. Missing routes censored.
+            """
+            usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+            h=state["fixed_horizon_s"]
+            async with native_quote_lock:
+                quote_started=stamp()
+                elapsed=time.time()-state["created_at_unix"]
+                if not h<=elapsed<=h+30:
+                    native_route_record("native_first30_fixed_horizon_censored",
+                        mint=mint,arm=state["arm"],fixed_horizon_s=h,
+                        elapsed_since_launch_s=round(elapsed,3),
+                        reason="quote_slot_missed_30s_horizon_tolerance",
+                        no_quote_does_not_equal_loss=True)
+                    return
+                q=await asyncio.to_thread(
+                    native_jupiter_quote,mint,usdc,state["token_raw"])
+                quoted_at=stamp()
+                end_elapsed=time.time()-state["created_at_unix"]
+                timely=h<=end_elapsed<=h+30
+                stats["native_quote_fixed_horizon_attempted"]+=1
+                if q.get("available") and timely:
+                    stats["native_quote_fixed_horizon_available"]+=1
+                native_route_record("native_first30_fixed_horizon_sell_quote",
+                    mint=mint,arm=state["arm"],
+                    fixed_horizon_s=h,
+                    sha256_first_byte_even_arm=(h==60),
+                    quote_started_at=quote_started,
+                    quote_response_at=quoted_at,
+                    elapsed_at_request_s=round(elapsed,3),
+                    elapsed_at_response_s=round(end_elapsed,3),
+                    within_30s_of_assigned_deadline=timely,
+                    token_raw=state["token_raw"],
+                    original_buy_quote_amount_usdc=5,
+                    sell_route_available=bool(q.get("available")),
+                    timely_sell_route_available=bool(q.get("available") and timely),
+                    sell_quote_usdc=round(int(q["out_amount"])/1e6,8)
+                        if q.get("available") else None,
+                    raw_quote_multiple_x=round(int(q["out_amount"])/5e6,8)
+                        if q.get("available") else None,
+                    provider_http_status=q.get("http"),
+                    no_actual_fill_or_profit=True,
+                    fees_rent_mev_and_transaction_failure_unmodelled=True)
         async def quote_native_5m(mint,state):
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             async with native_quote_lock:
@@ -979,6 +1031,12 @@ def run_pumpfun_first_seconds_stream():
                     fees_rent_mev_and_execution_not_proven=True)
         def schedule_native_quotes():
             for mint,state in native_route_state.items():
+                if (not state["fixed_horizon_scheduled"] and
+                        time.time()>=state["created_at_unix"]+
+                                         state["fixed_horizon_s"]):
+                    state["fixed_horizon_scheduled"]=True
+                    stats["native_quote_fixed_horizon_selected"]+=1
+                    start_native_task(quote_native_fixed_horizon(mint,state))
                 if (not state["followup_scheduled"] and
                         time.time()>=state["created_at_unix"]+300):
                     state["followup_scheduled"]=True
@@ -1358,6 +1416,9 @@ def run_pumpfun_first_seconds_stream():
             await asyncio.wait(native_route_tasks,timeout=18)
         stats["native_quote_followups_not_matured_at_end"]=sum(
             not value["followup_scheduled"]
+            for value in native_route_state.values())
+        stats["native_quote_fixed_horizon_not_matured_at_end"]=sum(
+            not value["fixed_horizon_scheduled"]
             for value in native_route_state.values())
         # A truncated observation window is censored, never called 0 trades.
         for mint,state in watched.items():
