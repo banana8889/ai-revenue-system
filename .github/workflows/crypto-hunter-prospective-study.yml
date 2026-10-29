@@ -62,6 +62,13 @@ jobs:
           key: crypto-pumpfun-fwd5m-${{ github.run_id }}
           restore-keys: |
             crypto-pumpfun-fwd5m-
+      - name: Restore native first30 buy/sell quote evidence
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/pumpfun_native_first30_route_quotes.jsonl
+          key: crypto-pumpfun-first30-native-quotes-${{ github.run_id }}
+          restore-keys: |
+            crypto-pumpfun-first30-native-quotes-
       - name: Snapshot expanded cache before legacy recovery
         shell: bash
         run: |
@@ -320,6 +327,12 @@ jobs:
         with:
           path: evidence/pumpfun_30s_features.jsonl
           key: crypto-pumpfun-first30-features-${{ github.run_id }}
+      - name: Save native first30 exact-token quote and five-minute route history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/pumpfun_native_first30_route_quotes.jsonl
+          key: crypto-pumpfun-first30-native-quotes-${{ github.run_id }}
       - name: Save independent verified first-seconds mint history
         if: always()
         uses: actions/cache/save@v4
