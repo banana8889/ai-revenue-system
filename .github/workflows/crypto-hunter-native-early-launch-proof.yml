@@ -24,11 +24,48 @@ jobs:
         run: |
           python3 -m pip install -q 'websockets==13.1'
           python3 -u crypto-hunter/forward_observer.py --pumpfun-early-proof
-      - name: Persist original readonly first-seconds evidence
+      - name: Verify same-mint source linkage of native-first30 route requests
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path('evidence')
+          def read(name):
+              path=root/name
+              return [json.loads(line) for line in path.read_text(
+                  encoding='utf-8').splitlines()] if path.is_file() else []
+          early={row['mint']:row for row in read('pumpfun_30s_features.jsonl')
+                 if row.get('full_first_30s_observation') is True}
+          rows=read('pumpfun_native_first30_route_quotes.jsonl')
+          selected={row['mint']:row for row in rows
+                    if row.get('kind')=='native_first30_quote_selection'}
+          baselines=[row for row in rows
+                     if row.get('kind')=='native_first30_quote_baseline']
+          later=[row for row in rows
+                 if row.get('kind')=='native_first30_five_minute_sell_quote']
+          assert all(row['mint'] in early and
+                     row['completed_first30_at']==early[row['mint']]['completion_at']
+                     and row.get('selected_before_future_prices') is True
+                     for row in selected.values())
+          assert all(row['mint'] in selected for row in baselines)
+          assert all(row['mint'] in selected for row in later)
+          assert all(row.get('orders')==row.get('trades')==0
+                     and row.get('no_fill') is True for row in rows)
+          print('NATIVE_FIRST30_ROUTE_PROOF',json.dumps({
+              'frozen_first30_feature_mints':len(early),
+              'prospectively_selected_mints':len(selected),
+              'read_only_quote_baselines':len(baselines),
+              'five_minute_sell_quotes_recorded':len(later),
+              'missing_quote_is_not_a_filled_loss':True,
+              'real_orders':0,'real_trades':0}))
+          PY
+      - name: Persist original readonly first-seconds and route evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pumpfun-live-create-proof-${{ github.run_id }}
-          path: evidence/pumpfun_first_seconds_live.jsonl
+          path: |
+            evidence/pumpfun_first_seconds_live.jsonl
+            evidence/pumpfun_30s_features.jsonl
+            evidence/pumpfun_native_first30_route_quotes.jsonl
           if-no-files-found: warn
           retention-days: 14
