@@ -889,6 +889,8 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_curve_crossings_checked"]=0
         stats["native_quote_curve_crossings_available"]=0
         stats["native_quote_curve_crossings_available_within_10s"]=0
+        stats["native_quote_control_deferred_busy"]=0
+        stats["native_quote_selection_lanes"]={"strict_flow":0,"loose_flow":0,"control":0}
         def native_route_record(kind,**data):
             row={"kind":kind,"at":stamp(),**data,"orders":0,"trades":0,
                  "no_fill":True,"quote_not_an_executable_transaction":True}
@@ -1242,10 +1244,6 @@ def run_pumpfun_first_seconds_stream():
             arm=("partial10_" if partial10 else "early5_")+(
                 "five_plus_buyers" if buyers>=5 else "one_to_four_buyers")
             creator_sold=bool(row["creator_sell_observed_before30s"])
-            stratum=arm+(":creator_sold" if creator_sold else ":creator_not_sold")
-            minute=int(time.time()//60)
-            if last_selected_minute.get(stratum)==minute:return
-            last_selected_minute[stratum]=minute
             first30_n=row["observed_trades"]
             buy_share=(row["buy_events_first30"]/first30_n
                        if first30_n>0 else 0)
@@ -1253,16 +1251,32 @@ def run_pumpfun_first_seconds_stream():
                               buy_share>=0.65 and not creator_sold)
             flow_proxy_strict=(buyers>=8 and first30_n>=20 and
                                buy_share>=0.75 and not creator_sold)
+            # Separate LIVE research lanes: strong flow cannot be pushed
+            # out of the quote budget by an unrelated control first in minute.
+            # These are incomplete risk proxies, NOT profitable trade rules.
+            selection_lane=("strict_flow" if flow_proxy_strict else
+                            "loose_flow" if flow_proxy_loose else "control")
+            if selection_lane=="control" and len(native_route_tasks)>=2:
+                stats["native_quote_control_deferred_busy"]+=1
+                return
+            stratum=arm+":"+selection_lane+(
+                ":creator_sold" if creator_sold else ":creator_not_sold")
+            minute=int(time.time()//60)
+            if last_selected_minute.get(stratum)==minute:return
+            last_selected_minute[stratum]=minute
             # Historical risk-guard INCLUDED failed attempts <=25%; direct
             # native first30 stream cannot completely recover that denominator.
             # These traffic-only proxies are NOT the original risk guard.
             stats["native_quote_selected"]+=1
+            stats["native_quote_selection_lanes"][selection_lane]+=1
             if partial10:
                 stats["first30_partial10_quotes_selected"]+=1
             horizon=(60 if hashlib.sha256(
                 mint.encode("ascii")).digest()[0]%2==0 else 120)
             native_route_record("native_first30_quote_selection",
                 mint=mint,arm=arm,stratum=stratum,
+                selection_lane=selection_lane,
+                control_quotes_reserved_for_research_only=True,
                 early_window_coverage=row.get("early_window_coverage"),
                 initial_lag_seconds=row.get("initial_lag_seconds"),
                 partial10_is_not_full_first30_coverage=partial10,
