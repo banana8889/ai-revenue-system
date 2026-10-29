@@ -799,6 +799,8 @@ def run_pumpfun_first_seconds_stream():
         native_quote_lock=asyncio.Semaphore(1)
         stats["native_quote_selected"]=0
         stats["native_quote_buy_available"]=0
+        stats["native_quote_early_buy_valid"]=0
+        stats["native_quote_early_buy_unusable"]=0
         stats["native_quote_roundtrip_available"]=0
         stats["native_quote_five_minute_checked"]=0
         stats["native_quote_five_minute_available"]=0
@@ -855,8 +857,16 @@ def run_pumpfun_first_seconds_stream():
                 quoted_at=stamp()
                 buy=await asyncio.to_thread(
                     native_jupiter_quote,usdc,mint,5000000)
+                buy_response_at=stamp()
+                buy_elapsed=time.time()-row["created_at_unix"]
                 sell={"available":False,"reason":"buy_route_unavailable"}
                 qty=int(buy.get("out_amount") or 0)
+                buy_early_valid=(buy.get("available") is True and qty>0
+                                 and 30<=buy_elapsed<60)
+                if buy_early_valid:
+                    stats["native_quote_early_buy_valid"]+=1
+                else:
+                    stats["native_quote_early_buy_unusable"]+=1
                 if buy.get("available") and qty>0:
                     stats["native_quote_buy_available"]+=1
                     sell=await asyncio.to_thread(
@@ -864,8 +874,18 @@ def run_pumpfun_first_seconds_stream():
                 if sell.get("available"):
                     stats["native_quote_roundtrip_available"]+=1
                 observed_sell=int(sell.get("out_amount") or 0)
+                sellback_response_at=stamp()
+                horizon=(60 if hashlib.sha256(
+                    mint.encode("ascii")).digest()[0]%2==0 else 120)
                 native_route_record("native_first30_quote_baseline",
                     mint=mint,arm=arm,
+                    fixed_horizon_protocol="20261029_fixed60_120_v2",
+                    fixed_horizon_s=horizon,
+                    first30_buy_quote_early_valid=bool(buy_early_valid),
+                    buy_quote_response_at=buy_response_at,
+                    buy_quote_response_seconds_after_launch=round(buy_elapsed,3),
+                    sellback_quote_response_at=sellback_response_at,
+                    late_or_unavailable_first30_entry_censored=not buy_early_valid,
                     completed_first30_at=row["completion_at"],
                     create_at_unix=row["created_at_unix"],
                     quote_started_at=quoted_at,
@@ -882,7 +902,7 @@ def run_pumpfun_first_seconds_stream():
                     missing_quote_is_censored_not_loss=True,
                     before_later_curve_outcomes=True,
                     quote_sequential_not_atomic=True)
-                if qty>0:
+                if buy_early_valid:
                     native_route_state[mint]={
                         "mint":mint,"arm":arm,
                         "created_at_unix":row["created_at_unix"],
@@ -892,8 +912,7 @@ def run_pumpfun_first_seconds_stream():
                         "followup_scheduled":False,
                         # Two equal, fixed prospective arms; timestamp-independent
                         # SHA256 assignment cannot see future outcomes.
-                        "fixed_horizon_s":(60 if hashlib.sha256(
-                            mint.encode("ascii")).digest()[0]%2==0 else 120),
+                        "fixed_horizon_s":horizon,
                         "fixed_horizon_scheduled":False,
                         "curve_tiers_scheduled":set()}
         async def quote_native_curve_crossing(mint,state,tier,curve_x,
@@ -1057,8 +1076,12 @@ def run_pumpfun_first_seconds_stream():
             if last_selected_minute.get(stratum)==minute:return
             last_selected_minute[stratum]=minute
             stats["native_quote_selected"]+=1
+            horizon=(60 if hashlib.sha256(
+                mint.encode("ascii")).digest()[0]%2==0 else 120)
             native_route_record("native_first30_quote_selection",
                 mint=mint,arm=arm,stratum=stratum,
+                fixed_horizon_protocol="20261029_fixed60_120_v2",
+                fixed_horizon_s=horizon,
                 completed_first30_at=row["completion_at"],
                 observed_trades=row["observed_trades"],
                 distinct_buyers_first30=buyers,
