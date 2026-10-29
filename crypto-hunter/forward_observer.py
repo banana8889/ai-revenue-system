@@ -170,6 +170,15 @@ def run_free_pumpfun_historical_study():
        count(*) FILTER(WHERE creator_sells30>0) creators_sold,
        round(avg(n30),2) avg_n30
        FROM covered GROUP BY split,arm ORDER BY split,arm""").fetchall()
+    creator_subgroups=db.execute("""SELECT split,arm,
+       CASE WHEN creator_sells30>0 THEN 'creator_sold_before30'
+            ELSE 'creator_not_sold_before30' END creator_sale_arm,
+       count(*) observed_cohort,
+       count(*) FILTER(WHERE cross2 IS NOT NULL) curve_2x,
+       count(*) FILTER(WHERE cross5 IS NOT NULL) curve_5x,
+       count(*) FILTER(WHERE cross11 IS NOT NULL) curve_11x
+       FROM covered GROUP BY split,arm,creator_sale_arm
+       ORDER BY split,arm,creator_sale_arm""").fetchall()
     db.execute("""CREATE TEMP TABLE winners AS
        SELECT mint,birth_ts,buyers30,peak_x,cross11,frozen_price30
        FROM covered WHERE cross11 IS NOT NULL""")
@@ -222,6 +231,12 @@ def run_free_pumpfun_historical_study():
              "curve_11x":h11,"curve_11x_fraction":round(h11/n,8) if n else None,
              "creator_sold_first30":creator,"mean_first30_trades":mean}
              for split,arm,n,h2,h5,h11,creator,mean in group_rows],
+        "exploratory_creator_sale_subgroups":[
+            {"split":split,"buying_arm":arm,"creator_arm":creator_arm,
+             "observed_cohort":n,"curve_2x":h2,"curve_5x":h5,
+             "curve_11x":h11,"curve_11x_fraction":round(h11/n,8) if n else None}
+            for split,arm,creator_arm,n,h2,h5,h11 in creator_subgroups],
+        "creator_subgroup_hypothesis_not_out_of_time_validated":True,
         "curve_11x_cases":len(cases),
         "crashes_below_5_5x_within_observed_10min":len(falls),
         "median_seconds_to_halving_threshold_among_observed":(
