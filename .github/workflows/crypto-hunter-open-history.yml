@@ -1,5 +1,5 @@
 name: Crypto Hunter Free Historical Onchain Sample
-# Fixed pre-outcome cohorts; first-30s failures and 60/120/300-second no-lookahead exits.
+# Compare two frozen early wallet/flow + tx-failure risk filters to observed 60/120/300s future quote proxies.
 # Second measured pass: creator-sell x buyer-count exploratory subgroups
 on:
   push:
