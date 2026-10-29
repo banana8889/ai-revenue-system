@@ -344,13 +344,24 @@ def run_pumpfun_first_seconds_stream():
                     return
                 q=await asyncio.to_thread(
                     native_jupiter_quote,mint,usdc,state["token_raw"])
+                quote_returned=stamp()
+                try:
+                    total_lag=(dt.datetime.fromisoformat(quote_returned)-
+                               dt.datetime.fromisoformat(signal_at)).total_seconds()
+                except (ValueError,TypeError):
+                    total_lag=1e9
+                fresh=0<=total_lag<=30
                 stats["native_quote_curve_crossings_checked"]+=1
-                if q.get("available"):
+                if q.get("available") and fresh:
                     stats["native_quote_curve_crossings_available"]+=1
                 native_route_record("native_first30_curve_cross_sell_quote",
                     mint=mint,arm=state["arm"],tier_x=tier,
                     chain_trade_timestamp_unix=trade_time,
                     detected_at=signal_at,quote_started_at=quote_started,
+                    quote_response_at=quote_returned,
+                    quote_response_lag_from_ws_seconds=round(total_lag,3),
+                    quote_observed_within_30s=bool(fresh),
+                    late_response_not_attributed_to_curve_cross=not fresh,
                     latency_from_ws_observation_seconds=round(lag,3),
                     onchain_curve_price_x=round(curve_x,6),
                     token_raw=state["token_raw"],
@@ -4639,11 +4650,14 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
               if mint in mint_ids]
     crossing_available=[rec for rec in crossing
                         if rec.get('sell_route_available') is True and
+                        rec.get('quote_observed_within_30s') is True and
                         isinstance(rec.get('quote_multiple_x'),(int,float))]
     native_route_report['arm_counts'][arm]={
         'selected_before_future_outcomes':len(mint_ids),
         'onchain_curve_crossing_quote_attempts':len(crossing),
-        'onchain_curve_crossing_sell_routes_available':len(crossing_available),
+        'onchain_curve_crossing_sell_routes_available_within_30s':len(crossing_available),
+        'onchain_curve_crossing_quote_results_stale_or_late':sum(
+            rec.get('quote_observed_within_30s') is not True for rec in crossing),
         'onchain_curve_11x_crossings_quoted':sum(
             rec.get('tier_x')==11 for rec in crossing),
         'onchain_curve_11x_crossings_with_actual_quote_11x_unfilled':sum(
