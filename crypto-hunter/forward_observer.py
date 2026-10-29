@@ -753,7 +753,7 @@ def run_pumpfun_first_seconds_stream():
     VERIFIED=Path("evidence/pumpfun_verified_mints.jsonl")
     AUDIT.parent.mkdir(exist_ok=True)
     PROOF="--pumpfun-early-proof" in sys.argv
-    DURATION=120 if PROOF else max(60,min(1800,int(
+    DURATION=420 if PROOF else max(60,min(1800,int(
         os.getenv("PUMPFUN_FIRST_SECONDS_DURATION","1500"))))
     stats={"program_subscribed":False,"launch_signatures":0,
            "creator_instructions":0,"mint_verified":0,"rpc_attempts":0,
