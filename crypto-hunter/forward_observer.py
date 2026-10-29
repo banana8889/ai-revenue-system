@@ -849,6 +849,9 @@ def run_pumpfun_first_seconds_stream():
         provider_attempt=0
         stats["create_events_decoded"]=0
         stats["trade_events_decoded"]=0
+        stats["failed_log_notifications_observed"]=0
+        stats["failed_trade_anchor_events_matched_first30"]=0
+        stats["failed_log_notifications_without_decodable_trade_event"]=0
         stats["watched_first30"]=0
         stats["first30_complete"]=0
         stats["first30_censored"]=0
@@ -1184,6 +1187,12 @@ def run_pumpfun_first_seconds_stream():
                  "observed_trades":buys+sells,
                  "buy_events_first30":buys,
                  "sell_events_first30":sells,
+                 "failed_trade_anchor_event_count_first30_lower_bound":
+                     state["failed_trade_anchor_event_lower_bound"],
+                 "failed_trade_fraction_from_failed_transaction_anchor_logs_incomplete":
+                     True,
+                 "failed_transaction_ratio_from_all_onchain_attempts_verified":
+                     False,
                  "distinct_buyers_first30":len(state["buyers"]),
                  "distinct_sellers_first30":len(state["sellers"]),
                  "creator_buy_events_first30":state["creator_buys"],
@@ -1347,9 +1356,9 @@ def run_pumpfun_first_seconds_stream():
                         value=result.get("value") or {}
                         signature=value.get("signature")
                         logs=value.get("logs") or []
-                        if (not signature or signature in seen_signatures
-                                or value.get("err")):
+                        if not signature or signature in seen_signatures:
                             continue
+                        failed_tx=value.get("err") is not None
                         seen_signatures.add(signature)
                         if len(seen_signatures)>50000:
                             # Drop old signatures, never erase cohort state.
@@ -1362,6 +1371,29 @@ def run_pumpfun_first_seconds_stream():
                                 data=decode_pumpfun_anchor_event(line[14:].strip())
                                 if data:
                                     decoded.append(data)
+                        if failed_tx:
+                            stats["failed_log_notifications_observed"]+=1
+                            matching_trade_events=0
+                            for failed_event in decoded:
+                                if failed_event.get("kind")!="TradeEvent":
+                                    continue
+                                matching_trade_events+=1
+                                state=watched.get(failed_event.get("mint"))
+                                if state is None or state.get("done"):
+                                    continue
+                                age=(failed_event["timestamp_unix"]-
+                                     state["created_at_unix"])
+                                if 0<=age<=30:
+                                    state["failed_trade_anchor_event_lower_bound"]+=1
+                                    stats["failed_trade_anchor_events_matched_first30"]+=1
+                            if matching_trade_events==0:
+                                stats["failed_log_notifications_without_decodable_trade_event"]+=1
+                            # A transaction with err != null NEVER creates a
+                            # landed swap, reserve update or real buyer.
+                            # Event-log coverage is partial: NOT a reliable
+                            # failed-attempt denominator for the historical
+                            # low-failure strategy gate.
+                            continue
                         for observed in decoded:
                             kind=observed["kind"]
                             mint=observed["mint"]
@@ -1418,6 +1450,7 @@ def run_pumpfun_first_seconds_stream():
                                         "virtual_token":observed["virtual_token_raw"],
                                         "buyers":set(),"sellers":set(),
                                         "buys":0,"sells":0,
+                                        "failed_trade_anchor_event_lower_bound":0,
                                         "creator_buys":0,"creator_sells":0,
                                         "buy_lamports":0,"sell_lamports":0,
                                         "peak_curve_x":1.0,
