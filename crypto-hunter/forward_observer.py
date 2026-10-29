@@ -867,7 +867,11 @@ def run_pumpfun_first_seconds_stream():
         native_route_state={}
         native_route_tasks=set()
         last_selected_minute={}
-        native_quote_lock=asyncio.Semaphore(1)
+        # Keep entry requests serialized for provider compliance, but do
+        # NOT make timestamped sell probes wait behind two entry HTTP calls.
+        # Exit probes are read-only and independently bounded.
+        native_entry_quote_lock=asyncio.Semaphore(1)
+        native_exit_quote_lock=asyncio.Semaphore(2)
         stats["native_quote_selected"]=0
         stats["native_quote_buy_available"]=0
         stats["native_quote_early_buy_valid"]=0
@@ -924,7 +928,7 @@ def run_pumpfun_first_seconds_stream():
             task.add_done_callback(native_route_tasks.discard)
         async def quote_native_first30(mint,row,arm):
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-            async with native_quote_lock:
+            async with native_entry_quote_lock:
                 quoted_at=stamp()
                 buy=await asyncio.to_thread(
                     native_jupiter_quote,usdc,mint,5000000)
@@ -991,7 +995,7 @@ def run_pumpfun_first_seconds_stream():
             # The *same token amount* from an independent actual $5 buy
             # quote. A chain price multiple is not a sellable price multiple.
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-            async with native_quote_lock:
+            async with native_exit_quote_lock:
                 quote_started=stamp()
                 try:
                     lag=(dt.datetime.fromisoformat(quote_started)-
@@ -1051,7 +1055,7 @@ def run_pumpfun_first_seconds_stream():
             """
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
             h=state["fixed_horizon_s"]
-            async with native_quote_lock:
+            async with native_exit_quote_lock:
                 quote_started=stamp()
                 elapsed=time.time()-state["created_at_unix"]
                 if not h<=elapsed<=h+30:
@@ -1091,7 +1095,7 @@ def run_pumpfun_first_seconds_stream():
                     fees_rent_mev_and_transaction_failure_unmodelled=True)
         async def quote_native_5m(mint,state):
             usdc="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-            async with native_quote_lock:
+            async with native_exit_quote_lock:
                 at=stamp()
                 delay=time.time()-state["created_at_unix"]
                 if not 300<=delay<=420:
