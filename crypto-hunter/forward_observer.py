@@ -928,8 +928,18 @@ def run_pumpfun_first_seconds_stream():
                         "reason":None if raw>0 else "no_positive_quote",
                         "request_seconds":round(time.monotonic()-started,3)}
             except urllib.error.HTTPError as err:
+                try:
+                    payload=json.loads(err.read(4096).decode("utf-8","replace"))
+                    if not isinstance(payload,dict):
+                        payload={}
+                except (OSError,ValueError,TypeError):
+                    payload={}
+                code=payload.get("errorCode",payload.get("code"))
+                detail=payload.get("errorMessage",payload.get("error"))
                 return {"available":False,"http":err.code,
                         "reason":"http_error_not_a_fill",
+                        "provider_error_code":str(code)[:64] if code is not None else None,
+                        "provider_error_message":str(detail)[:180] if detail is not None else None,
                         "request_seconds":round(time.monotonic()-started,3)}
             except (OSError,ValueError,TypeError,TimeoutError):
                 return {"available":False,"reason":"unavailable_not_a_loss",
@@ -1003,6 +1013,12 @@ def run_pumpfun_first_seconds_stream():
                     buy_request_seconds=buy.get("request_seconds"),
                      sell_request_seconds=sell.get("request_seconds"),
                      buy_http=buy.get("http"),sell_http=sell.get("http"),
+                     buy_error_code=buy.get("provider_error_code"),
+                     sell_error_code=sell.get("provider_error_code"),
+                     buy_error_message=buy.get("provider_error_message"),
+                     sell_error_message=sell.get("provider_error_message"),
+                     roundtrip_below_principal_or_no_route=(
+                         not sell.get("available") or observed_sell<5000000),
                     buy_router=buy.get("router"),
                     sell_router=sell.get("router"),
                     missing_quote_is_censored_not_loss=True,
@@ -3970,7 +3986,16 @@ def jupiter_quote(input_mint,output_mint,raw_amount):
         amount=int(body.get('outAmount') or 0)
         return {'ok':amount>0,'out_amount':amount,'router':body.get('router'),'fee_bps':body.get('feeBps'),'error_code':body.get('errorCode')}
     except urllib.error.HTTPError as e:
-        return {'ok':False,'http':e.code,'error':'no_quote'}
+        try:
+            payload=json.loads(e.read(4096).decode('utf-8','replace'))
+            if not isinstance(payload,dict):payload={}
+        except (OSError,ValueError,TypeError):
+            payload={}
+        code=payload.get('errorCode',payload.get('code'))
+        detail=payload.get('errorMessage',payload.get('error'))
+        return {'ok':False,'http':e.code,'error':'no_quote',
+                'provider_error_code':str(code)[:64] if code is not None else None,
+                'provider_error_message':str(detail)[:180] if detail is not None else None}
     except (ValueError,TypeError,urllib.error.URLError,TimeoutError):
         return {'ok':False,'error':'quote_unavailable'}
 def probe_sell_depth(mint,raw_tokens,reference_sell_raw,observed_at,pool,token_id):
