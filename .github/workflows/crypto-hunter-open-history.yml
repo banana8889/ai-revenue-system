@@ -13,34 +13,44 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-      - name: Acquire published, no-key Solana historical events and validate schema
+      - name: Download complete no-key Pump.fun historical sample, verify rows, run canonical historical engine
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --disable-pip-version-check -q 'duckdb==1.4.1'
+          python3 -m py_compile crypto-hunter/forward_observer.py
           mkdir -p evidence/history
-          curl -fLsS --retry 3 --retry-delay 3 --max-time 240             -o evidence/history/events.parquet             'https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample/resolve/main/events/pumpdata-2026-10-15-events.parquet'
+          BASE=https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample/resolve/main
+          curl -fLsS --retry 3 --retry-delay 3 --max-time 240 \
+            -o evidence/history/events.parquet \
+            "$BASE/events/pumpdata-2026-10-15-events.parquet"
+          for id in 00000 00001 00002; do
+            echo "HISTORICAL_FREE_DATA_DOWNLOAD_START_SHARD=$id"
+            curl -fLsS --retry 3 --retry-delay 3 --max-time 720 \
+              -o "evidence/history/trade-$id.parquet" \
+              "$BASE/data/pumpdata-2026-10-15-$id-of-00003.parquet"
+            ls -lh "evidence/history/trade-$id.parquet"
+          done
           python3 - <<'PY'
-          import duckdb,json,os
-          con=duckdb.connect()
-          f='evidence/history/events.parquet'
-          schema=con.execute(f"describe select * from '{f}'").fetchall()
-          counts=con.execute(f"select kind,count(*) as n from '{f}' group by 1 order by 2 desc").fetchall()
-          examples=[dict(zip([x[0] for x in schema],map(str,row)))
-                    for row in con.execute(f"select * from '{f}' limit 5").fetchall()]
-          result={'bytes':os.stat(f).st_size,'schema':schema,
-                  'counts':counts,'examples':examples,'sample_day':'2026-10-15',
-                  'source':'pumpdatafun/pump-fun-trades-sample','license':'CC BY 4.0'}
-          os.makedirs('evidence',exist_ok=True)
-          with open('evidence/historical_source_probe.json','w') as out:
-              json.dump(result,out,indent=2,default=str)
-          print('HISTORICAL_SOURCE_PROBE',json.dumps(result,default=str))
-          assert sum(n for _,n in counts)>10000
+          import duckdb,json,pathlib
+          events=pathlib.Path('evidence/history/events.parquet')
+          files=sorted(pathlib.Path('evidence/history').glob('trade-*.parquet'))
+          db=duckdb.connect()
+          event_count=db.execute(f"SELECT count(*) FROM '{events}'").fetchone()[0]
+          shards=[db.execute(f"SELECT count(*) FROM '{p}'").fetchone()[0] for p in files]
+          print("HISTORICAL_DATA_SOURCE_RECEIPT",
+              json.dumps({"source":"pumpdatafun/pump-fun-trades-sample",
+                          "day":"2026-10-15","license":"CC BY 4.0",
+                          "original_event_rows":event_count,"trade_shard_rows":shards,
+                          "total_trades_and_failures":sum(shards)}),flush=True)
+          assert event_count==75466 and sum(shards)==42133673 and len(files)==3
           PY
-      - uses: actions/upload-artifact@v4
+          python3 -u crypto-hunter/forward_observer.py --historical-open-sample
+      - name: Upload compact historical evidence (not 1.2 GB raw data)
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: crypto-historical-source-probe-${{ github.run_id }}
-          path: evidence/historical_source_probe.json
+          name: crypto-historical-real-onchain-${{ github.run_id }}
+          path: evidence/historical_onchain_oct15_study.json
           retention-days: 30
           if-no-files-found: warn
