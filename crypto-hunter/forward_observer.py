@@ -1573,7 +1573,17 @@ def run_pumpfun_first_seconds_stream():
         finalize_forward_outcomes(at_end=True)
         schedule_native_quotes()
         if native_route_tasks:
-            await asyncio.wait(native_route_tasks,timeout=18)
+            completed,pending=await asyncio.wait(native_route_tasks,timeout=18)
+            if pending:
+                stats["native_quote_tasks_unfinished_at_shutdown"]=len(pending)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending,return_exceptions=True)
+                native_route_record("native_quote_shutdown_timeout",
+                    pending_count=len(pending),missing_quote_censored=True,
+                    no_market_execution_asserted=True)
+            else:
+                stats["native_quote_tasks_unfinished_at_shutdown"]=0
         stats["native_quote_followups_not_matured_at_end"]=sum(
             not value["followup_scheduled"]
             for value in native_route_state.values())
