@@ -26,7 +26,8 @@ jobs:
           f='evidence/history/events.parquet'
           schema=con.execute(f"describe select * from '{f}'").fetchall()
           counts=con.execute(f"select kind,count(*) as n from '{f}' group by 1 order by 2 desc").fetchall()
-          examples=con.execute(f"select * from '{f}' limit 5").fetchdf().astype(str).to_dict('records')
+          examples=[dict(zip([x[0] for x in schema],map(str,row)))
+                    for row in con.execute(f"select * from '{f}' limit 5").fetchall()]
           result={'bytes':os.stat(f).st_size,'schema':schema,
                   'counts':counts,'examples':examples,'sample_day':'2026-10-15',
                   'source':'pumpdatafun/pump-fun-trades-sample','license':'CC BY 4.0'}
