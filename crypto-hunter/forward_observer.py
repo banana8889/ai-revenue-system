@@ -4303,7 +4303,7 @@ for row in live_jsonl_evidence('evidence/pumpfun_first30_to_5m_outcomes.jsonl'):
                 row['outcome_frozen_at']<later_complete[mint]['outcome_frozen_at']):
             later_complete[mint]=row
 print('PUMPFUN_NATIVE_PIPELINE_RECEIPT',json.dumps({
-    'as_of':now.isoformat(),
+    'as_of':r['at'],
     'verified_first30_feature_mints':len(early_complete),
     'complete_post30_five_minute_outcomes':len(later_complete),
     'same_mint_forward_pairs':len(early_complete.keys() & later_complete.keys()),
