@@ -3362,7 +3362,7 @@ for cycle in range(CYCLES_PER_RUN):
             if (token_id and token_id.startswith('solana_')
                     and 'pumpfun_first30_features' not in s):
                 feat=pumpfun_early_flow.get(token_id.removeprefix('solana_'))
-                if feat:
+                if feat and feat.get('completion_at','')<=t.isoformat():
                     s['pumpfun_first30_features']={k:feat.get(k) for k in (
                         'created_at_unix','completion_at',
                         'buy_events_first30','sell_events_first30',
@@ -3379,11 +3379,19 @@ for cycle in range(CYCLES_PER_RUN):
                         'initial_virtual_token_raw',
                         'last_virtual_sol_lamports',
                         'last_virtual_token_raw','is_mayhem_mode')}
-                    s['pumpfun_first30_features']['frozen_pre_gecko'] = (
-                        feat['completion_at']<=t.isoformat())
+                    # The first pool observation is OUR observation, not a
+                    # proof of the first listing on an external index.
+                    pre_first_pool_observation=(
+                        feat['completion_at']<=s['first'].isoformat())
+                    s['pumpfun_first30_features']['frozen_pre_gecko']=(
+                        pre_first_pool_observation)
+                    s['pumpfun_first30_features']['before_first_scanner_pool_observation']=(
+                        pre_first_pool_observation)
+                    s['pumpfun_first30_features']['listing_publication_time_unknown']=True
                     out({'kind':'native_30s_signal_joined_later_gecko',
                          'pool':p,'mint':feat['mint'],'at':t.isoformat(),
-                         'features_measured_before_gecko':feat['completion_at']<=t.isoformat(),
+                         'features_measured_before_gecko':pre_first_pool_observation,
+                         'not_proof_of_pre_listing':True,
                          'buy_events_first30':feat.get('buy_events_first30'),
                          'distinct_buyers_first30':feat.get('distinct_buyers_first30'),
                          'creator_buy_events_first30':feat.get('creator_buy_events_first30'),
@@ -3982,8 +3990,12 @@ r={'at':d.datetime.now(d.timezone.utc).isoformat(),'unique_pools':len(st),
    'new_mints_first_detected_this_run':len(first_seen_unique_mints_this_run),
    'onchain_native_first_seconds_mints_visible_this_run':
        len(pumpfun_native_verified),
-   'complete_pre_gecko_first30_flow_vectors_visible_this_run':
+   'complete_first30_flow_vectors_available_this_run':
        len(pumpfun_early_flow),
+   'complete_pre_gecko_first30_flow_vectors_visible_this_run':sum(
+       bool(z.get('pumpfun_first30_features',{}).get('before_first_scanner_pool_observation'))
+       for z in st.values()),
+   'pre_gecko_here_means_before_our_first_pool_observation_not_public_listing':True,
    'first30_flow_vectors_matched_later_gecko':sum(
        bool(z.get('pumpfun_first30_features')) for z in st.values()),
    'onchain_create_mints_later_matched_gecko':sum(
