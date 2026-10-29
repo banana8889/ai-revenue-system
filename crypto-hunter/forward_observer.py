@@ -369,6 +369,120 @@ def run_free_pumpfun_historical_study():
               median,mean,total_x in fixed_rows]}
     print("HISTORICAL_FIXED_30S_TO_5M_EXECUTION_UPPER_BOUND",
         json.dumps(fixed_marks_report,allow_nan=False),flush=True)
+
+    # PRE-REGISTERED FIXED EXIT HORIZONS. Include EVERY strict first30
+    # candidate, not just later winners. Take the LAST onchain reserve
+    # mark no older than 10 seconds, at or BEFORE the decision deadline.
+    # Never substitute a future event or carry a stale mark forward.
+    db.execute("""CREATE TEMP TABLE all_horizon_marks AS
+      SELECT e.mint,e.birth_ts,e.buyers30,e.creator_sells30,
+        CASE WHEN e.birth_ts<1792065600 THEN 'first_12h_exploration'
+             ELSE 'last_12h_holdout' END split,
+        CASE WHEN e.buyers30>=5 THEN 'five_plus_unique_buyers'
+             ELSE 'under_five_unique_buyers' END buyer_arm,
+        CASE WHEN e.creator_sells30>0 THEN 'creator_sold'
+             ELSE 'creator_did_not_sell' END creator_arm,
+        horizons.horizon_s,c.ts mark_ts,c.r1 mark_sol,c.r2 mark_token,
+        e.frozen_r1 entry_sol,e.frozen_r2 entry_token
+      FROM eligible e
+      CROSS JOIN (VALUES (60), (120), (300)) horizons(horizon_s)
+      LEFT JOIN curve c ON c.mint=e.mint AND
+          c.ts BETWEEN e.birth_ts+horizons.horizon_s-10
+                   AND e.birth_ts+horizons.horizon_s
+      WHERE e.first_trade_unix_first30<=e.birth_ts+5
+        AND e.last_trade_unix_first30>=e.birth_ts+20
+        AND e.frozen_r1>0 AND e.frozen_r2>0
+      QUALIFY row_number() OVER (PARTITION BY e.mint,horizons.horizon_s
+         ORDER BY c.ts DESC NULLS LAST,c.slot DESC,c.idx DESC)=1""")
+    db.execute("""CREATE TEMP TABLE all_horizon_lots AS
+      SELECT mint,split,buyer_arm,creator_arm,horizon_s,
+         mark_ts, amount.entry_sol_lamports,
+         mark_sol*(entry_token*amount.entry_sol_lamports/
+           (entry_sol+amount.entry_sol_lamports))/
+         (mark_token+entry_token*amount.entry_sol_lamports/
+           (entry_sol+amount.entry_sol_lamports))/
+         amount.entry_sol_lamports idealised_sell_x
+      FROM all_horizon_marks CROSS JOIN
+       (VALUES (20000000.0),(100000000.0)) amount(entry_sol_lamports)""")
+    horizon_rows=db.execute("""SELECT split,buyer_arm,creator_arm,horizon_s,
+         entry_sol_lamports,
+         count(*) selected_at_first30,
+         count(*) FILTER(WHERE mark_ts IS NOT NULL) fresh_marks,
+         count(*) FILTER(WHERE idealised_sell_x>1) optimistic_winners,
+         count(*) FILTER(WHERE idealised_sell_x>=2) optimistic_2x,
+         count(*) FILTER(WHERE idealised_sell_x>=11) optimistic_11x,
+         round(median(idealised_sell_x),6) median_upper_x,
+         round(avg(idealised_sell_x),6) mean_upper_x
+      FROM all_horizon_lots
+      GROUP BY split,buyer_arm,creator_arm,horizon_s,entry_sol_lamports
+      ORDER BY split,buyer_arm,creator_arm,horizon_s,entry_sol_lamports""").fetchall()
+    horizon_report={
+       "design":"2026-10-15; early features freeze at <=30s; exit checkpoints at 60,120,300s",
+       "exit_mark_window":"[-10s,0s] BEFORE each deadline; no lookahead",
+       "entry_sizes_sol":[0.02,0.1],
+       "no_winner_only_sampling":True,
+       "missing_marks_are_censored_not_zero_returns":True,
+       "no_migration_to_dex_assumed":True,
+       "pretrade_reserves_before_last_landed_trade":True,
+       "exact_executable_quote_or_fill":False,
+       "multiple_tested_exploratory_only":True,
+       "rows":[{
+          "split":split,"buyer_arm":arm,"creator_arm":creator,
+          "deadline_s":horizon,"entry_sol":float(size)/1e9,
+          "selected_first30_cohort":n,"fresh_exit_reserve_marks":fresh,
+          "missing_exit_marks":n-fresh,
+          "optimistic_mark_above_cost_1x":wins,
+          "optimistic_mark_at_least_2x":hit2,
+          "optimistic_mark_at_least_11x":hit11,
+          "median_idealised_multiple_observed_only":(
+              float(median) if median is not None else None),
+          "mean_idealised_multiple_observed_only":(
+              float(mean) if mean is not None else None)}
+          for split,arm,creator,horizon,size,n,fresh,wins,hit2,hit11,
+              median,mean in horizon_rows]}
+    print("HISTORICAL_ALL_CANDIDATE_FIXED_HORIZON_STUDY",
+          json.dumps(horizon_report,allow_nan=False),flush=True)
+    # Early chain-level failures are measurable. Compare *attempts* with
+    # actual landed swaps in the same first 30-second pre-outcome window.
+    # This has NO evidence about the trader's private mempool submissions.
+    db.execute(f"""CREATE TEMP TABLE early_failed_attempts AS
+      SELECT t.mint,count(*) attempts_first30,
+         count(*) FILTER(WHERE t.failed) failed_first30,
+         count(*) FILTER(WHERE t.failed AND t.side='buy') failed_buys_first30,
+         count(*) FILTER(WHERE NOT t.failed) landed_first30
+      FROM read_parquet({trade_files}) t JOIN eligible e ON t.mint=e.mint
+      WHERE t.venue='curve' AND t.ts BETWEEN e.birth_ts AND e.birth_ts+30
+      GROUP BY t.mint""")
+    failure_rows=db.execute("""SELECT
+       CASE WHEN e.birth_ts<1792065600 THEN 'first_12h_exploration'
+         ELSE 'last_12h_holdout' END split,
+       CASE WHEN e.buyers30>=5 THEN 'five_plus_unique_buyers'
+         ELSE 'under_five_unique_buyers' END buyer_arm,
+       count(*) eligible_mints,
+       sum(coalesce(f.attempts_first30,0)) observed_chain_attempts,
+       sum(coalesce(f.failed_first30,0)) failed_chain_attempts,
+       sum(coalesce(f.failed_buys_first30,0)) failed_chain_buy_attempts,
+       round(avg(CASE WHEN f.attempts_first30>0
+           THEN cast(f.failed_first30 as DOUBLE)/f.attempts_first30
+           ELSE NULL END),6) mean_per_mint_failure_fraction
+      FROM eligible e LEFT JOIN early_failed_attempts f ON f.mint=e.mint
+      GROUP BY split,buyer_arm ORDER BY split,buyer_arm""").fetchall()
+    failure_report={
+       "scope":"onchain attempted trades (failed and landed) in first 30s",
+       "data":"real Solana historical attempts; no simulated fill",
+       "not_all_submitted_transactions":True,
+       "rows":[{
+          "split":split,"buyer_arm":arm,"eligible_mints":n,
+          "observed_attempts_first30":attempts,
+          "failed_attempts_first30":failed,
+          "failed_buy_attempts_first30":failed_buy,
+          "failure_fraction_of_observed_attempts":round(failed/attempts,6)
+              if attempts else None,
+          "mean_per_mint_failure_fraction":(
+              float(mean) if mean is not None else None)}
+          for split,arm,n,attempts,failed,failed_buy,mean in failure_rows]}
+    print("HISTORICAL_CHAIN_ATTEMPT_FAILURE_COHORT",
+          json.dumps(failure_report,allow_nan=False),flush=True)
     counts=db.execute("""SELECT
        (SELECT count(*) FROM launches),
        (SELECT count(DISTINCT mint) FROM curve),
@@ -416,6 +530,8 @@ def run_free_pumpfun_historical_study():
         "curve_11x_cases":len(cases),
         "idealized_exit_depth_reaction_study":depth_metrics,
         "fixed_30s_to_5m_optimistic_all_candidates_study":fixed_marks_report,
+        "fixed_deadline_all_candidate_study":horizon_report,
+        "onchain_first30_attempt_failures":failure_report,
         "crashes_below_5_5x_within_observed_10min":len(falls),
         "median_seconds_to_halving_threshold_among_observed":(
             falls[len(falls)//2] if falls else None),
@@ -435,7 +551,9 @@ def run_free_pumpfun_historical_study():
     short={k:v for k,v in report.items() if k not in (
         "top_curve_11x_cases","all_curve_11x_cases",
         "idealized_exit_depth_reaction_study",
-        "fixed_30s_to_5m_optimistic_all_candidates_study")}
+        "fixed_30s_to_5m_optimistic_all_candidates_study",
+        "fixed_deadline_all_candidate_study",
+        "onchain_first30_attempt_failures")}
     print("HISTORICAL_ONCHAIN_COHORT_RESULTS",
           json.dumps(short,allow_nan=False),flush=True)
     print("HISTORICAL_ONCHAIN_WINNER_MINTS",
