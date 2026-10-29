@@ -492,6 +492,7 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_curve_crossings_selected"]=0
         stats["native_quote_curve_crossings_checked"]=0
         stats["native_quote_curve_crossings_available"]=0
+        stats["native_quote_curve_crossings_available_within_10s"]=0
         def native_route_record(kind,**data):
             row={"kind":kind,"at":stamp(),**data,"orders":0,"trades":0,
                  "no_fill":True,"quote_not_an_executable_transaction":True}
@@ -604,9 +605,12 @@ def run_pumpfun_first_seconds_stream():
                 except (ValueError,TypeError):
                     total_lag=1e9
                 fresh=0<=total_lag<=30
+                fast=0<=total_lag<=10
                 stats["native_quote_curve_crossings_checked"]+=1
                 if q.get("available") and fresh:
                     stats["native_quote_curve_crossings_available"]+=1
+                if q.get("available") and fast:
+                    stats["native_quote_curve_crossings_available_within_10s"]+=1
                 native_route_record("native_first30_curve_cross_sell_quote",
                     mint=mint,arm=state["arm"],tier_x=tier,
                     chain_trade_timestamp_unix=trade_time,
@@ -614,7 +618,9 @@ def run_pumpfun_first_seconds_stream():
                     quote_response_at=quote_returned,
                     quote_response_lag_from_ws_seconds=round(total_lag,3),
                     quote_observed_within_30s=bool(fresh),
+                    quote_observed_within_10s=bool(fast),
                     late_response_not_attributed_to_curve_cross=not fresh,
+                    fast_quote_still_not_a_fill_or_realized_profit=True,
                     latency_from_ws_observation_seconds=round(lag,3),
                     onchain_curve_price_x=round(curve_x,6),
                     token_raw=state["token_raw"],
@@ -674,17 +680,21 @@ def run_pumpfun_first_seconds_stream():
             buyers=row["distinct_buyers_first30"]
             if buyers<1:return
             arm="five_plus_buyers" if buyers>=5 else "one_to_four_buyers"
+            creator_sold=bool(row["creator_sell_observed_before30s"])
+            stratum=arm+(":creator_sold" if creator_sold else ":creator_not_sold")
             minute=int(time.time()//60)
-            if last_selected_minute.get(arm)==minute:return
-            last_selected_minute[arm]=minute
+            if last_selected_minute.get(stratum)==minute:return
+            last_selected_minute[stratum]=minute
             stats["native_quote_selected"]+=1
             native_route_record("native_first30_quote_selection",
-                mint=mint,arm=arm,completed_first30_at=row["completion_at"],
+                mint=mint,arm=arm,stratum=stratum,
+                completed_first30_at=row["completion_at"],
                 observed_trades=row["observed_trades"],
                 distinct_buyers_first30=buyers,
-                creator_sell_first30=row["creator_sell_observed_before30s"],
+                creator_sell_first30=creator_sold,
                 selected_before_future_prices=True,
-                first_complete_in_arm_for_minute=True)
+                first_complete_in_stratum_for_minute=True,
+                quote_study_only_no_capital_permission=True)
             start_native_task(quote_native_first30(mint,row,arm))
         def snapshot(mint,state,complete,why):
             if state.get("done"):
@@ -4909,6 +4919,8 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
         'selected_before_future_outcomes':len(mint_ids),
         'onchain_curve_crossing_quote_attempts':len(crossing),
         'onchain_curve_crossing_sell_routes_available_within_30s':len(crossing_available),
+        'onchain_curve_crossing_sell_routes_available_within_10s':sum(
+            rec.get('quote_observed_within_10s') is True for rec in crossing_available),
         'onchain_curve_crossing_quote_results_stale_or_late':sum(
             rec.get('quote_observed_within_30s') is not True for rec in crossing),
         'onchain_curve_11x_crossings_quoted':sum(
