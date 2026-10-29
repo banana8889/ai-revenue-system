@@ -223,6 +223,7 @@ def run_pumpfun_first_seconds_stream():
         stats["forward5m_censored"]=0
         stats["forward5m_post30_trade_events"]=0
         stats["stale_provider_reconnects"]=0
+        last_progress=time.monotonic()
         FUTURE=Path("evidence/pumpfun_first30_to_5m_outcomes.jsonl")
         FEATURES=Path("evidence/pumpfun_30s_features.jsonl")
         def snapshot(mint,state,complete,why):
@@ -284,7 +285,7 @@ def run_pumpfun_first_seconds_stream():
                 # 30s snapshots are frozen BEFORE any later quoted outcome.
                 with FEATURES.open("a",encoding="utf-8") as output:
                     output.write(json.dumps(row,separators=(",",":"),
-                                            allow_nan=False)+"\\n")
+                                            allow_nan=False)+"\n")
                 event("pumpfun_first30_features",**row)
                 # Future outcomes start only AFTER immutable first-30s
                 # baseline has been committed. Never leak future trading
@@ -345,7 +346,7 @@ def run_pumpfun_first_seconds_stream():
                     stats["forward5m_complete"]+=1
                     with FUTURE.open("a",encoding="utf-8") as handle:
                         handle.write(json.dumps(row,allow_nan=False,
-                                                separators=(",",":"))+"\\n")
+                                                separators=(",",":"))+"\n")
                     event("pumpfun_5m_curve_outcome",**row)
                 else:
                     stats["forward5m_censored"]+=1
@@ -384,6 +385,12 @@ def run_pumpfun_first_seconds_stream():
                     while time.monotonic()<until:
                         finalize_expired()
                         finalize_forward_outcomes()
+                        if time.monotonic()-last_progress>=60:
+                            print("PUMPFUN_FIRST30_PROGRESS",json.dumps(
+                                {"at":stamp(),**stats,"watched_current":len(watched),
+                                 "forward5m_current":len(forward_outcomes),
+                                 "orders":0,"trades":0},allow_nan=False),flush=True)
+                            last_progress=time.monotonic()
                         try:
                             msg=json.loads(await asyncio.wait_for(ws.recv(),timeout=2))
                         except asyncio.TimeoutError:
@@ -668,7 +675,7 @@ def run_embedded_liquidity_sensor():
     ALPHABET=set(B58)
     PUMP_PROGRAM="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
     PUMP_POOL_DISCRIMINATOR=bytes((241,154,109,4,17,177,109,188))
-    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0,"slot_notifications":0,"slot_subscriptions_confirmed":0}
+    stats={"subscriptions":0,"events":0,"checks":0,"warnings":0,"critical":0,"quote_checks":0,"errors":0,"dex_checks":0,"gecko_fallback_checks":0,"lp_instruction_hints":0,"max_subscriptions":0,"tx_rpc_checks":0,"tx_rpc_errors":0,"onchain_token_balance_changes":0,"mint_risk_checks":0,"mint_risk_warnings":0,"pump_vault_queries":0,"pump_vault_confirmed":0,"pump_vault_joint_drops":0,"pump_vault_errors":0,"vault_ws_subscriptions":0,"max_vault_ws_subscriptions":0,"vault_ws_events":0,"vault_ws_joint_drops":0,"lp_control_probes":0,"lp_control_confirmed":0,"lp_control_high_risk":0,"lp_control_unknown":0,"pre_rug_sell_pressure_events":0,"candidate_preflight_queued":0,"creator_lp_ws_subscriptions":0,"creator_lp_ws_events":0,"creator_lp_early_decreases":0,"creator_token_probes":0,"creator_token_confirmed":0,"creator_token_ws_subscriptions":0,"creator_token_ws_events":0,"creator_token_decreases":0,"vault_pairs_same_slot":0,"vault_pairs_bounded_skew":0,"vault_pair_skew_rejections":0,"vault_cross_slot_joint_drop_suspected":0,"vault_pair_telemetry_rows":0,"vault_notifications_rejected":0,"vault_rpc_confirmation_checks":0,"vault_rpc_joint_drops_confirmed":0,"vault_rpc_joint_drops_not_confirmed":0,"vault_rpc_joint_drops_unknown":0,"slot_notifications":0,"slot_subscriptions_confirmed":0}
     last_quote=0.0
     last_liquidity_request=0.0
     source_cooldown_until=0.0
@@ -1443,13 +1450,20 @@ def run_embedded_liquidity_sensor():
                  amount_raw=item["qty"],requires_wallet_and_confirmed_fill=True)
 
     def ws_vault_balance(value,expected_mint,expected_owner):
-        parsed=((value or {}).get("data") or {}).get("parsed") or {}
-        info=parsed.get("info") or {}
+        if not isinstance(value,dict):return None
+        data=value.get("data")
+        if not isinstance(data,dict):return None
+        parsed=data.get("parsed")
+        if not isinstance(parsed,dict):return None
+        info=parsed.get("info")
+        if not isinstance(info,dict):return None
         if (parsed.get("type")!="account" or info.get("mint")!=expected_mint
                 or info.get("owner")!=expected_owner):
             return None
+        token_amount=info.get("tokenAmount")
+        if not isinstance(token_amount,dict):return None
         try:
-            amount=int(((info.get("tokenAmount") or {}).get("amount")))
+            amount=int(token_amount.get("amount"))
         except (TypeError,ValueError):
             return None
         return amount if amount>=0 else None
@@ -1778,6 +1792,7 @@ def run_embedded_liquidity_sensor():
                                     if side=="creator_token" else item["pool"])
                     amount=ws_vault_balance(payload.get("value"),mint,expected_owner)
                     if amount is None:
+                        stats["vault_notifications_rejected"]+=1
                         continue
                     if side in ("creator_lp","creator_token"):
                         base_key=side
@@ -2391,6 +2406,10 @@ def run_embedded_liquidity_sensor():
             assert ws_vault_balance({"data":{"parsed":{"type":"account",
                 "info":{"mint":base_mint,"owner":"wrong",
                         "tokenAmount":{"amount":"42"}}}}},base_mint,a) is None
+            assert ws_vault_balance({"data":["AA==","base64"]},base_mint,a) is None
+            assert ws_vault_balance({"data":{"parsed":[]}},base_mint,a) is None
+            assert ws_vault_balance({"data":{"parsed":{"type":"account",
+                "info":{"owner":a,"mint":base_mint,"tokenAmount":[]}}}},base_mint,a) is None
             assert feed_candidate({"pool":a,"mint":"2"*32,"qty":100,
                                    "liquidity_usd":15000})["initial"]==15000
             assert feed_candidate({"pool":"invalid","mint":"2"*32,"qty":100,
