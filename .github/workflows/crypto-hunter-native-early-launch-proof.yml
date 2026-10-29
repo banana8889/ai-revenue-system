@@ -1,5 +1,10 @@
 name: Crypto Hunter Genuine Pump.fun First-Seconds Feed
 on:
+  push:
+    branches: [main]
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-native-early-launch-proof.yml
   pull_request:
     paths:
       - crypto-hunter/forward_observer.py
