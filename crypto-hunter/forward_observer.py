@@ -1,5 +1,160 @@
 import sys
 
+def run_free_pumpfun_historical_study():
+    """Read-only 2026-10-15 CC-BY-4.0 event-confirmed Pump.fun cohorts.
+    Source: https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample
+    Price is ONLY an onchain reserve-based proxy; no fill is ever inferred.
+    """
+    import duckdb,glob,json,pathlib
+    root=pathlib.Path("evidence/history")
+    trades=sorted(glob.glob(str(root/"trade-*.parquet")))
+    events=root/"events.parquet"
+    if len(trades)!=3 or not events.is_file():
+        raise RuntimeError("missing trade shards or original onchain create events")
+    db=duckdb.connect()
+    db.execute("SET memory_limit='4GB'")
+    db.execute("SET threads=2")
+    db.execute("SET preserve_insertion_order=false")
+    trade_files="["+(",".join("'"+p+"'" for p in trades))+"]"
+    db.execute(f"""CREATE TEMP TABLE launches AS
+        SELECT a mint,min(ts) birth_ts,first(b ORDER BY ts,slot,idx) creator
+        FROM read_parquet('{events}') WHERE kind='create' AND length(a)>=32
+        GROUP BY a""")
+    launch_count=db.execute("SELECT count(*) FROM launches").fetchone()[0]
+    db.execute(f"""CREATE TEMP TABLE curve AS
+        SELECT t.mint,t.ts,t.slot,t.idx,t.wallet,t.side,t.r1,t.r2,t.r3,
+               t.r1/t.r2 price,l.birth_ts,l.creator
+        FROM read_parquet({trade_files}) t JOIN launches l ON t.mint=l.mint
+        WHERE t.venue='curve' AND t.failed=false
+          AND t.ts BETWEEN l.birth_ts AND l.birth_ts+900
+          AND t.r1>0 AND t.r2>0""")
+    landed=db.execute("SELECT count(*) FROM curve").fetchone()[0]
+    db.execute("""CREATE TEMP TABLE first30 AS
+        SELECT mint,min(birth_ts) birth_ts,count(*) n30,
+          count(*) FILTER(WHERE side='buy') buys30,
+          count(*) FILTER(WHERE side='sell') sells30,
+          count(DISTINCT wallet) FILTER(WHERE side='buy') buyers30,
+          count(DISTINCT wallet) FILTER(WHERE side='sell') sellers30,
+          count(*) FILTER(WHERE side='sell' AND wallet=creator) creator_sells30,
+          last(price ORDER BY ts,slot,idx) frozen_price30,
+          last(r1 ORDER BY ts,slot,idx) frozen_r1,
+          last(r2 ORDER BY ts,slot,idx) frozen_r2,
+          last(r3 ORDER BY ts,slot,idx) frozen_r3
+        FROM curve WHERE ts<=birth_ts+30
+        GROUP BY mint HAVING count(*)>=2 AND
+          last(price ORDER BY ts,slot,idx)>0""")
+    # Exclude day-boundary mints with less than a full 15m observation horizon.
+    db.execute("""CREATE TEMP TABLE eligible AS SELECT * FROM first30
+        WHERE birth_ts BETWEEN 1792022400 AND 1792108799-900""")
+    db.execute("""CREATE TEMP TABLE labels AS
+        SELECT f.mint,f.birth_ts,f.n30,f.buys30,f.sells30,f.buyers30,
+               f.sellers30,f.creator_sells30,f.frozen_price30,
+               f.frozen_r1,f.frozen_r2,f.frozen_r3,
+          count(c.mint) future_trades,
+          max(c.price/f.frozen_price30) peak_x,
+          min(c.price/f.frozen_price30) trough_x,
+          min(c.ts) FILTER(WHERE c.price>=2*f.frozen_price30) cross2,
+          min(c.ts) FILTER(WHERE c.price>=5*f.frozen_price30) cross5,
+          min(c.ts) FILTER(WHERE c.price>=11*f.frozen_price30) cross11
+        FROM eligible f LEFT JOIN curve c ON c.mint=f.mint AND
+             c.ts>f.birth_ts+30 AND c.ts<=f.birth_ts+300
+        GROUP BY ALL""")
+    db.execute("""CREATE TEMP TABLE covered AS
+        SELECT *,CASE WHEN buyers30>=5 THEN 'five_plus_buyers'
+                      ELSE 'under_five_buyers' END arm,
+          CASE WHEN birth_ts<1792065600 THEN 'first_12h'
+               ELSE 'last_12h_holdout' END split
+        FROM labels WHERE future_trades>0""")
+    group_rows=db.execute("""SELECT split,arm,count(*) n,
+       count(*) FILTER(WHERE cross2 IS NOT NULL) hits2,
+       count(*) FILTER(WHERE cross5 IS NOT NULL) hits5,
+       count(*) FILTER(WHERE cross11 IS NOT NULL) hits11,
+       count(*) FILTER(WHERE creator_sells30>0) creators_sold,
+       round(avg(n30),2) avg_n30
+       FROM covered GROUP BY split,arm ORDER BY split,arm""").fetchall()
+    db.execute("""CREATE TEMP TABLE winners AS
+       SELECT mint,birth_ts,buyers30,peak_x,cross11,frozen_price30
+       FROM covered WHERE cross11 IS NOT NULL""")
+    # Crash means reserve price moves BELOW 5.5x the 30-second baseline,
+    # after first reaching 11x. Neither crossing nor a collapse proves fill.
+    crash_rows=db.execute("""SELECT w.mint,w.birth_ts,w.buyers30,
+       w.peak_x,w.cross11,
+       min(t.ts) FILTER(WHERE t.price<=5.5*w.frozen_price30 AND
+                        t.ts>w.cross11 AND t.ts<=w.cross11+600) collapse_ts,
+       count(t.mint) observed_future_trades
+       FROM winners w LEFT JOIN curve t ON t.mint=w.mint
+          AND t.ts>w.cross11 AND t.ts<=w.cross11+600
+       GROUP BY w.mint,w.birth_ts,w.buyers30,w.peak_x,w.cross11
+       ORDER BY w.peak_x DESC""").fetchall()
+    counts=db.execute("""SELECT
+       (SELECT count(*) FROM launches),
+       (SELECT count(DISTINCT mint) FROM curve),
+       (SELECT count(*) FROM eligible),
+       (SELECT count(*) FROM covered),
+       (SELECT count(*) FROM covered WHERE cross11 IS NOT NULL),
+       (SELECT count(*) FROM labels WHERE future_trades=0)""").fetchone()
+    cases=[{"mint":mint,"birth_ts":birth,"buyers_first30":buyers,
+            "curve_peak_after30_x":round(peak,5),
+            "first_11x_seconds_after_launch":cross-birth,
+            "seconds_from_11x_until_below_5_5x":(
+                collapse-cross if collapse is not None else None),
+            "trade_observations_after_crossing":n,
+            "actual_buy_and_sell_not_measured":True}
+           for mint,birth,buyers,peak,cross,collapse,n in crash_rows]
+    falls=sorted(x["seconds_from_11x_until_below_5_5x"] for x in cases
+                 if x["seconds_from_11x_until_below_5_5x"] is not None)
+    keys=("launch_event_mints","launched_mints_with_landed_curve_trades",
+          "eligible_launches_with_first30_features_and_day_horizon",
+          "eligible_with_observed_post30_curve_trades","curve_11x",
+          "eligible_without_post30_trade_censored")
+    report={
+        "study_version":"historical_open_oct15_v1",
+        "source":"pumpdatafun/pump-fun-trades-sample",
+        "source_url":"https://huggingface.co/datasets/pumpdatafun/pump-fun-trades-sample",
+        "license":"CC BY 4.0",
+        "day":"2026-10-15","frozen_features_before_seconds":30,
+        "forward_curve_outcome_seconds":300,"crash_followup_seconds":600,
+        "time_split":"first_12h exploration; last_12h held out",
+        "source_shards":len(trades),"verified_create_events":launch_count,
+        "landed_curve_trades_joined_to_launch_within_15min":landed,
+        "cohort_counts":dict(zip(keys,counts)),
+        "comparison":[{
+             "time_split":split,"precommitted_arm":arm,
+             "observed_post30_cohort":n,"curve_2x":h2,"curve_5x":h5,
+             "curve_11x":h11,"curve_11x_fraction":round(h11/n,8) if n else None,
+             "creator_sold_first30":creator,"mean_first30_trades":mean}
+             for split,arm,n,h2,h5,h11,creator,mean in group_rows],
+        "curve_11x_cases":len(cases),
+        "crashes_below_5_5x_within_observed_10min":len(falls),
+        "median_seconds_to_halving_threshold_among_observed":(
+            falls[len(falls)//2] if falls else None),
+        "top_curve_11x_cases":cases[:30],
+        "all_curve_11x_cases":cases,
+        "limitations":[
+           "One historical day only, not six or twelve months",
+           "Five buyer threshold was set using earlier live data, not this day",
+           "No post30 trade means censored outcome, not a negative return",
+           "Reserve spot price is not a USD transaction, exit quote or fill",
+           "Failed attempts and non-PumpSwap DEX depth not quantified",
+           "No fees, MEV, rent, slippage or execution certainty",
+           "Some post-crossing collapses after the 15min horizon are censored"],
+        "orders":0,"trades_executed":0}
+    result=pathlib.Path("evidence/historical_onchain_oct15_study.json")
+    result.write_text(json.dumps(report,indent=2,allow_nan=False),encoding="utf-8")
+    short={k:v for k,v in report.items() if k not in (
+        "top_curve_11x_cases","all_curve_11x_cases")}
+    print("HISTORICAL_ONCHAIN_COHORT_RESULTS",
+          json.dumps(short,allow_nan=False),flush=True)
+    print("HISTORICAL_ONCHAIN_WINNER_MINTS",
+          json.dumps(cases[:15],allow_nan=False),flush=True)
+    if launch_count<20000 or landed<100000:
+        raise RuntimeError("historical sample data integrity threshold failed")
+
+if "--historical-open-sample" in sys.argv:
+    run_free_pumpfun_historical_study()
+    raise SystemExit(0)
+
+
 def decode_pumpfun_anchor_event(encoded):
     """Read-only strict Borsh prefix from official Pump.fun onchain IDL.
 
