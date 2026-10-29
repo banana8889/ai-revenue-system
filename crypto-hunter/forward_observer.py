@@ -4533,6 +4533,67 @@ print('PUMPFUN_PRECURSOR_TO_FORWARD_5M',json.dumps(
     {k:v for k,v in native_forward_report.items()
      if k!='paired_examples'},allow_nan=False))
 
+# Independent execution-route observations for native, pre-Gecko first30
+# candidates. This is NOT an ex post comparison of later winning pools:
+# admission is the first eligible completed mint within each UTC-minute arm.
+native_route_selected={}
+native_route_baseline={}
+native_route_five_minute={}
+for record in live_jsonl_evidence(
+        'evidence/pumpfun_native_first30_route_quotes.jsonl'):
+    mint=record.get('mint')
+    if not isinstance(mint,str) or not mint:continue
+    kind=record.get('kind')
+    if kind=='native_first30_quote_selection':
+        native_route_selected.setdefault(mint,record)
+    elif kind=='native_first30_quote_baseline':
+        native_route_baseline.setdefault(mint,record)
+    elif kind=='native_first30_five_minute_sell_quote':
+        native_route_five_minute.setdefault(mint,record)
+native_route_report={'as_of':r['at'],
+    'source':'prospectively selected native Pump.fun 30s flow, direct Jupiter read-only request',
+    'fixed_entry_quote_usdc':5,
+    'frozen_arms_selected_before_any_later_price':
+        ('five_plus_buyers','one_to_four_buyers'),
+    'arm_counts':{},'quote_only_not_actual_fills':True,
+    'missing_route_or_unobserved_followup_censored_not_losses':True,
+    'comparison_not_adjusted_for_selection_or_market_regimes':True,
+    'no_proven_profitability':True,'orders':0,'trades':0}
+for arm in ('five_plus_buyers','one_to_four_buyers'):
+    mint_ids=[mint for mint,rec in native_route_selected.items()
+              if rec.get('arm')==arm]
+    baseline=[native_route_baseline[mint] for mint in mint_ids
+              if mint in native_route_baseline]
+    initial_buy=[rec for rec in baseline
+                 if rec.get('buy_route_available') is True]
+    roundtrip=[rec for rec in baseline
+               if rec.get('sellback_route_available') is True]
+    later=[native_route_five_minute[mint] for mint in mint_ids
+           if mint in native_route_five_minute]
+    later_good=[rec for rec in later
+                if rec.get('sell_route_available') is True and
+                isinstance(rec.get('future_quote_multiple_x'),(int,float))]
+    native_route_report['arm_counts'][arm]={
+        'selected_before_future_outcomes':len(mint_ids),
+        'initial_quote_attempt_finished':len(baseline),
+        'initial_buy_route_available':len(initial_buy),
+        'two_sided_initial_buy_sellback_quote':len(roundtrip),
+        'five_minute_sell_quote_attempt_finished':len(later),
+        'five_minute_same_quantity_sell_quote_available':len(later_good),
+        'five_minute_quote_reached_2x_unfilled':sum(
+            rec['future_quote_multiple_x']>=2 for rec in later_good),
+        'five_minute_quote_reached_5x_unfilled':sum(
+            rec['future_quote_multiple_x']>=5 for rec in later_good),
+        'five_minute_quote_reached_11x_unfilled':sum(
+            rec['future_quote_multiple_x']>=11 for rec in later_good),
+        'unpaired_or_not_attempted_censored':len(mint_ids)-len(later),
+        'no_wallet_or_execution':True}
+with open('evidence/pumpfun_native_route_forward_report.json','w',
+          encoding='utf-8') as report:
+    json.dump(native_route_report,report,indent=2,allow_nan=False)
+print('PUMPFUN_NATIVE_FIRST30_ROUTE_VS_FIVE_MINUTE',json.dumps(
+    native_route_report,allow_nan=False))
+
 # Quantify first-quote cliff events from *actually observed* intraminute
 # Jupiter sell routes. Historical and new v1 windows both have timestamped
 # quotations; no unobserved intervals are interpolated, no fills assumed.
