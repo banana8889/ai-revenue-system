@@ -6261,6 +6261,84 @@ for candidate in priority:
         and not lp_flags and fresh_audit and not authority_risk)
     candidate['eligible_for_unattended_capital']=False
 
+# Refresh actual sellability for the strongest RECENT candidate signals.
+# This lane is deliberately excluded from frozen predictor/outcome ledgers:
+# selecting score leaders for quotes would otherwise bias research returns.
+priority_refresh_checked=0
+priority_refresh_available=0
+priority_refresh_excluded=0
+refresh_order=sorted(priority,key=lambda p:(
+    bool(p.get('risk_review_complete')),
+    p.get('score_heuristic_not_probability',0)),reverse=True)
+for candidate in refresh_order:
+    if priority_refresh_checked>=3:
+        break
+    if candidate.get('recent_liquid_sell_quote_observed'):
+        continue
+    if not 0<=candidate['signal_age_minutes']<=15:
+        continue
+    if candidate['last_known_liquidity_usd']<10000:
+        continue
+    if candidate.get('onchain_mint_authority_risk') is True or (
+            candidate.get('lp_structural_risk_tier')=='elevated'):
+        priority_refresh_excluded+=1
+        continue
+    pool=candidate['pool']
+    item=st.get(pool) or {}
+    shadow=item.get('shadow') or {}
+    entry=shadow.get('entry_quote') or {}
+    try:
+        qty=int(entry.get('token_raw') or 0)
+        liquidity_at=d.datetime.fromisoformat(item['last_liquidity_seen_at'])
+        liquidity_age=(d.datetime.now(d.timezone.utc)-liquidity_at).total_seconds()
+    except (ValueError,TypeError,KeyError):
+        continue
+    if qty<=0 or not 0<=liquidity_age<=90:
+        continue
+    mint=(candidate.get('token_id') or '').removeprefix('solana_')
+    if not 32<=len(mint)<=44:
+        continue
+    priority_refresh_checked+=1
+    request_at=d.datetime.now(d.timezone.utc)
+    fresh_quote=jupiter_quote(mint,USDC,qty)
+    response_at=d.datetime.now(d.timezone.utc)
+    quote_delay=(response_at-request_at).total_seconds()
+    liquidity_age_at_response=(response_at-liquidity_at).total_seconds()
+    available=bool(fresh_quote.get('ok') and
+        isinstance(fresh_quote.get('out_amount'),int) and
+        fresh_quote['out_amount']>0 and
+        0<=quote_delay<=15 and
+        0<=liquidity_age_at_response<=120)
+    candidate['priority_refresh_checked_at']=response_at.isoformat()
+    candidate['priority_refresh_response_seconds']=round(quote_delay,3)
+    candidate['priority_refresh_quote_available']=available
+    if available:
+        priority_refresh_available+=1
+        multiple=fresh_quote['out_amount']/5000000
+        candidate['last_quote_only_multiple']=round(multiple,8)
+        candidate['last_quote_age_minutes']=0.
+        candidate['fresh_sell_quote_within_15m']=True
+        candidate['current_liquidity_risk_reason']=(
+            'current_liquidity_drawdown_over_50pct'
+            if candidate['last_known_liquidity_usd']<
+                .5*candidate['initial_liquidity_usd'] else
+            'sell_quote_below_0_75x' if multiple<.75 else None)
+        candidate['recent_liquid_sell_quote_observed']=(
+            candidate['current_liquidity_risk_reason'] is None)
+    out({'kind':'live_priority_fresh_sell_quote','at':response_at.isoformat(),
+         'pool':pool,'token_id':candidate.get('token_id'),
+         'signal_age_minutes':candidate['signal_age_minutes'],
+         'liquidity_age_at_response_seconds':round(liquidity_age_at_response,3),
+         'quote_response_seconds':round(quote_delay,3),
+         'quote_available_and_timely':available,
+         'quote_only_multiple_x':candidate.get('last_quote_only_multiple') if available else None,
+         'missing_or_late_quote_is_censored':not available,
+         'capital_authorized':False,'orders':0,'trades':0})
+priority.sort(key=lambda row:(
+    bool(row.get('risk_review_complete')),
+    bool(row.get('recent_liquid_sell_quote_observed')),
+    row['score_heuristic_not_probability']),reverse=True)
+
 priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; never retrospective peak',
     'ranking_not_win_probability':True,'fresh_quote_is_not_a_fill':True,
     'tracked_eligible':len(priority),
@@ -6272,6 +6350,9 @@ priority_report={'at':now.isoformat(),'method':'live signal-time fundamentals; n
     'onchain_mint_authority_flags':sum(x['onchain_mint_authority_risk'] is True for x in priority),
     'mint_risk_review_pass_count':sum(x['mint_risk_review_passed'] for x in priority),
     'recent_liquid_quote_candidates':sum(p['recent_liquid_sell_quote_observed'] for p in priority),
+     'priority_refresh_checked':priority_refresh_checked,
+     'priority_refresh_timely_quotes':priority_refresh_available,
+     'priority_refresh_explicit_risk_exclusions':priority_refresh_excluded,
     'recent_quote_but_liquidity_failed':sum(p['fresh_sell_quote_within_15m'] and
         p['current_liquidity_risk_reason'] in
         ('current_liquidity_below_10000_usd','current_liquidity_drawdown_over_50pct') for p in priority),
