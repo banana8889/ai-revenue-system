@@ -566,6 +566,26 @@ def run_pumpfun_first_seconds_stream():
                           "first30_coverage_not_100pct_claimed":True,
                           "no_trading_method_proven":True},allow_nan=False),
               flush=True)
+        if PROOF:
+            persisted=0
+            if FEATURES.is_file():
+                with FEATURES.open(encoding="utf-8") as source:
+                    for line in source:
+                        try:
+                            row=json.loads(line)
+                        except ValueError:
+                            continue
+                        if (row.get("full_first_30s_observation") is True
+                                and row.get("no_execution") is True):
+                            persisted+=1
+            print("PUMPFUN_FIRST30_PERSISTENCE_RECEIPT",
+                  json.dumps({"observed_complete":stats["first30_complete"],
+                              "valid_saved_rows":persisted,
+                              "write_integrity_verified":
+                                  persisted==stats["first30_complete"],
+                              "read_only":True,"orders":0,"trades":0}),flush=True)
+            if persisted!=stats["first30_complete"]:
+                raise SystemExit("PUMPFUN_FIRST30_PERSISTENCE_FAILED")
         if PROOF and (not stats["program_subscribed"]
                       or stats["create_events_decoded"]<1
                       or stats["trade_events_decoded"]<1
@@ -3167,24 +3187,52 @@ def read_verified_pumpfun_launches():
         pass
     return launches
 
-def read_native_first30_features():
-    """Chronologically first complete observed 30s flow for each mint.
-    No future outcome or price used in assigning its early feature vector.
+def live_jsonl_evidence(path):
+    """Read real sensor records, including legacy literal-backslash-n separators.
+    No generated observations and no file rewrites; reject malformed spans.
     """
-    data={}
+    decoder=json.JSONDecoder()
     try:
-        with open('evidence/pumpfun_30s_features.jsonl',encoding='utf-8') as src:
-            for line in src:
-                try:row=json.loads(line)
-                except ValueError:continue
-                if not (row.get('mint') and
-                        row.get('full_first_30s_observation') is True
-                        and row.get('no_execution') is True):
+        with open(path,encoding='utf-8') as stream:
+            for line in stream:
+                try:
+                    row=json.loads(line)
+                    if isinstance(row,dict):yield row
                     continue
-                key=row['mint']
-                if key not in data or row['completion_at']<data[key]['completion_at']:
-                    data[key]=row
-    except OSError:pass
+                except ValueError:
+                    pass
+                if r'\n' not in line:
+                    continue
+                pos=0
+                while pos<len(line):
+                    while pos<len(line) and line[pos].isspace():
+                        pos+=1
+                    if pos>=len(line):break
+                    try:row,end=decoder.raw_decode(line,pos)
+                    except ValueError:break
+                    if not isinstance(row,dict):break
+                    if end<len(line) and not (
+                            line.startswith(r'\n',end) or
+                            line[end:].strip()=='' or
+                            line[end].isspace()):
+                        break
+                    yield row
+                    pos=end+2 if line.startswith(r'\n',end) else end
+    except OSError:
+        return
+
+def read_native_first30_features():
+    """Frozen real first-30s records, never recomputed from future prices."""
+    data={}
+    for row in live_jsonl_evidence('evidence/pumpfun_30s_features.jsonl'):
+        if not (row.get('mint') and
+                row.get('full_first_30s_observation') is True
+                and row.get('no_execution') is True and
+                isinstance(row.get('completion_at'),str)):
+            continue
+        key=row['mint']
+        if key not in data or row['completion_at']<data[key]['completion_at']:
+            data[key]=row
     return data
 
 for cycle in range(CYCLES_PER_RUN):
@@ -4245,33 +4293,23 @@ print('CRYPTO_EMERGENCE_RESEARCH_ARMS',json.dumps(emergence_report,allow_nan=Fal
 # Forward model-preparation only: compare PRE-OUTCOME 30-second signals to
 # independently recorded later 30s-to-5min onchain curve observations.
 # Pools absent from GeckoTerminal remain valid here. No hindsight selection.
-early_complete={}
-try:
-    with open('evidence/pumpfun_30s_features.jsonl',encoding='utf-8') as f:
-        for line in f:
-            try:row=json.loads(line)
-            except ValueError:continue
-            if (row.get('full_first_30s_observation') is True
-                    and row.get('mint') and row.get('completion_at')):
-                mint=row['mint']
-                if (mint not in early_complete or
-                        row['completion_at']<early_complete[mint]['completion_at']):
-                    early_complete[mint]=row
-except OSError:pass
+early_complete=read_native_first30_features()
 later_complete={}
-try:
-    with open('evidence/pumpfun_first30_to_5m_outcomes.jsonl',
-              encoding='utf-8') as f:
-        for line in f:
-            try:row=json.loads(line)
-            except ValueError:continue
-            if (row.get('complete_5m_telemetry_without_provider_gap') is True
-                    and row.get('mint') and row.get('outcome_frozen_at')):
-                mint=row['mint']
-                if (mint not in later_complete or
-                        row['outcome_frozen_at']<later_complete[mint]['outcome_frozen_at']):
-                    later_complete[mint]=row
-except OSError:pass
+for row in live_jsonl_evidence('evidence/pumpfun_first30_to_5m_outcomes.jsonl'):
+    if (row.get('complete_5m_telemetry_without_provider_gap') is True
+            and row.get('mint') and isinstance(row.get('outcome_frozen_at'),str)):
+        mint=row['mint']
+        if (mint not in later_complete or
+                row['outcome_frozen_at']<later_complete[mint]['outcome_frozen_at']):
+            later_complete[mint]=row
+print('PUMPFUN_NATIVE_PIPELINE_RECEIPT',json.dumps({
+    'as_of':now.isoformat(),
+    'verified_first30_feature_mints':len(early_complete),
+    'complete_post30_five_minute_outcomes':len(later_complete),
+    'same_mint_forward_pairs':len(early_complete.keys() & later_complete.keys()),
+    'unpaired_outcome_unknown_not_negative':True,
+    'feature_original_observation_preserved':True,
+    'actual_trades':0},allow_nan=False))
 frozen_strata={}
 for name in ('creator_sold_first30','creator_not_sold_first30',
              'five_plus_distinct_buyers','under_five_distinct_buyers'):
