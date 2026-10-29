@@ -5344,33 +5344,61 @@ for arm in ('five_plus_buyers','one_to_four_buyers'):
         'no_wallet_or_execution':True}
 
 native_route_report['short_horizon_quote_cohorts']={}
+native_route_report['short_horizon_protocol']='20261029_fixed60_120_v2'
+native_route_report['historical_pre_protocol_mints_excluded_from_short_horizon_denominator']=sum(
+    rec.get('fixed_horizon_protocol')!='20261029_fixed60_120_v2'
+    for rec in native_route_selected.values())
 for arm in ('five_plus_buyers','one_to_four_buyers'):
     for horizon in (60,120):
-        # Exact deterministic 1/2 assignment; ONLY mints with observed
-        # baseline buy-quote and frozen first30 selection enter this study.
-        assigned=[mint for mint,initial in native_route_baseline.items()
-             if mint in native_route_selected and
-             native_route_selected[mint].get('arm')==arm and
-             (60 if hashlib.sha256(mint.encode('ascii')).digest()[0]%2==0
-              else 120)==horizon]
+        # Denominator frozen prospectively at selection, never inferred
+        # backwards from a mint hash on legacy first30 cohorts.
+        assigned=[mint for mint,selection in native_route_selected.items()
+            if selection.get('fixed_horizon_protocol')==
+                    '20261029_fixed60_120_v2' and
+               selection.get('arm')==arm and
+               selection.get('fixed_horizon_s')==horizon]
         attempts=[native_route_fixed_horizon[mint] for mint in assigned
-                  if mint in native_route_fixed_horizon]
+                  if mint in native_route_fixed_horizon and
+                  native_route_fixed_horizon[mint].get(
+                      'fixed_horizon_s')==horizon]
+        early_entry=[mint for mint in assigned if
+                     native_route_baseline.get(mint,{}).get(
+                         'first30_buy_quote_early_valid') is True]
+        baseline_returned=sum(
+            mint in native_route_baseline for mint in assigned)
+        unusable_early_entry=baseline_returned-len(early_entry)
+        late_quotes=[rec for rec in attempts if
+                     rec.get('sell_route_available') is True and
+                     rec.get('within_30s_of_assigned_deadline') is not True]
         usable=[rec for rec in attempts
-                if rec.get('timely_sell_route_available') is True and
+                if rec.get('mint') in early_entry and
+                rec.get('timely_sell_route_available') is True and
                 isinstance(rec.get('raw_quote_multiple_x'),(int,float))]
+        quote_multiples=sorted(float(rec['raw_quote_multiple_x'])
+                               for rec in usable)
+        n=len(quote_multiples)
         native_route_report['short_horizon_quote_cohorts'][
             arm+':'+str(horizon)+'s']={
-            'assigned_at_frozen_baseline':len(assigned),
-            'read_only_quotes_returned':len(attempts),
-            'timely_read_only_quotes_available':len(usable),
-            'timely_quote_above_1x_no_fill':sum(
-                rec['raw_quote_multiple_x']>1 for rec in usable),
-            'timely_quote_at_least_2x_no_fill':sum(
-                rec['raw_quote_multiple_x']>=2 for rec in usable),
-            'timely_quote_at_least_11x_no_fill':sum(
-                rec['raw_quote_multiple_x']>=11 for rec in usable),
-            'no_returned_quote_censored_not_loss':len(assigned)-len(attempts),
-            'no_transaction_or_fill':True}
+            'prospectively_frozen_selected_mints':len(assigned),
+            'initial_buy_quote_baseline_returned':baseline_returned,
+            'initial_buy_quote_early_valid':len(early_entry),
+            'initial_buy_quote_late_or_invalid':unusable_early_entry,
+            'baseline_no_response_censored':len(assigned)-baseline_returned,
+            'read_only_horizon_quote_response':len(attempts),
+            'timely_read_only_horizon_quote_available':len(usable),
+            'horizon_quotes_returned_late_not_counted':len(late_quotes),
+            'timely_quote_above_1x_no_fill':sum(x>1 for x in quote_multiples),
+            'timely_quote_at_least_2x_no_fill':sum(x>=2 for x in quote_multiples),
+            'timely_quote_at_least_11x_no_fill':sum(x>=11 for x in quote_multiples),
+            'mean_quote_multiple_observed_only_no_fill':
+                (round(sum(quote_multiples)/n,6) if n else None),
+            'median_quote_multiple_observed_only_no_fill':
+                (round((quote_multiples[(n-1)//2]+quote_multiples[n//2])/2,6)
+                 if n else None),
+            'no_horizon_quote_observation_censored':
+                len(assigned)-len(attempts),
+            'quotes_not_fills':True,
+            'no_net_profit_evidence':True}
 native_route_report['stratum_counts']={}
 for stratum in ('five_plus_buyers:creator_sold',
                 'five_plus_buyers:creator_not_sold',
