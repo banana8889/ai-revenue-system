@@ -134,6 +134,8 @@ def run_free_pumpfun_historical_study():
           count(DISTINCT wallet) FILTER(WHERE side='buy') buyers30,
           count(DISTINCT wallet) FILTER(WHERE side='sell') sellers30,
           count(*) FILTER(WHERE side='sell' AND wallet=creator) creator_sells30,
+          min(ts) first_trade_unix_first30,
+          max(ts) last_trade_unix_first30,
           last(price ORDER BY ts,slot,idx) frozen_price30,
           last(r1 ORDER BY ts,slot,idx) frozen_r1,
           last(r2 ORDER BY ts,slot,idx) frozen_r2,
@@ -146,7 +148,9 @@ def run_free_pumpfun_historical_study():
         WHERE birth_ts BETWEEN 1792022400 AND 1792108799-900""")
     db.execute("""CREATE TEMP TABLE labels AS
         SELECT f.mint,f.birth_ts,f.n30,f.buys30,f.sells30,f.buyers30,
-               f.sellers30,f.creator_sells30,f.frozen_price30,
+               f.sellers30,f.creator_sells30,
+               f.first_trade_unix_first30,f.last_trade_unix_first30,
+               f.frozen_price30,
                f.frozen_r1,f.frozen_r2,f.frozen_r3,
           count(c.mint) future_trades,
           max(c.price/f.frozen_price30) peak_x,
@@ -193,6 +197,110 @@ def run_free_pumpfun_historical_study():
           AND t.ts>w.cross11 AND t.ts<=w.cross11+600
        GROUP BY w.mint,w.birth_ts,w.buyers30,w.peak_x,w.cross11
        ORDER BY w.peak_x DESC""").fetchall()
+    # Estimate *optimistic* same-quantity sell-back under curve reserves, not
+    # a trade, fill, available Jupiter quote, or true risk-adjusted return.
+    # A historical 0.02 SOL / 0.10 SOL purchase at the 30s reserve snapshot
+    # receives y*dx/(x+dx) tokens in the fee-free x*y idealisation.
+    # Sell at the FIRST observed 11x crossing and the FIRST event in 10..15s
+    # afterwards: x*token_qty/(y+token_qty), again fee-free. Never use the
+    # oracle maximum or a later checkpoint to pick a convenient exit.
+    # Require a trade in the first 5s AND within 20..30s; otherwise the
+    # initial 30s signal was not fully observable at both horizon edges.
+    db.execute("""CREATE TEMP TABLE depth_winners AS
+        SELECT * FROM covered WHERE cross11 IS NOT NULL
+          AND first_trade_unix_first30<=birth_ts+5
+          AND last_trade_unix_first30>=birth_ts+20
+          AND frozen_r1>0 AND frozen_r2>0""")
+    db.execute("""CREATE TEMP TABLE depth_crossings AS
+        SELECT w.mint,w.arm,w.split,w.birth_ts,w.cross11,w.buyers30,
+          c.r1 sell_r1,c.r2 sell_r2,c.ts observed_cross_unix,
+          w.frozen_r1 entry_r1,w.frozen_r2 entry_r2
+        FROM depth_winners w JOIN curve c
+          ON c.mint=w.mint AND c.ts=w.cross11
+          AND c.price>=11*w.frozen_price30
+        QUALIFY row_number() OVER(
+            PARTITION BY w.mint ORDER BY c.ts,c.slot,c.idx)=1""")
+    db.execute("""CREATE TEMP TABLE depth_after10 AS
+        SELECT w.mint,c.ts observed_after10_unix,
+          c.r1 sell10_r1,c.r2 sell10_r2
+        FROM depth_crossings w JOIN curve c ON c.mint=w.mint
+          AND c.ts BETWEEN w.cross11+10 AND w.cross11+15
+        QUALIFY row_number() OVER(
+            PARTITION BY w.mint ORDER BY c.ts,c.slot,c.idx)=1""")
+    db.execute("""CREATE TEMP TABLE depth_sizes AS
+        SELECT w.mint,w.arm,w.split,w.buyers30,w.birth_ts,w.cross11,
+          a.observed_after10_unix,
+          amounts.sol_lamports entry_lamports,
+          w.entry_r2*amounts.sol_lamports/
+             (w.entry_r1+amounts.sol_lamports) idealized_token_raw,
+          w.sell_r1*(w.entry_r2*amounts.sol_lamports/
+             (w.entry_r1+amounts.sol_lamports))/
+             (w.sell_r2+w.entry_r2*amounts.sol_lamports/
+             (w.entry_r1+amounts.sol_lamports))/
+             amounts.sol_lamports idealized_crossing_sell_x,
+          a.sell10_r1*(w.entry_r2*amounts.sol_lamports/
+             (w.entry_r1+amounts.sol_lamports))/
+             (a.sell10_r2+w.entry_r2*amounts.sol_lamports/
+             (w.entry_r1+amounts.sol_lamports))/
+             amounts.sol_lamports idealized_after10_sell_x
+        FROM depth_crossings w
+        LEFT JOIN depth_after10 a ON a.mint=w.mint
+        CROSS JOIN (SELECT 20000000.0 sol_lamports UNION ALL
+                    SELECT 100000000.0) amounts""")
+    depth_summary=db.execute("""SELECT split,arm,entry_lamports,
+        count(*) eligible_11x_with_strict_30s_coverage,
+        count(*) FILTER(WHERE idealized_crossing_sell_x>=11)
+            mathematically_11x_at_crossing,
+        count(*) FILTER(WHERE idealized_crossing_sell_x>=5)
+            mathematically_5x_at_crossing,
+        round(avg(idealized_crossing_sell_x),6) mean_upper_cross_x,
+        count(*) FILTER(WHERE observed_after10_unix IS NOT NULL)
+            ten_second_mark_observed,
+        count(*) FILTER(WHERE idealized_after10_sell_x>=11)
+            mathematically_11x_after10,
+        count(*) FILTER(WHERE idealized_after10_sell_x>=2)
+            mathematically_2x_after10,
+        round(avg(idealized_after10_sell_x),6) mean_observed_after10_upper_x
+        FROM depth_sizes GROUP BY split,arm,entry_lamports
+        ORDER BY split,arm,entry_lamports""").fetchall()
+    depth_cases=db.execute("""SELECT mint,birth_ts,buyers30,
+      cross11,observed_after10_unix,entry_lamports,
+      round(idealized_crossing_sell_x,6) crossing,
+      round(idealized_after10_sell_x,6) mark10
+      FROM depth_sizes ORDER BY mint,entry_lamports
+      LIMIT 40""").fetchall()
+    depth_metrics={
+        "fixed_historical_entry_sol_sizes":[0.02,0.10],
+        "entry_at_last_observed_20_to_30s_reserve":True,
+        "requires_first_trade_within_5s_and_last_first30_trade_after20s":True,
+        "idealized_constant_product_curve_no_fee_upper_bound_only":True,
+        "first_observed_11x_crossing_not_optimal_peak":True,
+        "first_later_trade_10_to_15_seconds_after_first_crossing":True,
+        "missing_10s_mark_right_censored_not_loss":True,
+        "no_inferred_trade_fill_jupiter_or_net_profit":True,
+        "by_time_arm_and_lot":[{
+           "split":split,"arm":arm,"entry_sol":amount/1e9,
+           "first11x_strict_window_cases":n,
+           "upper_bound_11x_at_first_crossing":cross11,
+           "upper_bound_5x_at_first_crossing":cross5,
+           "mean_upper_bound_first_crossing_x":mean_cross,
+           "observed_mark_10_to_15s_later":n10,
+           "upper_bound_11x_after_10s":after11,
+           "upper_bound_2x_after_10s":after2,
+           "mean_upper_bound_at_10s_when_observed_x":mean10}
+           for split,arm,amount,n,cross11,cross5,mean_cross,n10,
+               after11,after2,mean10 in depth_summary],
+        "case_examples":[{
+           "mint":mint,"birth_ts":birth,
+           "buyers_first30":buyers,"first_11x_crossing_unix":cross,
+           "10s_mark_unix":mark,"entry_sol":amount/1e9,
+           "idealized_first_crossing_multiple_x":qcross,
+           "idealized_10s_mark_multiple_x":qmark}
+           for mint,birth,buyers,cross,mark,amount,qcross,qmark in depth_cases],
+    }
+    print("HISTORICAL_IDEALIZED_DEPTH_REACTION",
+          json.dumps({k:v for k,v in depth_metrics.items()
+                      if k!="case_examples"},allow_nan=False),flush=True)
     counts=db.execute("""SELECT
        (SELECT count(*) FROM launches),
        (SELECT count(DISTINCT mint) FROM curve),
@@ -238,6 +346,7 @@ def run_free_pumpfun_historical_study():
             for split,arm,creator_arm,n,h2,h5,h11 in creator_subgroups],
         "creator_subgroup_hypothesis_not_out_of_time_validated":True,
         "curve_11x_cases":len(cases),
+        "idealized_exit_depth_reaction_study":depth_metrics,
         "crashes_below_5_5x_within_observed_10min":len(falls),
         "median_seconds_to_halving_threshold_among_observed":(
             falls[len(falls)//2] if falls else None),
@@ -255,7 +364,8 @@ def run_free_pumpfun_historical_study():
     result=pathlib.Path("evidence/historical_onchain_oct15_study.json")
     result.write_text(json.dumps(report,indent=2,allow_nan=False),encoding="utf-8")
     short={k:v for k,v in report.items() if k not in (
-        "top_curve_11x_cases","all_curve_11x_cases")}
+        "top_curve_11x_cases","all_curve_11x_cases",
+        "idealized_exit_depth_reaction_study")}
     print("HISTORICAL_ONCHAIN_COHORT_RESULTS",
           json.dumps(short,allow_nan=False),flush=True)
     print("HISTORICAL_ONCHAIN_WINNER_MINTS",
