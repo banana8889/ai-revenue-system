@@ -483,6 +483,72 @@ def run_free_pumpfun_historical_study():
           for split,arm,n,attempts,failed,failed_buy,mean in failure_rows]}
     print("HISTORICAL_CHAIN_ATTEMPT_FAILURE_COHORT",
           json.dumps(failure_report,allow_nan=False),flush=True)
+    # Compare two explicit first-30 risk/flow signals with unfiltered and
+    # first30 buyer-count controls. These thresholds are research hypotheses
+    # set AFTER prior-day exploration, so neither time split is a pristine
+    # independent holdout for this new rule. No fake trade profit claim.
+    db.execute("""CREATE TEMP TABLE pre_outcome_risk_cohorts AS
+       SELECT h.mint,h.split,h.horizon_s,h.entry_sol_lamports,h.mark_ts,
+              h.idealised_sell_x, rules.rule
+       FROM all_horizon_lots h
+       JOIN eligible e ON h.mint=e.mint
+       LEFT JOIN early_failed_attempts f ON e.mint=f.mint
+       CROSS JOIN (VALUES ('unfiltered_all'),
+                          ('at_least_five_buyers'),
+                          ('flow_plus_risk_guard_loose'),
+                          ('flow_plus_risk_guard_strict')) rules(rule)
+       WHERE rules.rule='unfiltered_all'
+         OR (rules.rule='at_least_five_buyers' AND e.buyers30>=5)
+         OR (rules.rule='flow_plus_risk_guard_loose'
+             AND e.buyers30>=5 AND e.n30>=10
+             AND e.buys30*1.0/e.n30>=0.65
+             AND e.creator_sells30=0
+             AND f.attempts_first30>=10
+             AND f.failed_first30*1.0/f.attempts_first30<=0.35)
+         OR (rules.rule='flow_plus_risk_guard_strict'
+             AND e.buyers30>=8 AND e.n30>=20
+             AND e.buys30*1.0/e.n30>=0.75
+             AND e.creator_sells30=0
+             AND f.attempts_first30>=20
+             AND f.failed_first30*1.0/f.attempts_first30<=0.25)""")
+    risk_rows=db.execute("""SELECT split,rule,horizon_s,entry_sol_lamports,
+       count(*) first30_selected_mints,
+       count(*) FILTER(WHERE mark_ts IS NOT NULL) actual_fresh_exit_marks,
+       count(*) FILTER(WHERE idealised_sell_x>1) optimistic_winners,
+       count(*) FILTER(WHERE idealised_sell_x>=2) optimistic_2x,
+       count(*) FILTER(WHERE idealised_sell_x>=11) optimistic_11x,
+       round(avg(idealised_sell_x),6) mean_idealised_x_marked_only,
+       round(median(idealised_sell_x),6) median_idealised_x_marked_only
+       FROM pre_outcome_risk_cohorts
+       GROUP BY split,rule,horizon_s,entry_sol_lamports
+       ORDER BY split,rule,horizon_s,entry_sol_lamports""").fetchall()
+    risk_report={
+       "study_type":"early-risk signal hypothesis (exploratory, not OOS)",
+       "first30_freeze_only":True,
+       "rules":{
+          "baseline":"all complete first30 features, no filter",
+          "five_buyers":"five or more distinct 30s buyer wallets",
+          "loose":"buyers>=5, trades>=10, buy share>=0.65, no creator sell, observed onchain first30 failed-attempt ratio<=0.35",
+          "strict":"buyers>=8, trades>=20, buy share>=0.75, no creator sell, observed onchain first30 failed-attempt ratio<=0.25"},
+       "realized_profit_or_executed_fills":False,
+       "provider_missing_exit_marks_censored":True,
+       "time_splits_not_truly_untouched_for_rule_tuning":True,
+       "costs_and_failed_simulated_exits_unmodelled":True,
+       "rows":[{
+           "split":split,"rule":rule,"exit_deadline_s":deadline,
+           "entry_sol":float(size)/1e9,"eligible_first30":n,
+           "fresh_pre_deadline_exit_mark":fresh,
+           "missing_mark_or_migrated":n-fresh,
+           "positive_upperbound_mark":wins,
+           "upperbound_2x":h2,"upperbound_11x":h11,
+           "mean_optimistic_x_conditional_on_mark":(
+               float(mean) if mean is not None else None),
+           "median_optimistic_x_conditional_on_mark":(
+               float(median) if median is not None else None)}
+           for split,rule,deadline,size,n,fresh,wins,h2,h11,
+               mean,median in risk_rows]}
+    print("HISTORICAL_PRE30_RISK_FILTER_FORWARD_REVIEW",
+          json.dumps(risk_report,allow_nan=False),flush=True)
     counts=db.execute("""SELECT
        (SELECT count(*) FROM launches),
        (SELECT count(DISTINCT mint) FROM curve),
@@ -532,6 +598,7 @@ def run_free_pumpfun_historical_study():
         "fixed_30s_to_5m_optimistic_all_candidates_study":fixed_marks_report,
         "fixed_deadline_all_candidate_study":horizon_report,
         "onchain_first30_attempt_failures":failure_report,
+        "pre30_risk_filter_60_120_300s_review":risk_report,
         "crashes_below_5_5x_within_observed_10min":len(falls),
         "median_seconds_to_halving_threshold_among_observed":(
             falls[len(falls)//2] if falls else None),
@@ -553,7 +620,8 @@ def run_free_pumpfun_historical_study():
         "idealized_exit_depth_reaction_study",
         "fixed_30s_to_5m_optimistic_all_candidates_study",
         "fixed_deadline_all_candidate_study",
-        "onchain_first30_attempt_failures")}
+        "onchain_first30_attempt_failures",
+        "pre30_risk_filter_60_120_300s_review")}
     print("HISTORICAL_ONCHAIN_COHORT_RESULTS",
           json.dumps(short,allow_nan=False),flush=True)
     print("HISTORICAL_ONCHAIN_WINNER_MINTS",
