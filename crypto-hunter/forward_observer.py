@@ -346,7 +346,6 @@ def run_free_pumpfun_historical_study():
        ORDER BY split,arm,entry_lamports""").fetchall()
     fixed_marks_report={
        "method":"frozen ~30s reserve, fixed ~300s followup no winner selection",
-       "no_fees_spread_slippage_ME V_or_execution":True,
        "no_fees_slippage_rent_mev_or_actual_fill":True,
        "right_censored_without_trades_within_290_to_310s":True,
        "quote_theoretical_constant_product_solana_not_filled_usd":True,
