@@ -301,6 +301,75 @@ def run_free_pumpfun_historical_study():
     print("HISTORICAL_IDEALIZED_DEPTH_REACTION",
           json.dumps({k:v for k,v in depth_metrics.items()
                       if k!="case_examples"},allow_nan=False),flush=True)
+    # Fixed 30-second -> fixed five-minute mark for ALL strict eligible
+    # candidates, NOT just the already-known 11x winners. Drop same-day
+    # cases without an actual landed reserve observation within +/-10s
+    # around t=300 as censored; never mark them at a future oracle maximum.
+    db.execute("""CREATE TEMP TABLE fixed_5m_marks AS
+       SELECT f.mint,f.birth_ts,f.buyers30,f.creator_sells30,
+         f.first_trade_unix_first30,f.last_trade_unix_first30,
+         f.frozen_r1,f.frozen_r2,c.ts mark_ts,
+         c.r1 mark_r1,c.r2 mark_r2
+       FROM eligible f LEFT JOIN curve c ON c.mint=f.mint AND
+         c.ts BETWEEN f.birth_ts+290 AND f.birth_ts+310
+       WHERE f.first_trade_unix_first30<=f.birth_ts+5 AND
+             f.last_trade_unix_first30>=f.birth_ts+20 AND
+             f.frozen_r1>0 AND f.frozen_r2>0
+       QUALIFY row_number() OVER(PARTITION BY f.mint
+          ORDER BY abs(c.ts-f.birth_ts-300),c.ts,c.slot,c.idx)=1""")
+    db.execute("""CREATE TEMP TABLE fixed_5m_lots AS
+       SELECT f.mint,CASE WHEN f.birth_ts<1792065600
+                THEN 'first_12h' ELSE 'last_12h_holdout' END split,
+           CASE WHEN f.buyers30>=5 THEN 'five_plus_buyers'
+                ELSE 'under_five_buyers' END arm,
+           CASE WHEN f.creator_sells30>0 THEN 'creator_sold'
+                ELSE 'creator_not_sold' END creator_arm,
+           f.mark_ts,amt.lamports entry_lamports,
+           f.mark_r1*(f.frozen_r2*amt.lamports/
+               (f.frozen_r1+amt.lamports))/
+           (f.mark_r2+f.frozen_r2*amt.lamports/
+               (f.frozen_r1+amt.lamports))/
+           amt.lamports optimistic_five_minute_x
+       FROM fixed_5m_marks f
+       CROSS JOIN (SELECT 20000000.0 lamports UNION ALL
+                   SELECT 100000000.0) amt""")
+    fixed_rows=db.execute("""SELECT split,arm,entry_lamports,
+         count(*) all_strict_30s_candidates,
+         count(*) FILTER(WHERE mark_ts IS NOT NULL) observed_5m_marks,
+         count(*) FILTER(WHERE optimistic_five_minute_x>1) optimistic_winners,
+         count(*) FILTER(WHERE optimistic_five_minute_x>=2) optimistic_2x,
+         count(*) FILTER(WHERE optimistic_five_minute_x>=11) optimistic_11x,
+         round(median(optimistic_five_minute_x),6) median_optimistic_x,
+         round(avg(optimistic_five_minute_x),6) mean_optimistic_x,
+         round(sum(optimistic_five_minute_x-1),6) sum_quote_proxy_net_of_principal
+       FROM fixed_5m_lots GROUP BY split,arm,entry_lamports
+       ORDER BY split,arm,entry_lamports""").fetchall()
+    fixed_marks_report={
+       "method":"frozen ~30s reserve, fixed ~300s followup no winner selection",
+       "no_fees_spread_slippage_ME V_or_execution":True,
+       "no_fees_slippage_rent_mev_or_actual_fill":True,
+       "right_censored_without_trades_within_290_to_310s":True,
+       "quote_theoretical_constant_product_solana_not_filled_usd":True,
+       "same_data_not_randomized_trade_strategy":True,
+       "rows":[{
+          "split":split,"arm":arm,"entry_sol":float(amount)/1e9,
+          "eligible_strict_first30_mints":total,
+          "actual_landed_reserve_mark_within_10s_of_5m":marks,
+          "missing_or_migrated_mark_censored":total-marks,
+          "optimistic_return_gt_1x":winners,
+          "optimistic_return_ge_2x":hits2,
+          "optimistic_return_ge_11x":hits11,
+          "median_optimistic_x_observed_only":(
+              float(median) if median is not None else None),
+          "mean_optimistic_x_observed_only":(
+              float(mean) if mean is not None else None),
+          "sum_optimistic_multiple_minus_one_observed_only":(
+              float(total_x) if total_x is not None else None),
+          "not_an_executable_return":True}
+          for split,arm,amount,total,marks,winners,hits2,hits11,
+              median,mean,total_x in fixed_rows]}
+    print("HISTORICAL_FIXED_30S_TO_5M_EXECUTION_UPPER_BOUND",
+        json.dumps(fixed_marks_report,allow_nan=False),flush=True)
     counts=db.execute("""SELECT
        (SELECT count(*) FROM launches),
        (SELECT count(DISTINCT mint) FROM curve),
@@ -347,6 +416,7 @@ def run_free_pumpfun_historical_study():
         "creator_subgroup_hypothesis_not_out_of_time_validated":True,
         "curve_11x_cases":len(cases),
         "idealized_exit_depth_reaction_study":depth_metrics,
+        "fixed_30s_to_5m_optimistic_all_candidates_study":fixed_marks_report,
         "crashes_below_5_5x_within_observed_10min":len(falls),
         "median_seconds_to_halving_threshold_among_observed":(
             falls[len(falls)//2] if falls else None),
@@ -365,7 +435,8 @@ def run_free_pumpfun_historical_study():
     result.write_text(json.dumps(report,indent=2,allow_nan=False),encoding="utf-8")
     short={k:v for k,v in report.items() if k not in (
         "top_curve_11x_cases","all_curve_11x_cases",
-        "idealized_exit_depth_reaction_study")}
+        "idealized_exit_depth_reaction_study",
+        "fixed_30s_to_5m_optimistic_all_candidates_study")}
     print("HISTORICAL_ONCHAIN_COHORT_RESULTS",
           json.dumps(short,allow_nan=False),flush=True)
     print("HISTORICAL_ONCHAIN_WINNER_MINTS",
