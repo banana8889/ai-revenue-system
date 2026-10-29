@@ -33,8 +33,14 @@ jobs:
               path=root/name
               return [json.loads(line) for line in path.read_text(
                   encoding='utf-8').splitlines()] if path.is_file() else []
-          early={row['mint']:row for row in read('pumpfun_30s_features.jsonl')
-                 if row.get('full_first_30s_observation') is True}
+          full={row['mint']:row for row in read('pumpfun_30s_features.jsonl')
+                if row.get('full_first_30s_observation') is True}
+          partial={row['mint']:row for row in read('pumpfun_30s_partial10_features.jsonl')
+                   if row.get('full_first_30s_observation') is False
+                   and row.get('early_window_coverage')=='first_observed_5_to_10s'
+                   and row.get('censored_reason')=='late_discovery'}
+          assert not (set(full)&set(partial))
+          early={**full,**partial}
           rows=read('pumpfun_native_first30_route_quotes.jsonl')
           selected={row['mint']:row for row in rows
                     if row.get('kind')=='native_first30_quote_selection'}
@@ -45,6 +51,12 @@ jobs:
           assert all(row['mint'] in early and
                      row['completed_first30_at']==early[row['mint']]['completion_at']
                      and row.get('selected_before_future_prices') is True
+                     and row.get('early_window_coverage')==
+                         early[row['mint']].get('early_window_coverage')
+                     and (row.get('partial10_is_not_full_first30_coverage') is True)==
+                         (row['mint'] in partial)
+                     and row.get('arm','').startswith(
+                         'partial10_' if row['mint'] in partial else 'early5_')
                      for row in selected.values())
           assert all(row['mint'] in selected for row in baselines)
           assert all(row['mint'] in selected for row in later)
@@ -89,7 +101,10 @@ jobs:
           assert all(row.get('orders')==row.get('trades')==0
                      and row.get('no_fill') is True for row in rows)
           print('NATIVE_FIRST30_ROUTE_PROOF',json.dumps({
-              'frozen_first30_feature_mints':len(early),
+              'frozen_first30_feature_mints':len(full),
+              'separate_partial10_feature_mints':len(partial),
+              'partial10_selected_for_quotes':sum(
+                  row['mint'] in partial for row in selected.values()),
               'prospectively_selected_mints':len(selected),
               'read_only_quote_baselines':len(baselines),
               'five_minute_sell_quotes_recorded':len(later),
@@ -112,6 +127,7 @@ jobs:
           path: |
             evidence/pumpfun_first_seconds_live.jsonl
             evidence/pumpfun_30s_features.jsonl
+            evidence/pumpfun_30s_partial10_features.jsonl
             evidence/pumpfun_native_first30_route_quotes.jsonl
           if-no-files-found: warn
           retention-days: 14
