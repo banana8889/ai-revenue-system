@@ -1246,6 +1246,7 @@ def run_pumpfun_first_seconds_stream():
         return {"_missing_reason":"program_create_accounts_not_parsed"}
     async def main():
         until=time.monotonic()+DURATION
+        sensor_session_id=stamp()
         stop_signal_count=0
         def graceful_sigterm(signum,frame):
             # The prospective GitHub runner stops its child via SIGTERM.
@@ -1308,7 +1309,9 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_control_deferred_busy"]=0
         stats["native_quote_selection_lanes"]={"strict_flow":0,"loose_flow":0,"control":0}
         def native_route_record(kind,**data):
-            row={"kind":kind,"at":stamp(),**data,"orders":0,"trades":0,
+            row={"kind":kind,"at":stamp(),
+                 "sensor_session_id":sensor_session_id,
+                 **data,"orders":0,"trades":0,
                  "no_fill":True,"quote_not_an_executable_transaction":True}
             with NATIVE_ROUTES.open("a",encoding="utf-8") as output:
                 output.write(json.dumps(row,separators=(",",":"),
@@ -2203,9 +2206,11 @@ def run_pumpfun_first_seconds_stream():
                 outcome_category=category,missing_is_not_filled_loss=True,
                 eligible_early_buy_quote=True)
         stats["native_5m_cohort_outcome_classes"]=native_five_minute_cohort_status
+        stats["native_sensor_session_id"]=sensor_session_id
         stats["graceful_sigterm_received"]=stop_signal_count
         stats["native_quote_outcomes_audited_before_shutdown"]=len(native_route_state)
         event("pumpfun_early_sensor_shutdown_receipt",
+              sensor_session_id=sensor_session_id,
               graceful_sigterm_received=stop_signal_count,
               live_quote_selected=stats["native_quote_selected"],
               early_buy_quote_valid=stats["native_quote_early_buy_valid"],
