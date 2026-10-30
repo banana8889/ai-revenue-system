@@ -819,6 +819,57 @@ def run_sensor_only_backtest():
             if h else None)
         dct.pop("60_120s_sum_multiple_scaled_micro",None)
         report.append({"period":period,"sensor_arm":arm,**dct})
+    # A hundred total selected mints are NOT a hundred strong-flow signals.
+    # Do not promote an apparent 3/3 win rate from a tiny selected stratum.
+    holdout={row["sensor_arm"]:row for row in report
+             if row["period"]=="post_protocol_freeze"}
+    def wilson_bounds(success,total):
+        if not total:
+            return None
+        z=1.96
+        p=success/total
+        denom=1+z*z/total
+        center=(p+z*z/(2*total))/denom
+        half=z*math.sqrt(p*(1-p)/total+z*z/(4*total*total))/denom
+        return [round(max(0,center-half),6),
+                round(min(1,center+half),6)]
+    cohort_gate={}
+    for arm in ("strict_flow","positive_flow","control"):
+        dct=holdout.get(arm,{})
+        signals=dct.get("selected_before_future_price",0)
+        fresh=dct.get("5m_fresh_exit_quote",0)
+        wins=dct.get("5m_above_2pct_cost_buffer",0)
+        not_observed=dct.get("5m_not_observed",0)
+        unavailable=dct.get("5m_route_missing_or_stale_censored",0)
+        cohort_gate[arm]={
+            "frozen_sensor_signals":signals,
+            "fresh_5m_sell_quotes":fresh,
+            "quoted_winners_above_2pct_cost_buffer":wins,
+            "missing_or_unavailable_5m_sell_quotes":not_observed+unavailable,
+            "raw_quote_fraction_of_all_signals":round(fresh/signals,6)
+                 if signals else None,
+            "quote_only_winner_fraction_of_observed":round(wins/fresh,6)
+                 if fresh else None,
+            "wilson95_quote_only_win_fraction_observed":wilson_bounds(wins,fresh),
+            "not_realized_profit":True}
+    strong=cohort_gate["strict_flow"]
+    # Predeclared *minimum evidence* to reconsider a hypothesis, not an
+    # automatic trading threshold, and not a guarantee of significance.
+    strict_enough=(strong["frozen_sensor_signals"]>=100 and
+                   strong["fresh_5m_sell_quotes"]>=80)
+    holdout_decision={
+        "selection_frozen_at_utc":"2026-10-30T06:24:00Z",
+        "sensor_rules_not_retuned_after_freeze":True,
+        "research_minimum_strict_signals":100,
+        "research_minimum_strict_valid_exit_quotes":80,
+        "strict_sample_threshold_met":strict_enough,
+        "decision":"QUOTE_ONLY_EVIDENCE_READY_FOR_SKEPTICAL_REVIEW"
+             if strict_enough else "INSUFFICIENT_STRICT_SENSOR_SAMPLE",
+        "selection_and_quote_censoring_may_be_nonrandom":True,
+        "quote_only_wilson_bound_is_not_realizable_return_confidence":True,
+        "no_live_capital_permission_from_this_gate":True,
+        "no_realized_profit_claim":True,
+        "arms":cohort_gate}
     result={
         "version":"sensor_only_quote_audit_v1",
         "source":"confirmed first30 onchain buyers/trades/buy_share/creator_sells",
@@ -843,7 +894,8 @@ def run_sensor_only_backtest():
         "corrupt_source_lines_skipped":dict(invalid),
         "historical_joined_json_objects_recovered":dict(recovered),
         "unmatched_mints":dict(unmatched),
-        "rows":report,"orders":0,"trades":0}
+        "rows":report,"holdout_decision":holdout_decision,
+        "orders":0,"trades":0}
     root.mkdir(exist_ok=True)
     (root/"sensor_only_backtest.json").write_text(
         json.dumps(result,indent=2,allow_nan=False),encoding="utf-8")
