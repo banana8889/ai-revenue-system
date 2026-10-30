@@ -324,6 +324,39 @@ jobs:
               'no_inferred_losses_for_missing_sell_routes':True,
               'no_live_trades':True},allow_nan=False))
           PY
+      - name: Evaluate frozen sensor-only first30 cohorts from this exact Mainnet run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 crypto-hunter/forward_observer.py --sensor-only-backtest
+          python3 - <<'PY'
+          import collections,json,pathlib
+          root=pathlib.Path('evidence')
+          result=json.loads((root/'sensor_only_backtest.json').read_text(encoding='utf-8'))
+          assert result['features_frozen_before_later_price'] is True
+          assert result['no_chart_peaks_used_for_selection'] is True
+          assert result['strict_5m_gate_requires_response_timestamp_in_300_to_330s'] is True
+          assert result['orders']==result['trades']==0
+          rows=[json.loads(s) for s in (root/'pumpfun_native_first30_route_quotes.jsonl').read_text(encoding='utf-8').splitlines()]
+          audits=[row for row in rows if row.get('kind')=='native_first30_five_minute_censor_audit']
+          assert len(audits)>0
+          for row in audits:
+              assert row.get('eligible_early_buy_quote') is True
+              assert row.get('missing_is_not_filled_loss') is True
+              assert row.get('orders')==row.get('trades')==0
+          counts=collections.Counter(row['outcome_category'] for row in audits)
+          receipt={'mainnet_run_id':'${{ github.run_id }}',
+                   'scan_repo_commit':'${{ github.sha }}',
+                   'current_run_quote_audits':len(audits),
+                   'current_run_outcome_class_counts':dict(counts),
+                   'holdout_decision':result['holdout_decision']['decision'],
+                   'holdout_strict':result['holdout_decision']['arms']['strict_flow'],
+                   'response_timestamps_required':True,
+                   'not_filled_profit':True,'trades':0}
+          (root/'sensor_only_live_receipt.json').write_text(
+              json.dumps(receipt,indent=2,allow_nan=False),encoding='utf-8')
+          print('SENSOR_ONLY_SAME_RUN_PROOF',json.dumps(receipt,allow_nan=False))
+          PY
       - name: Validate checkpoint including after collector failure
         if: always()
         id: state_integrity
