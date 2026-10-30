@@ -1,5 +1,33 @@
 import sys
 
+def native_curve_quote_tier(current_x,highest_previously_requested):
+    """Select exactly one newly crossed chain tier; never infer a sell fill."""
+    import math
+    try:
+        x=float(current_x)
+        previous=int(highest_previously_requested)
+    except (ValueError,TypeError,OverflowError):
+        return 0
+    if not (math.isfinite(x) and x>0 and previous>=0):
+        return 0
+    return next((tier for tier in (11,5,2)
+                 if x>=tier and tier>previous),0)
+
+if "--native-curve-tier-selftest" in sys.argv:
+    assert native_curve_quote_tier(1.99,0)==0
+    assert native_curve_quote_tier(2.,0)==2
+    assert native_curve_quote_tier(5.,0)==5
+    assert native_curve_quote_tier(11.,0)==11
+    assert native_curve_quote_tier(11.1,11)==0
+    assert native_curve_quote_tier(5.2,11)==0
+    assert native_curve_quote_tier(6.,2)==5
+    assert native_curve_quote_tier(float("nan"),0)==0
+    assert native_curve_quote_tier(float("inf"),0)==0
+    assert native_curve_quote_tier(-4,0)==0
+    assert native_curve_quote_tier("bad",0)==0
+    print("NATIVE_CURVE_TIER_NO_DUPLICATES_SELFTEST=PASS")
+    raise SystemExit(0)
+
 def run_free_multiday_launch_study():
     """Independent several-week recorder; risk/graduate labels, not 11x exits.
     All predictors are frozen before labels, feature sampling is nonrandom.
@@ -1950,8 +1978,8 @@ def run_pumpfun_first_seconds_stream():
                                             # Trigger at the highest *currently observed*
                                             # chain tier only, rather than three identical
                                             # sell requests on one 11x trade event.
-                                            tier=max((level for level in (2,5,11)
-                                                      if current_x>=level),default=0)
+                                            tier=native_curve_quote_tier(
+                                                current_x,account["max_curve_quote_tier"])
                                             if (tier>account["max_curve_quote_tier"]
                                                     and len(native_route_tasks)<4):
                                                 account["max_curve_quote_tier"]=tier
