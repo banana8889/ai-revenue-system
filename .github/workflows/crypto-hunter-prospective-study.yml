@@ -294,6 +294,36 @@ jobs:
           with open(state,encoding='utf-8') as f:checkpoint=json.load(f)
           print('LIVE_STUDY_HEARTBEAT',json.dumps({'at':receipt['at'],'samples':len(samples),'pools':len(pools),'tracked':len(checkpoint),'signals':receipt.get('prospective_signals',0),'exits':receipt.get('paper_exits',0),'trades':0,'errors':len(errors)}))
           PY
+      - name: Verify early-sensor SIGTERM persisted complete quote-censor audit
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import collections,json,pathlib
+          evidence=pathlib.Path('evidence/pumpfun_first_seconds_live.jsonl')
+          if not evidence.is_file():
+              raise SystemExit('FAIL: missing Pump.fun live sensor shutdown evidence')
+          receipts=[]
+          for line in evidence.read_text(encoding='utf-8').splitlines():
+              try: row=json.loads(line)
+              except (ValueError,TypeError): continue
+              if row.get('kind')=='pumpfun_early_sensor_shutdown_receipt':
+                  receipts.append(row)
+          if not receipts:
+              raise SystemExit('FAIL: Pump.fun sensor stopped without final audit')
+          receipt=receipts[-1]
+          classes=receipt.get('five_minute_outcome_classes') or {}
+          n=sum(classes.values())
+          if (receipt.get('all_early_valid_quotes_classified') is not True
+                  or n!=receipt.get('early_buy_quote_audited')
+                  or receipt.get('orders')!=0 or receipt.get('trades')!=0):
+              raise SystemExit('FAIL: Pump.fun end-of-run cohort not fully censored')
+          print('PUMPFUN_GRACEFUL_RESEARCH_SHUTDOWN',json.dumps({
+              'sigterm_received':receipt.get('graceful_sigterm_received'),
+              'early_buy_quote_audited':n,
+              'five_minute_classes':classes,
+              'no_inferred_losses_for_missing_sell_routes':True,
+              'no_live_trades':True},allow_nan=False))
+          PY
       - name: Validate checkpoint including after collector failure
         if: always()
         id: state_integrity
