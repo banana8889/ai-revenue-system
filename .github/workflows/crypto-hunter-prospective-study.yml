@@ -337,25 +337,79 @@ jobs:
           assert result['no_chart_peaks_used_for_selection'] is True
           assert result['strict_5m_gate_requires_response_timestamp_in_300_to_330s'] is True
           assert result['orders']==result['trades']==0
-          rows=[json.loads(s) for s in (root/'pumpfun_native_first30_route_quotes.jsonl').read_text(encoding='utf-8').splitlines()]
-          audits=[row for row in rows if row.get('kind')=='native_first30_five_minute_censor_audit']
-          assert len(audits)>0
-          for row in audits:
-              assert row.get('eligible_early_buy_quote') is True
-              assert row.get('missing_is_not_filled_loss') is True
-              assert row.get('orders')==row.get('trades')==0
-          counts=collections.Counter(row['outcome_category'] for row in audits)
-          receipt={'mainnet_run_id':'${{ github.run_id }}',
-                   'scan_repo_commit':'${{ github.sha }}',
-                   'current_run_quote_audits':len(audits),
-                   'current_run_outcome_class_counts':dict(counts),
-                   'holdout_decision':result['holdout_decision']['decision'],
-                   'holdout_strict':result['holdout_decision']['arms']['strict_flow'],
-                   'response_timestamps_required':True,
-                   'not_filled_profit':True,'trades':0}
+          live_rows=[json.loads(line) for line in
+              (root/'pumpfun_first_seconds_live.jsonl').read_text(
+                  encoding='utf-8').splitlines()]
+          shutdown=[row for row in live_rows
+                    if row.get('kind')=='pumpfun_early_sensor_shutdown_receipt']
+          assert len(shutdown)==1
+          session=shutdown[0].get('sensor_session_id')
+          assert isinstance(session,str) and session
+          rows=[json.loads(line) for line in
+              (root/'pumpfun_native_first30_route_quotes.jsonl').read_text(
+                  encoding='utf-8').splitlines()
+              if line.strip()]
+          current=[row for row in rows if row.get('sensor_session_id')==session]
+          assert current and all(row.get('orders')==row.get('trades')==0
+                                 for row in current)
+          selection={row['mint']:row for row in current
+                     if row.get('kind')=='native_first30_quote_selection'}
+          audits={row['mint']:row for row in current
+                  if row.get('kind')=='native_first30_five_minute_censor_audit'}
+          exits={row['mint']:row for row in current
+                 if row.get('kind')=='native_first30_five_minute_sell_quote'}
+          assert len(selection)>0 and len(audits)>0
+          assert len(selection)==sum(row.get('kind')=='native_first30_quote_selection'
+                                     for row in current)
+          assert len(audits)==sum(row.get('kind')=='native_first30_five_minute_censor_audit'
+                                  for row in current)
+          assert set(audits)<=set(selection)
+          assert len(audits)==shutdown[0]['early_buy_quote_audited']
+          assert all(row.get('eligible_early_buy_quote') is True
+                     and row.get('missing_is_not_filled_loss') is True
+                     and row.get('orders')==row.get('trades')==0
+                     for row in audits.values())
+          categories=collections.Counter(row['outcome_category']
+                                        for row in audits.values())
+          assert dict(categories)==shutdown[0]['five_minute_outcome_classes']
+          lane_report={}
+          for lane in ('strict_flow','loose_flow','control'):
+              mints=[mint for mint,row in selection.items()
+                     if row.get('selection_lane')==lane]
+              valid=[mint for mint in mints if mint in audits
+                     and audits[mint]['outcome_category']=='timely_quote_available']
+              gross=[]
+              for mint in valid:
+                  q=exits.get(mint)
+                  assert q and q['within_30s_of_5m_deadline'] is True
+                  assert q['sell_route_available'] is True
+                  val=q.get('future_quote_multiple_x')
+                  assert isinstance(val,(int,float)) and val>0
+                  gross.append(val)
+              lane_report[lane]={
+                  'signals_selected_before_future_quotes':len(mints),
+                  'verified_early_entry_quotes':sum(mint in audits for mint in mints),
+                  'timely_sell_quotes_available':len(valid),
+                  'timely_exit_quotes_above_2pct_buffer':sum(x>1.02 for x in gross),
+                  'average_quoted_exit_multiple_of_5usd':(
+                      round(sum(gross)/len(gross),6) if gross else None),
+                  'missing_quote_is_not_a_filled_loss':True}
+          assert sum(v['signals_selected_before_future_quotes']
+                     for v in lane_report.values())==len(selection)
+          audit={'mainnet_run_id':'${{ github.run_id }}',
+                 'scan_repo_commit':'${{ github.sha }}',
+                 'sensor_session_id':session,
+                 'current_run_quote_selections':len(selection),
+                 'current_run_quote_audits':len(audits),
+                 'current_run_outcome_class_counts':dict(categories),
+                 'live_sensor_lane_quote_economics':lane_report,
+                 'holdout_decision':result['holdout_decision']['decision'],
+                 'holdout_strict':result['holdout_decision']['arms']['strict_flow'],
+                 'response_timestamps_required':True,
+                 'not_filled_profit':True,'trades':0}
           (root/'sensor_only_live_receipt.json').write_text(
-              json.dumps(receipt,indent=2,allow_nan=False),encoding='utf-8')
-          print('SENSOR_ONLY_SAME_RUN_PROOF',json.dumps(receipt,allow_nan=False))
+              json.dumps(audit,indent=2,allow_nan=False),encoding='utf-8')
+          print('SENSOR_ONLY_SAME_RUN_PROOF',json.dumps(audit,allow_nan=False))
           PY
       - name: Validate checkpoint including after collector failure
         if: always()
