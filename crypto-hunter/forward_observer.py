@@ -1164,6 +1164,8 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_fixed_horizon_attempted"]=0
         stats["native_quote_fixed_horizon_available"]=0
         stats["native_quote_curve_crossings_selected"]=0
+        stats["native_quote_curve_crossings_selected_full"]=0
+        stats["native_quote_curve_crossings_selected_partial10"]=0
         stats["native_quote_curve_crossings_checked"]=0
         stats["native_quote_curve_crossings_available"]=0
         stats["native_quote_curve_crossings_available_within_10s"]=0
@@ -1312,6 +1314,7 @@ def run_pumpfun_first_seconds_stream():
                 if buy_early_valid:
                     native_route_state[mint]={
                         "mint":mint,"arm":arm,
+                        "early_window_coverage":row.get("early_window_coverage"),
                         "created_at_unix":row["created_at_unix"],
                         "initial_quote_started_at":quoted_at,
                         "token_raw":qty,
@@ -1327,7 +1330,8 @@ def run_pumpfun_first_seconds_stream():
                         # SHA256 assignment cannot see future outcomes.
                         "fixed_horizon_s":horizon,
                         "fixed_horizon_scheduled":False,
-                        "curve_tiers_scheduled":set()}
+                        "curve_tiers_scheduled":set(),
+                        "max_curve_quote_tier":0}
         async def quote_native_curve_crossing(mint,state,tier,curve_x,
                                                trade_time,signal_at):
             # The *same token amount* from an independent actual $5 buy
@@ -1366,6 +1370,7 @@ def run_pumpfun_first_seconds_stream():
                     stats["native_quote_curve_crossings_available_within_10s"]+=1
                 native_route_record("native_first30_curve_cross_sell_quote",
                     mint=mint,arm=state["arm"],tier_x=tier,
+                    early_window_coverage=state.get("early_window_coverage"),
                     chain_trade_timestamp_unix=trade_time,
                     detected_at=signal_at,quote_started_at=quote_started,
                     quote_response_at=quote_returned,
@@ -1929,16 +1934,8 @@ def run_pumpfun_first_seconds_stream():
                                                 key="first_cross_"+str(multiplier)+"x_at"
                                                 if price_x>=multiplier and later[key] is None:
                                                     later[key]=observed["timestamp_unix"]
-                                                    account=native_route_state.get(mint)
-                                                    if (account and
-                                                            multiplier not in account["curve_tiers_scheduled"]
-                                                            and len(native_route_tasks)<4):
-                                                        account["curve_tiers_scheduled"].add(multiplier)
-                                                        stats["native_quote_curve_crossings_selected"]+=1
-                                                        start_native_task(
-                                                            quote_native_curve_crossing(
-                                                                mint,account,multiplier,price_x,
-                                                                observed["timestamp_unix"],stamp()))
+                                            # Quote alerts run via native_route_state below,
+                                            # including separately censored partial10 signals.
                                     account=native_route_state.get(mint)
                                     if account is not None and observed["virtual_token_raw"]>0:
                                         account_age=(observed["timestamp_unix"]-
@@ -1950,6 +1947,24 @@ def run_pumpfun_first_seconds_stream():
                                             current_x=(observed["virtual_sol_lamports"]*base_tok/
                                                        (observed["virtual_token_raw"]*base_sol))
                                             peak_x=account["post30_peak_x"]
+                                            # Trigger at the highest *currently observed*
+                                            # chain tier only, rather than three identical
+                                            # sell requests on one 11x trade event.
+                                            tier=max((level for level in (2,5,11)
+                                                      if current_x>=level),default=0)
+                                            if (tier>account["max_curve_quote_tier"]
+                                                    and len(native_route_tasks)<4):
+                                                account["max_curve_quote_tier"]=tier
+                                                account["curve_tiers_scheduled"].add(tier)
+                                                stats["native_quote_curve_crossings_selected"]+=1
+                                                coverage=account.get("early_window_coverage")
+                                                if coverage=="first_observed_5_to_10s":
+                                                    stats["native_quote_curve_crossings_selected_partial10"]+=1
+                                                else:
+                                                    stats["native_quote_curve_crossings_selected_full"]+=1
+                                                start_native_task(quote_native_curve_crossing(
+                                                    mint,account,tier,current_x,
+                                                    observed["timestamp_unix"],stamp()))
                                             if (current_x<=0.8*peak_x
                                                     and not account["drawdown_scheduled"]
                                                     and len(native_route_tasks)<3):
