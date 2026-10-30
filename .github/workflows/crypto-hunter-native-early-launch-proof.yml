@@ -98,6 +98,37 @@ jobs:
                   base.get('first30_buy_quote_early_valid') is True
                   for base in baselines)
               for row in fixed)
+          # End-of-study denominator: never confuse a launch younger than
+          # five minutes with an unavailable DEX sell route or a quote loss.
+          audit=[row for row in rows
+                 if row.get('kind')=='native_first30_five_minute_censor_audit']
+          categories={'study_ended_before_5m_horizon',
+                      '5m_horizon_reached_but_never_requested',
+                      'attempt_started_but_no_proven_response',
+                      'timely_quote_available','timely_route_missing',
+                      'response_late','request_window_missed','invalid_launch_age'}
+          asserted={row['mint']:row for row in audit}
+          assert len(asserted)==len(audit)
+          valid_mints={row['mint'] for row in baselines
+                       if row.get('first30_buy_quote_early_valid') is True}
+          assert set(asserted)==valid_mints
+          five_by_mint={row['mint']:row for row in later}
+          for mint,row in asserted.items():
+              kind=row.get('outcome_category')
+              assert kind in categories
+              assert row.get('missing_is_not_filled_loss') is True
+              assert row['age_at_end_s']>=0
+              if kind=='study_ended_before_5m_horizon':
+                  assert row['age_at_end_s']<300
+                  assert row['followup_scheduled'] is False
+              if kind in ('timely_quote_available','timely_route_missing'):
+                  quote=five_by_mint[mint]
+                  assert quote.get('within_30s_of_5m_deadline') is True
+                  assert quote.get('sell_route_available') is (
+                      kind=='timely_quote_available')
+              if kind=='response_late':
+                  quote=five_by_mint[mint]
+                  assert quote.get('within_30s_of_5m_deadline') is False
           assert all(row.get('orders')==row.get('trades')==0
                      and row.get('no_fill') is True for row in rows)
           print('NATIVE_FIRST30_ROUTE_PROOF',json.dumps({
@@ -108,6 +139,17 @@ jobs:
               'prospectively_selected_mints':len(selected),
               'read_only_quote_baselines':len(baselines),
               'five_minute_sell_quotes_recorded':len(later),
+              'five_minute_censor_audits':len(audit),
+              'right_censored_pre_5m':sum(
+                  row['outcome_category']=='study_ended_before_5m_horizon'
+                  for row in audit),
+              'five_minute_timely_routes':sum(
+                  row['outcome_category']=='timely_quote_available'
+                  for row in audit),
+              'five_minute_timely_missing_routes':sum(
+                  row['outcome_category']=='timely_route_missing'
+                  for row in audit),
+              'five_minute_missing_never_treated_as_loss':True,
               'independent_60_or_120s_horizon_quotes_recorded':len(fixed),
               'horizon_hash_assignment_and_timing_verified':True,
               'fixed_horizon_protocol':'20261029_fixed60_120_v2',
