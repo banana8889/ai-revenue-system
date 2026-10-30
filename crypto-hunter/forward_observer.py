@@ -24,6 +24,35 @@ if "--sensor-quote-timing-selftest" in sys.argv:
     print("SENSOR_QUOTE_RESPONSE_WINDOW_SELFTEST=PASS")
     raise SystemExit(0)
 
+def native_five_minute_censor_class(age_at_end,scheduled,outcome):
+    """Mutually exclusive true horizon status; missing quote is not a loss."""
+    import math
+    try:
+        age=float(age_at_end)
+    except (ValueError,TypeError,OverflowError):
+        return "invalid_launch_age"
+    if not math.isfinite(age):
+        return "invalid_launch_age"
+    if outcome in ("timely_quote_available","timely_route_missing",
+                   "response_late","request_window_missed"):
+        return outcome
+    if age<300:
+        return "study_ended_before_5m_horizon"
+    if scheduled:
+        return "attempt_started_but_no_proven_response"
+    return "5m_horizon_reached_but_never_requested"
+
+if "--native-five-minute-censor-selftest" in sys.argv:
+    assert native_five_minute_censor_class(220,False,None)=="study_ended_before_5m_horizon"
+    assert native_five_minute_censor_class(330,False,None)=="5m_horizon_reached_but_never_requested"
+    assert native_five_minute_censor_class(330,True,None)=="attempt_started_but_no_proven_response"
+    assert native_five_minute_censor_class(330,True,"timely_route_missing")=="timely_route_missing"
+    assert native_five_minute_censor_class(330,True,"timely_quote_available")=="timely_quote_available"
+    assert native_five_minute_censor_class(330,True,"response_late")=="response_late"
+    assert native_five_minute_censor_class(None,False,None)=="invalid_launch_age"
+    print("NATIVE_FIVE_MINUTE_CENSOR_SELFTEST=PASS")
+    raise SystemExit(0)
+
 def native_curve_quote_tier(current_x,highest_previously_requested):
     """Select exactly one newly crossed chain tier; never infer a sell fill."""
     import math
@@ -1424,6 +1453,7 @@ def run_pumpfun_first_seconds_stream():
                         "post30_peak_x":1.0,
                         "drawdown_scheduled":False,
                         "followup_scheduled":False,
+                        "five_minute_outcome":None,
                         # Two equal, fixed prospective arms; timestamp-independent
                         # SHA256 assignment cannot see future outcomes.
                         "fixed_horizon_s":horizon,
@@ -1597,6 +1627,7 @@ def run_pumpfun_first_seconds_stream():
                 at=stamp()
                 delay=time.time()-state["created_at_unix"]
                 if not 300<=delay<=420:
+                    state["five_minute_outcome"]="request_window_missed"
                     native_route_record("native_first30_late_quote_censored",
                         mint=mint,arm=state["arm"],elapsed_seconds=round(delay,2),
                         not_counted_as_an_executable_outcome=True)
@@ -1607,6 +1638,10 @@ def run_pumpfun_first_seconds_stream():
                 response_age=time.time()-state["created_at_unix"]
                 response_timely=five_minute_quote_response_on_time(
                     delay,response_age)
+                state["five_minute_outcome"]=(
+                    "timely_quote_available" if response_timely and q.get("available")
+                    else "timely_route_missing" if response_timely
+                    else "response_late")
                 stats["native_quote_five_minute_checked"]+=1
                 if q.get("available"):
                     stats["native_quote_five_minute_available"]+=1
@@ -2142,6 +2177,23 @@ def run_pumpfun_first_seconds_stream():
                     no_market_execution_asserted=True)
             else:
                 stats["native_quote_tasks_unfinished_at_shutdown"]=0
+        # Keep the full quote-selected cohort denominator. A launch near the
+        # end of this run has not had 5 minutes and is RIGHT-CENSORED, not
+        # an untradeable sell route. Distinguish route missing from no time.
+        end_age_unix=time.time()
+        native_five_minute_cohort_status={}
+        for mint,state in native_route_state.items():
+            age=end_age_unix-state["created_at_unix"]
+            category=native_five_minute_censor_class(
+                age,state["followup_scheduled"],state["five_minute_outcome"])
+            native_five_minute_cohort_status[category]=(
+                native_five_minute_cohort_status.get(category,0)+1)
+            native_route_record("native_first30_five_minute_censor_audit",
+                mint=mint,arm=state["arm"],age_at_end_s=round(age,3),
+                followup_scheduled=bool(state["followup_scheduled"]),
+                outcome_category=category,missing_is_not_filled_loss=True,
+                eligible_early_buy_quote=True)
+        stats["native_5m_cohort_outcome_classes"]=native_five_minute_cohort_status
         stats["native_quote_followups_not_matured_at_end"]=sum(
             not value["followup_scheduled"]
             for value in native_route_state.values())
