@@ -1,18 +1,13 @@
 name: Crypto Hunter Sensor-Only Backtest
 on:
-  push:
-    branches: [main]
-    paths:
-      - crypto-hunter/forward_observer.py
-      - .github/workflows/crypto-hunter-sensor-only-backtest.yml
-  workflow_dispatch:
-  schedule:
-    - cron: '17 */3 * * *'
+  workflow_dispatch: # Preserved manually callable workflow; jobs intentionally disabled
+
 permissions:
   contents: read
   actions: read
 jobs:
   sensor-audit:
+    if: ${{ false }} # Disabled with retired Crypto Hunter
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
