@@ -629,6 +629,201 @@ def run_free_pumpfun_historical_study():
     if launch_count<20000 or landed<100000:
         raise RuntimeError("historical sample data integrity threshold failed")
 
+
+def run_sensor_only_backtest():
+    """Audit frozen onchain sensors against later *quoted*, not filled, outcomes.
+
+    Pre-outcome sensor thresholds are inherited from the existing historical
+    research. No curve peak, future liquidity or future price enters selection.
+    Retrospective strata are exploratory, not an untouched out-of-sample result.
+    """
+    import collections,datetime as dt,json,math,pathlib
+    root=pathlib.Path("evidence")
+    invalid=collections.Counter()
+    def records(name):
+        path=root/name
+        if not path.is_file():
+            return
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record=json.loads(line)
+                    if not isinstance(record,dict):
+                        raise ValueError("not_object")
+                except (ValueError,TypeError,UnicodeError):
+                    invalid[name]+=1
+                    continue
+                yield record
+    # A completely observed first 30s and a partially observed 5-10s
+    # cohort are NEVER merged into a claimed full-coverage cohort.
+    features={}
+    for name,expected in (
+            ("pumpfun_30s_features.jsonl","full"),
+            ("pumpfun_30s_partial10_features.jsonl","partial10")):
+        for row in records(name):
+            mint=row.get("mint")
+            valid=(row.get("full_first_30s_observation") is True
+                   if expected=="full" else
+                   row.get("full_first_30s_observation") is False and
+                   row.get("early_window_coverage")=="first_observed_5_to_10s")
+            if (not isinstance(mint,str) or not valid or
+                    not isinstance(row.get("completion_at"),str)):
+                continue
+            previous=features.get(mint)
+            if previous is None or row["completion_at"]<previous["completion_at"]:
+                features[mint]=row
+    quote_book=collections.defaultdict(dict)
+    allowed={"native_first30_quote_selection",
+             "native_first30_quote_baseline",
+             "native_first30_five_minute_sell_quote",
+             "native_first30_fixed_horizon_sell_quote"}
+    for row in records("pumpfun_native_first30_route_quotes.jsonl"):
+        mint=row.get("mint")
+        kind=row.get("kind")
+        if (isinstance(mint,str) and kind in allowed
+                and kind not in quote_book[mint]):
+            quote_book[mint][kind]=row
+    def sensor_arm(row):
+        try:
+            buyers=int(row["distinct_buyers_first30"])
+            trades=int(row["observed_trades"])
+            buys=int(row["buy_events_first30"])
+            creator_sold=row["creator_sell_observed_before30s"] is True
+            if min(buyers,trades,buys)<0 or buys>trades:
+                return "invalid_sensor"
+            share=buys/trades if trades else 0
+        except (KeyError,TypeError,ValueError):
+            return "invalid_sensor"
+        if not creator_sold and buyers>=8 and trades>=20 and share>=.75:
+            return "strict_flow"
+        if not creator_sold and buyers>=5 and trades>=10 and share>=.65:
+            return "positive_flow"
+        return "control"
+    def fresh_x(row,base,kind):
+        if not isinstance(row,dict) or not row.get("sell_route_available"):
+            return None
+        if row.get("token_raw")!=base.get("token_raw"):
+            return None
+        if kind=="five_minute":
+            seconds=row.get("elapsed_since_launch_seconds")
+            mult=row.get("future_quote_multiple_x")
+            if not isinstance(seconds,(int,float)) or not 300<=seconds<=330:
+                return None
+        else:
+            seconds=row.get("elapsed_at_response_s")
+            h=row.get("fixed_horizon_s")
+            mult=row.get("raw_quote_multiple_x")
+            if not (h in (60,120) and
+                    row.get("within_30s_of_assigned_deadline") is True and
+                    isinstance(seconds,(int,float)) and h<=seconds<=h+30):
+                return None
+        if not isinstance(mult,(int,float)) or not math.isfinite(mult) or mult<=0:
+            return None
+        return float(mult)
+    buckets=collections.defaultdict(lambda:collections.Counter())
+    unmatched=collections.Counter()
+    for mint,history in quote_book.items():
+        signal=history.get("native_first30_quote_selection")
+        base=history.get("native_first30_quote_baseline")
+        feature=features.get(mint)
+        if not (signal and base and feature):
+            unmatched["missing_sensor_or_baseline"]+=1
+            continue
+        if (signal.get("completed_first30_at")!=feature.get("completion_at") or
+                base.get("completed_first30_at")!=feature.get("completion_at") or
+                signal.get("selected_before_future_prices") is not True):
+            unmatched["time_or_provenance_mismatch"]+=1
+            continue
+        arm=sensor_arm(feature)
+        if arm=="invalid_sensor":
+            unmatched["invalid_sensor"]+=1
+            continue
+        split=("oct30" if feature["completion_at"]>="2026-10-30" else "before_oct30")
+        coverage=("full" if feature.get("full_first_30s_observation")
+                  else "partial10")
+        for group in (("all",arm),(split,arm),("coverage_"+coverage,arm)):
+            b=buckets[group]
+            b["selected_before_future_price"]+=1
+            if not (base.get("buy_route_available") is True
+                    and isinstance(base.get("token_raw"),int)
+                    and base["token_raw"]>0):
+                b["buy_route_missing_censored"]+=1
+                continue
+            age=base.get("buy_quote_response_seconds_after_launch")
+            if age is not None and (
+                    not isinstance(age,(int,float)) or not 30<=age<60):
+                b["late_buy_quote_censored"]+=1
+                continue
+            b["eligible_buy_quote"]+=1
+            for label,kind in (("5m","native_first30_five_minute_sell_quote"),
+                               ("60_120s","native_first30_fixed_horizon_sell_quote")):
+                quote=history.get(kind)
+                if quote is None:
+                    b[label+"_not_observed"]+=1
+                    continue
+                b[label+"_attempted"]+=1
+                x=fresh_x(quote,base,"five_minute" if label=="5m" else "fixed")
+                if x is None:
+                    b[label+"_route_missing_or_stale_censored"]+=1
+                    continue
+                b[label+"_fresh_exit_quote"]+=1
+                b[label+"_above_entry_gross"]+=int(x>1)
+                b[label+"_above_2pct_cost_buffer"]+=int(x>1.02)
+                b[label+"_at_least_2x_unfilled"]+=int(x>=2)
+                b[label+"_sum_multiple_scaled_micro"]+=round(x*1000000)
+                b[label+"_below_entry"]+=int(x<1)
+    if not buckets:
+        raise RuntimeError("sensor_only_backtest_no_matched_early_frozen_cohorts")
+    report=[]
+    for (period,arm),value in sorted(buckets.items()):
+        dct=dict(value)
+        n=dct.get("5m_fresh_exit_quote",0)
+        dct["5m_above_2pct_buffer_fraction_of_observed_only"]=(
+            round(dct.get("5m_above_2pct_cost_buffer",0)/n,6) if n else None)
+        dct["5m_mean_quote_multiple_observed_only"]=(
+            round(dct.get("5m_sum_multiple_scaled_micro",0)/(n*1000000),6)
+            if n else None)
+        dct.pop("5m_sum_multiple_scaled_micro",None)
+        h=dct.get("60_120s_fresh_exit_quote",0)
+        dct["60_120s_above_2pct_buffer_fraction_of_observed_only"]=(
+            round(dct.get("60_120s_above_2pct_cost_buffer",0)/h,6) if h else None)
+        dct["60_120s_mean_quote_multiple_observed_only"]=(
+            round(dct.get("60_120s_sum_multiple_scaled_micro",0)/(h*1000000),6)
+            if h else None)
+        dct.pop("60_120s_sum_multiple_scaled_micro",None)
+        report.append({"period":period,"sensor_arm":arm,**dct})
+    result={
+        "version":"sensor_only_quote_audit_v1",
+        "source":"confirmed first30 onchain buyers/trades/buy_share/creator_sells",
+        "features_frozen_before_later_price":True,
+        "strict_rule":"buyers>=8 trades>=20 buyshare>=75pct no creator sells",
+        "positive_rule":"buyers>=5 trades>=10 buyshare>=65pct no creator sells excluding strict",
+        "control_rule":"all other early sensor observations",
+        "no_chart_peaks_used_for_selection":True,
+        "split":"UTC before Oct30 versus Oct30 onward, thresholds unchanged",
+        "outcome":"actual subsequent Jupiter API read-only sell quote for original token_raw",
+        "five_minute_quote_window_seconds":[300,330],
+        "cost_buffer_above_1x_assumed":0.02,
+        "cost_buffer_is_not_execution_cost_or_actual_fees":True,
+        "missing_quotes_are_censored_not_losses":True,
+        "non_random_quote_selection_bias":True,
+        "not_independent_clean_holdout_thresholds_used_prior_to_this_audit":True,
+        "quote_sequences_not_atomic_or_filled":True,
+        "not_verified_profitable_trading":True,
+        "corrupt_source_lines_skipped":dict(invalid),
+        "unmatched_mints":dict(unmatched),
+        "rows":report,"orders":0,"trades":0}
+    root.mkdir(exist_ok=True)
+    (root/"sensor_only_backtest.json").write_text(
+        json.dumps(result,indent=2,allow_nan=False),encoding="utf-8")
+    print("SENSOR_ONLY_BACKTEST",json.dumps(result,allow_nan=False),flush=True)
+    return result
+
+
+if "--sensor-only-backtest" in sys.argv:
+    run_sensor_only_backtest()
+    raise SystemExit(0)
+
 if "--historical-open-sample" in sys.argv:
     run_free_pumpfun_historical_study()
     raise SystemExit(0)
