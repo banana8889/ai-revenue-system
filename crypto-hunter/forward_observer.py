@@ -640,6 +640,7 @@ def run_sensor_only_backtest():
     import collections,datetime as dt,json,math,pathlib
     root=pathlib.Path("evidence")
     invalid=collections.Counter()
+    recovered=collections.Counter()
     def records(name):
         path=root/name
         if not path.is_file():
@@ -651,7 +652,30 @@ def run_sensor_only_backtest():
                     if not isinstance(record,dict):
                         raise ValueError("not_object")
                 except (ValueError,TypeError,UnicodeError):
-                    invalid[name]+=1
+                    # Older cache writers joined JSON objects with literal
+                    # backslash-n separators. Recover only if the whole line
+                    # is invalid and each fragment is independently valid.
+                    separator=chr(92)+"n{"
+                    if separator not in line:
+                        invalid[name]+=1
+                        continue
+                    fragments=line.split(separator)
+                    decoded=[]
+                    for i,fragment in enumerate(fragments):
+                        try:
+                            item=json.loads(("{" if i else "")+fragment)
+                            if not isinstance(item,dict):
+                                raise ValueError("not_object")
+                            decoded.append(item)
+                        except (ValueError,TypeError,UnicodeError):
+                            decoded=[]
+                            break
+                    if not decoded:
+                        invalid[name]+=1
+                        continue
+                    recovered[name]+=len(decoded)
+                    for item in decoded:
+                        yield item
                     continue
                 yield record
     # A completely observed first 30s and a partially observed 5-10s
@@ -811,6 +835,7 @@ def run_sensor_only_backtest():
         "quote_sequences_not_atomic_or_filled":True,
         "not_verified_profitable_trading":True,
         "corrupt_source_lines_skipped":dict(invalid),
+        "historical_joined_json_objects_recovered":dict(recovered),
         "unmatched_mints":dict(unmatched),
         "rows":report,"orders":0,"trades":0}
     root.mkdir(exist_ok=True)
