@@ -1,5 +1,29 @@
 import sys
 
+def five_minute_quote_response_on_time(request_age,response_age):
+    """Fixed five-minute outcome: quote RESPONDED by 330s, not merely requested."""
+    import math
+    if type(request_age) not in (int,float) or type(response_age) not in (int,float):
+        return False
+    if not (math.isfinite(request_age) and math.isfinite(response_age)):
+        return False
+    return 300<=request_age<=response_age<=330
+
+if "--sensor-quote-timing-selftest" in sys.argv:
+    assert five_minute_quote_response_on_time(300.,300.01)
+    assert five_minute_quote_response_on_time(327.,329.99)
+    assert five_minute_quote_response_on_time(300.,330.)
+    assert not five_minute_quote_response_on_time(329.,331.)
+    assert not five_minute_quote_response_on_time(299.,310.)
+    assert not five_minute_quote_response_on_time(320.,319.)
+    assert not five_minute_quote_response_on_time(None,320.)
+    assert not five_minute_quote_response_on_time(320.,None)
+    assert not five_minute_quote_response_on_time(321.,float("nan"))
+    assert not five_minute_quote_response_on_time(321.,float("inf"))
+    assert not five_minute_quote_response_on_time(True,320.)
+    print("SENSOR_QUOTE_RESPONSE_WINDOW_SELFTEST=PASS")
+    raise SystemExit(0)
+
 def native_curve_quote_tier(current_x,highest_previously_requested):
     """Select exactly one newly crossed chain tier; never infer a sell fill."""
     import math
@@ -833,9 +857,11 @@ def run_sensor_only_backtest():
                     response_age=quote.get("elapsed_at_response_s")
                     if not isinstance(response_age,(int,float)):
                         b["5m_response_timestamp_missing"]+=1
-                    elif (math.isfinite(response_age) and
-                          300<=response_age<=330 and
-                          quote.get("within_30s_of_5m_deadline") is True):
+                    elif (five_minute_quote_response_on_time(
+                              quote.get("elapsed_since_launch_seconds"),
+                              response_age) and
+                          quote.get("within_30s_of_5m_deadline") is True and
+                          isinstance(quote.get("quote_response_at"),str)):
                         b["5m_response_timed_exit_quote"]+=1
                         b["5m_response_timed_above_2pct_buffer"]+=int(x>1.02)
                         b["5m_response_timed_below_entry"]+=int(x<1)
@@ -1579,7 +1605,8 @@ def run_pumpfun_first_seconds_stream():
                     native_jupiter_quote,mint,usdc,state["token_raw"])
                 response_at=stamp()
                 response_age=time.time()-state["created_at_unix"]
-                response_timely=300<=response_age<=330
+                response_timely=five_minute_quote_response_on_time(
+                    delay,response_age)
                 stats["native_quote_five_minute_checked"]+=1
                 if q.get("available"):
                     stats["native_quote_five_minute_available"]+=1
