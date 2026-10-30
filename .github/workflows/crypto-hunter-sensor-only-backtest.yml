@@ -1,0 +1,58 @@
+name: Crypto Hunter Sensor-Only Backtest
+on:
+  push:
+    branches: [main]
+    paths:
+      - crypto-hunter/forward_observer.py
+      - .github/workflows/crypto-hunter-sensor-only-backtest.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  sensor-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore latest completed mainnet prospective evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?per_page=20&status=success" --jq '.workflow_runs[] | select(.conclusion == "success") | .id' | head -n1)
+          test -n "$run_id"
+          echo "SENSOR_ONLY_EVIDENCE_RUN=$run_id"
+          mkdir -p evidence
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "crypto-prospective-evidence-$run_id" --dir evidence
+          test -s evidence/pumpfun_30s_features.jsonl
+          test -s evidence/pumpfun_native_first30_route_quotes.jsonl
+      - name: Backtest fixed early onchain sensor cohorts against matched later quotes
+        run: |
+          set -euo pipefail
+          python3 -m py_compile crypto-hunter/forward_observer.py
+          python3 crypto-hunter/forward_observer.py --sensor-only-backtest
+          python3 - <<'PY'
+          import json
+          d=json.load(open('evidence/sensor_only_backtest.json',encoding='utf-8'))
+          assert d['features_frozen_before_later_price'] is True
+          assert d['no_chart_peaks_used_for_selection'] is True
+          assert d['orders']==d['trades']==0
+          assert any(x['period']=='all' and x['sensor_arm']=='strict_flow' for x in d['rows'])
+          assert any(x['period']=='all' and x['sensor_arm']=='positive_flow' for x in d['rows'])
+          assert any(x['period']=='all' and x['sensor_arm']=='control' for x in d['rows'])
+          assert sum(x.get('5m_fresh_exit_quote',0) for x in d['rows'] if x['period']=='all')>0
+          for row in d['rows']:
+              assert row.get('5m_above_2pct_cost_buffer',0)<=row.get('5m_fresh_exit_quote',0)
+              assert row.get('5m_fresh_exit_quote',0)<=row.get('eligible_buy_quote',0)
+          print('SENSOR_ONLY_BACKTEST_VALIDATED')
+          PY
+      - name: Publish reproducible sensor-only findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sensor-only-backtest-${{ github.run_id }}
+          path: evidence/sensor_only_backtest.json
+          if-no-files-found: warn
+          retention-days: 30
