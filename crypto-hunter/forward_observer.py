@@ -765,7 +765,10 @@ def run_sensor_only_backtest():
         split=("oct30" if feature["completion_at"]>="2026-10-30" else "before_oct30")
         coverage=("full" if feature.get("full_first_30s_observation")
                   else "partial10")
-        for group in (("all",arm),(split,arm),("coverage_"+coverage,arm)):
+        periods=[("all",arm),(split,arm),("coverage_"+coverage,arm)]
+        if feature["completion_at"]>="2026-10-30T06:24:00":
+            periods.append(("post_protocol_freeze",arm))
+        for group in periods:
             b=buckets[group]
             b["selected_before_future_price"]+=1
             if not (base.get("buy_route_available") is True
@@ -825,6 +828,9 @@ def run_sensor_only_backtest():
         "control_rule":"all other early sensor observations",
         "no_chart_peaks_used_for_selection":True,
         "split":"UTC before Oct30 versus Oct30 onward, thresholds unchanged",
+        "new_forward_holdout_freeze_utc":"2026-10-30T06:24:00+00:00",
+        "forward_holdout_thresholds_not_reoptimized_after_prior_quote_results":True,
+        "forward_holdout_is_quote_evidence_not_realized_profit":True,
         "outcome":"actual subsequent Jupiter API read-only sell quote for original token_raw",
         "five_minute_quote_window_seconds":[300,330],
         "cost_buffer_above_1x_assumed":0.02,
