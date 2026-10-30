@@ -8,11 +8,15 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '17 */3 * * *'
+  workflow_run:
+    workflows: ['Crypto Hunter Prospective Study']
+    types: [completed]
 permissions:
   contents: read
   actions: read
 jobs:
   sensor-audit:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -23,8 +27,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?per_page=20&status=success" --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id')
-          test -n "$run_id"
+          # A completed study event must use THAT study's artifact.
+          # Never silently substitute another completed run's evidence.
+          run_id="${{ github.event.workflow_run.id }}"
+          if [ -z "$run_id" ]; then
+            run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?per_page=20&status=success" --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id')
+          fi
+          test -n "$run_id" && test "$run_id" != "null"
           echo "SENSOR_ONLY_EVIDENCE_RUN=$run_id"
           mkdir -p evidence
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "crypto-prospective-evidence-$run_id" --dir evidence
@@ -41,6 +50,11 @@ jobs:
           assert d['features_frozen_before_later_price'] is True
           assert d['no_chart_peaks_used_for_selection'] is True
           assert d['orders']==d['trades']==0
+          assert d['strict_5m_gate_requires_response_timestamp_in_300_to_330s'] is True
+          assert d['holdout_decision']['valid_exit_requires_5m_response_time_proof'] is True
+          for arm in d['holdout_decision']['arms'].values():
+              assert arm['response_timed_5m_sell_quotes'] <= arm['fresh_5m_sell_quotes']
+              assert arm['response_timed_winners_above_2pct_buffer'] <= arm['response_timed_5m_sell_quotes']
           assert any(x['period']=='all' and x['sensor_arm']=='strict_flow' for x in d['rows'])
           assert any(x['period']=='all' and x['sensor_arm']=='positive_flow' for x in d['rows'])
           assert any(x['period']=='all' and x['sensor_arm']=='control' for x in d['rows'])
