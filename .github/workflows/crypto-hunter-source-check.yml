@@ -18,6 +18,7 @@ jobs:
         run: |
           python3 -m py_compile crypto-hunter/forward_observer.py
           python3 crypto-hunter/forward_observer.py --native-curve-tier-selftest
+          python3 crypto-hunter/forward_observer.py --sensor-quote-timing-selftest
           python3 - <<'PY'
           from pathlib import Path
           src=Path('crypto-hunter/forward_observer.py').read_text()
