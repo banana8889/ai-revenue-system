@@ -2205,6 +2205,16 @@ def run_pumpfun_first_seconds_stream():
         stats["native_5m_cohort_outcome_classes"]=native_five_minute_cohort_status
         stats["graceful_sigterm_received"]=stop_signal_count
         stats["native_quote_outcomes_audited_before_shutdown"]=len(native_route_state)
+        event("pumpfun_early_sensor_shutdown_receipt",
+              graceful_sigterm_received=stop_signal_count,
+              live_quote_selected=stats["native_quote_selected"],
+              early_buy_quote_valid=stats["native_quote_early_buy_valid"],
+              early_buy_quote_audited=len(native_route_state),
+              five_minute_outcome_classes=native_five_minute_cohort_status,
+              all_early_valid_quotes_classified=(
+                  sum(native_five_minute_cohort_status.values())==
+                  len(native_route_state)),
+              no_trade=True)
         stats["native_quote_followups_not_matured_at_end"]=sum(
             not value["followup_scheduled"]
             for value in native_route_state.values())
