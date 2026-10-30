@@ -1139,7 +1139,7 @@ def run_pumpfun_first_seconds_stream():
     """Real confirmed Pump.fun CREATE events before GeckoTerminal listing.
     Pure observation: never sign, buy, simulate fills, or infer safe liquidity.
     """
-    import asyncio,datetime as dt,hashlib,json,os,time,urllib.request,urllib.error,urllib.parse
+    import asyncio,datetime as dt,hashlib,json,os,time,signal,urllib.request,urllib.error,urllib.parse
     from pathlib import Path
     import websockets
     PUMP_PROGRAM="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
@@ -1246,6 +1246,15 @@ def run_pumpfun_first_seconds_stream():
         return {"_missing_reason":"program_create_accounts_not_parsed"}
     async def main():
         until=time.monotonic()+DURATION
+        stop_signal_count=0
+        def graceful_sigterm(signum,frame):
+            # The prospective GitHub runner stops its child via SIGTERM.
+            # End intake without skipping cohort censorship + quote ledger.
+            # The async websocket receive loop has a bounded 2s timeout.
+            nonlocal until,stop_signal_count
+            stop_signal_count+=1
+            until=time.monotonic()-0.001
+        signal.signal(signal.SIGTERM,graceful_sigterm)
         seen_signatures=set()
         watched={}
         forward_outcomes={}
@@ -2194,6 +2203,8 @@ def run_pumpfun_first_seconds_stream():
                 outcome_category=category,missing_is_not_filled_loss=True,
                 eligible_early_buy_quote=True)
         stats["native_5m_cohort_outcome_classes"]=native_five_minute_cohort_status
+        stats["graceful_sigterm_received"]=stop_signal_count
+        stats["native_quote_outcomes_audited_before_shutdown"]=len(native_route_state)
         stats["native_quote_followups_not_matured_at_end"]=sum(
             not value["followup_scheduled"]
             for value in native_route_state.values())
