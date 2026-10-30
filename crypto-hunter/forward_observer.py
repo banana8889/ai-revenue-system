@@ -826,6 +826,22 @@ def run_sensor_only_backtest():
                 if x is None:
                     b[label+"_route_missing_or_stale_censored"]+=1
                     continue
+                # A request started before 330s might return after 330s.
+                # Keep older request-time-only evidence as exploratory,
+                # not as a response-timed, actionable outcome.
+                if label=="5m":
+                    response_age=quote.get("elapsed_at_response_s")
+                    if not isinstance(response_age,(int,float)):
+                        b["5m_response_timestamp_missing"]+=1
+                    elif (math.isfinite(response_age) and
+                          300<=response_age<=330 and
+                          quote.get("within_30s_of_5m_deadline") is True):
+                        b["5m_response_timed_exit_quote"]+=1
+                        b["5m_response_timed_above_2pct_buffer"]+=int(x>1.02)
+                        b["5m_response_timed_below_entry"]+=int(x<1)
+                        b["5m_response_timed_sum_multiple_micro"]+=round(x*1000000)
+                    else:
+                        b["5m_response_timing_outside_window"]+=1
                 b[label+"_fresh_exit_quote"]+=1
                 b[label+"_above_entry_gross"]+=int(x>1)
                 b[label+"_above_2pct_cost_buffer"]+=int(x>1.02)
@@ -844,6 +860,14 @@ def run_sensor_only_backtest():
             round(dct.get("5m_sum_multiple_scaled_micro",0)/(n*1000000),6)
             if n else None)
         dct.pop("5m_sum_multiple_scaled_micro",None)
+        verified=dct.get("5m_response_timed_exit_quote",0)
+        dct["5m_response_timed_fraction_above_2pct"]=(
+            round(dct.get("5m_response_timed_above_2pct_buffer",0)/verified,6)
+            if verified else None)
+        dct["5m_response_timed_avg_quote_multiple"]=(
+            round(dct.get("5m_response_timed_sum_multiple_micro",0)/
+                  (verified*1000000),6) if verified else None)
+        dct.pop("5m_response_timed_sum_multiple_micro",None)
         h=dct.get("60_120s_fresh_exit_quote",0)
         dct["60_120s_above_2pct_buffer_fraction_of_observed_only"]=(
             round(dct.get("60_120s_above_2pct_cost_buffer",0)/h,6) if h else None)
@@ -872,12 +896,20 @@ def run_sensor_only_backtest():
         signals=dct.get("selected_before_future_price",0)
         fresh=dct.get("5m_fresh_exit_quote",0)
         wins=dct.get("5m_above_2pct_cost_buffer",0)
+        response_verified=dct.get("5m_response_timed_exit_quote",0)
+        verified_wins=dct.get("5m_response_timed_above_2pct_buffer",0)
         not_observed=dct.get("5m_not_observed",0)
         unavailable=dct.get("5m_route_missing_or_stale_censored",0)
         cohort_gate[arm]={
             "frozen_sensor_signals":signals,
             "fresh_5m_sell_quotes":fresh,
             "quoted_winners_above_2pct_cost_buffer":wins,
+            "response_timed_5m_sell_quotes":response_verified,
+            "response_timed_winners_above_2pct_buffer":verified_wins,
+            "response_timed_fraction_of_observed":round(
+                response_verified/fresh,6) if fresh else None,
+            "response_timed_wilson95_winner_fraction":
+                wilson_bounds(verified_wins,response_verified),
             "missing_or_unavailable_5m_sell_quotes":not_observed+unavailable,
             "raw_quote_fraction_of_all_signals":round(fresh/signals,6)
                  if signals else None,
@@ -889,12 +921,13 @@ def run_sensor_only_backtest():
     # Predeclared *minimum evidence* to reconsider a hypothesis, not an
     # automatic trading threshold, and not a guarantee of significance.
     strict_enough=(strong["frozen_sensor_signals"]>=100 and
-                   strong["fresh_5m_sell_quotes"]>=80)
+                   strong["response_timed_5m_sell_quotes"]>=80)
     holdout_decision={
         "selection_frozen_at_utc":"2026-10-30T06:24:00Z",
         "sensor_rules_not_retuned_after_freeze":True,
         "research_minimum_strict_signals":100,
         "research_minimum_strict_valid_exit_quotes":80,
+        "valid_exit_requires_5m_response_time_proof":True,
         "strict_sample_threshold_met":strict_enough,
         "decision":"QUOTE_ONLY_EVIDENCE_READY_FOR_SKEPTICAL_REVIEW"
              if strict_enough else "INSUFFICIENT_STRICT_SENSOR_SAMPLE",
@@ -904,8 +937,10 @@ def run_sensor_only_backtest():
         "no_realized_profit_claim":True,
         "arms":cohort_gate}
     result={
-        "version":"sensor_only_quote_audit_v2",
+        "version":"sensor_only_quote_audit_v3",
         "missing_early_entry_quote_timestamps_are_censored":True,
+        "historical_5m_request_timed_quotes_exploratory_only":True,
+        "strict_5m_gate_requires_response_timestamp_in_300_to_330s":True,
         "early_buy_must_be_verified_within_launch_seconds_30_to_60":True,
         "source":"confirmed first30 onchain buyers/trades/buy_share/creator_sells",
         "features_frozen_before_later_price":True,
@@ -1195,6 +1230,8 @@ def run_pumpfun_first_seconds_stream():
         stats["native_quote_roundtrip_available"]=0
         stats["native_quote_five_minute_checked"]=0
         stats["native_quote_five_minute_available"]=0
+        stats["native_quote_five_minute_response_timed"]=0
+        stats["native_quote_five_minute_response_late"]=0
         stats["native_quote_fixed_horizon_selected"]=0
         stats["native_quote_fixed_horizon_attempted"]=0
         stats["native_quote_fixed_horizon_available"]=0
@@ -1540,11 +1577,21 @@ def run_pumpfun_first_seconds_stream():
                     return
                 q=await asyncio.to_thread(
                     native_jupiter_quote,mint,usdc,state["token_raw"])
+                response_at=stamp()
+                response_age=time.time()-state["created_at_unix"]
+                response_timely=300<=response_age<=330
                 stats["native_quote_five_minute_checked"]+=1
                 if q.get("available"):
                     stats["native_quote_five_minute_available"]+=1
+                    if response_timely:
+                        stats["native_quote_five_minute_response_timed"]+=1
+                    else:
+                        stats["native_quote_five_minute_response_late"]+=1
                 native_route_record("native_first30_five_minute_sell_quote",
                     mint=mint,arm=state["arm"],quote_started_at=at,
+                    quote_response_at=response_at,
+                    elapsed_at_response_s=round(response_age,3),
+                    within_30s_of_5m_deadline=response_timely,
                     initial_quote_started_at=state["initial_quote_started_at"],
                     elapsed_since_launch_seconds=round(delay,2),
                     token_raw=state["token_raw"],
