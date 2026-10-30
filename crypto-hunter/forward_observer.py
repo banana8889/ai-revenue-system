@@ -805,9 +805,14 @@ def run_sensor_only_backtest():
                 b["buy_route_missing_censored"]+=1
                 continue
             age=base.get("buy_quote_response_seconds_after_launch")
-            if age is not None and (
-                    not isinstance(age,(int,float)) or not 30<=age<60):
-                b["late_buy_quote_censored"]+=1
+            # Prior protocol versions omitted the buy response timestamp.
+            # Missing age is NOT evidence of a first30 entry; never invent it.
+            if not isinstance(age,(int,float)) or not math.isfinite(age):
+                b["entry_quote_timing_unverified_censored"]+=1
+                continue
+            if not (30<=age<60 and
+                    base.get("first30_buy_quote_early_valid") is True):
+                b["late_or_unverified_early_entry_censored"]+=1
                 continue
             b["eligible_buy_quote"]+=1
             for label,kind in (("5m","native_first30_five_minute_sell_quote"),
@@ -899,7 +904,9 @@ def run_sensor_only_backtest():
         "no_realized_profit_claim":True,
         "arms":cohort_gate}
     result={
-        "version":"sensor_only_quote_audit_v1",
+        "version":"sensor_only_quote_audit_v2",
+        "missing_early_entry_quote_timestamps_are_censored":True,
+        "early_buy_must_be_verified_within_launch_seconds_30_to_60":True,
         "source":"confirmed first30 onchain buyers/trades/buy_share/creator_sells",
         "features_frozen_before_later_price":True,
         "strict_rule":"buyers>=8 trades>=20 buyshare>=75pct no creator sells",
