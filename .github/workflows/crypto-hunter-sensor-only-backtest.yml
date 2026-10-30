@@ -8,15 +8,11 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '17 */3 * * *'
-  workflow_run:
-    workflows: ['Crypto Hunter Prospective Study']
-    types: [completed]
 permissions:
   contents: read
   actions: read
 jobs:
   sensor-audit:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -27,12 +23,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # A completed study event must use THAT study's artifact.
-          # Never silently substitute another completed run's evidence.
-          run_id="${{ github.event.workflow_run.id }}"
-          if [ -z "$run_id" ]; then
-            run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?per_page=20&status=success" --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id')
-          fi
+          # The study's own workflow now audits the exact same session.
+          # This independent scheduled check verifies the latest completed
+          # study checkpoint, with its provenance reported explicitly.
+          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/crypto-hunter-prospective-study.yml/runs?per_page=20&status=success" --jq '[.workflow_runs[] | select(.conclusion == "success")][0].id')
           test -n "$run_id" && test "$run_id" != "null"
           echo "SENSOR_ONLY_EVIDENCE_RUN=$run_id"
           mkdir -p evidence
