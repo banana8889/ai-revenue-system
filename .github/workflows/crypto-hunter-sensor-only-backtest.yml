@@ -6,6 +6,8 @@ on:
       - crypto-hunter/forward_observer.py
       - .github/workflows/crypto-hunter-sensor-only-backtest.yml
   workflow_dispatch:
+  schedule:
+    - cron: '17 */3 * * *'
 permissions:
   contents: read
   actions: read
