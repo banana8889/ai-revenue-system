@@ -1,22 +1,7 @@
 name: Crypto Hunter Prospective Study
 on:
-  push:
-    # Explicit workflow-file change starts a fresh latest-code research run.
-    # Source commits alone cannot preempt or flood a 10-cycle study.
-    branches: [main]
-    paths:
-      - .github/workflows/crypto-hunter-prospective-study.yml
-  workflow_dispatch:
-    inputs:
-      chain:
-        description: "Opt in to unattended self-dispatch research cycles"
-        required: false
-        type: boolean
-        default: false
-  schedule:
-    - cron: '3,33 * * * *'
-  # No scanner source push trigger; run on explicit workflow update,
-  # regular schedule or self-dispatched continuation.
+  workflow_dispatch: # Preserved manually callable workflow; jobs intentionally disabled
+
 permissions:
   contents: read
   actions: write
@@ -25,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   observe:
+    if: ${{ false }} # Retired by user's final decision, 2026-10-30
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
