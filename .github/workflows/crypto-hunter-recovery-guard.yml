@@ -1,17 +1,13 @@
 name: Crypto Hunter Recovery Guard
 on:
-  workflow_run:
-    workflows: ["Crypto Hunter Prospective Study"]
-    types: [completed]
-  push:
-    branches: [main]
-    paths: [.github/workflows/crypto-hunter-recovery-guard.yml]
+  workflow_dispatch: # Preserved manually callable workflow; jobs intentionally disabled
+
 permissions:
   contents: read
   actions: write
 jobs:
   validate:
-    if: github.event_name == 'push'
+    if: ${{ false }} # Disabled with retired Crypto Hunter
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -20,7 +16,7 @@ jobs:
           echo "Recovery will occur only for failed workflow_dispatch research events."
           echo "No wallet keys, purchase orders, or auto-trades."
   recover:
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.conclusion != 'success'
+    if: ${{ false }} # Disabled with retired Crypto Hunter
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
