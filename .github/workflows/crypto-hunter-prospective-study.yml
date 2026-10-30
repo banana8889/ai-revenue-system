@@ -60,6 +60,13 @@ jobs:
           key: crypto-pumpfun-first30-features-${{ github.run_id }}
           restore-keys: |
             crypto-pumpfun-first30-features-
+      - name: Restore partial-coverage 5-to-10s first30 sensor observations
+        uses: actions/cache/restore@v4
+        with:
+          path: evidence/pumpfun_30s_partial10_features.jsonl
+          key: crypto-pumpfun-first30-partial10-${{ github.run_id }}
+          restore-keys: |
+            crypto-pumpfun-first30-partial10-
       - name: Restore future five-minute outcomes (only confirmed, complete cohorts)
         uses: actions/cache/restore@v4
         with:
@@ -332,6 +339,12 @@ jobs:
         with:
           path: evidence/pumpfun_30s_features.jsonl
           key: crypto-pumpfun-first30-features-${{ github.run_id }}
+      - name: Preserve partial-coverage 5-to-10s sensor features between cycles
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: evidence/pumpfun_30s_partial10_features.jsonl
+          key: crypto-pumpfun-first30-partial10-${{ github.run_id }}
       - name: Save native first30 exact-token quote and five-minute route history
         if: always()
         uses: actions/cache/save@v4
